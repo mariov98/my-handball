@@ -20,6 +20,8 @@ const COLOR_PASSIVE := Color(1.0, 0.72, 0.45, 1.0)
 @onready var info_label: Label = $Root/InfoLabel
 @onready var aim_label: Label = $Root/AimLabel
 @onready var help_label: Label = $Root/HelpLabel
+@onready var shot_label: Label = $Root/ShotLabel
+@onready var power_bar: ProgressBar = $Root/PowerBar
 
 var _steps_pulse: Tween
 
@@ -29,7 +31,12 @@ func _ready() -> void:
 	banner_label.visible = false
 	steps_label.visible = false
 	rules_label.text = ""
-	help_label.text = "WASD/stick camera-relative · Space/A jump · LMB/RT/E shoot · Q/Tab/bumpers switch · T/Y aim mode"
+	if shot_label:
+		shot_label.visible = false
+	if power_bar:
+		power_bar.visible = false
+		power_bar.value = 0.0
+	help_label.text = "WASD move · Space jump · hold LMB/E/RT power · F/LT lob · C/Ctrl/B dive (GK) · Q switch · T aim"
 
 
 func set_score(home: int, away: int) -> void:
@@ -53,6 +60,40 @@ func set_controlled(text: String) -> void:
 
 func set_aim_mode(text: String) -> void:
 	aim_label.text = text
+
+
+## Phase 3 power / lob / jump-shot readout. Hidden when idle to avoid clutter.
+func set_shot_status(charge: float, lob: bool, jump_text: String, visible_now: bool) -> void:
+	if power_bar == null or shot_label == null:
+		return
+	if not visible_now:
+		power_bar.visible = false
+		shot_label.visible = false
+		return
+	var charging := charge > 0.02
+	power_bar.visible = charging
+	if charging:
+		power_bar.value = clampf(charge, 0.0, 1.0) * 100.0
+		if charge >= 0.98:
+			power_bar.modulate = Color(1.0, 0.55, 0.35, 1.0)
+		elif lob:
+			power_bar.modulate = Color(0.55, 0.85, 1.0, 1.0)
+		else:
+			power_bar.modulate = Color(1.0, 0.92, 0.45, 1.0)
+	var bits: PackedStringArray = []
+	if charging:
+		bits.append("LOB" if lob else "FLAT")
+		bits.append("%d%%" % int(round(clampf(charge, 0.0, 1.0) * 100.0)))
+	if not jump_text.is_empty():
+		bits.append(jump_text)
+	shot_label.visible = not bits.is_empty()
+	shot_label.text = " · ".join(bits)
+	if jump_text.contains("sweet"):
+		shot_label.add_theme_color_override("font_color", Color(0.55, 1.0, 0.65, 1.0))
+	elif lob:
+		shot_label.add_theme_color_override("font_color", Color(0.65, 0.88, 1.0, 1.0))
+	else:
+		shot_label.add_theme_color_override("font_color", Color(1.0, 0.95, 0.7, 1.0))
 
 
 ## Glanceable steps readout. `pulse` bumps scale when a new plant lands.

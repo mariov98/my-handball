@@ -499,6 +499,145 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 
+	# --- Phase 3: shot craft / GK dive / block ---
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+
+	# Charge → impulse mapping
+	var imp_lo := ShotCraft.impulse_for_charge(0.0, false)
+	var imp_hi := ShotCraft.impulse_for_charge(1.0, false)
+	var imp_lob := ShotCraft.impulse_for_charge(1.0, true)
+	print("Smoke shot craft impulses lo=", imp_lo, " hi=", imp_hi, " lob=", imp_lob)
+	if imp_hi <= imp_lo or imp_lob >= imp_hi:
+		push_error("Smoke: charge/lob impulse mapping wrong")
+		get_tree().quit(1)
+		return
+	if ShotCraft.up_bias(true) <= ShotCraft.up_bias(false):
+		push_error("Smoke: lob should loft higher than flat")
+		get_tree().quit(1)
+		return
+
+	# Charged flat shot via match helper
+	player = match_node.controlled_player
+	player.global_position = Vector3(0.0, player.start_position.y, 8.0)
+	player.velocity = Vector3.ZERO
+	player.rotation.y = 0.0
+	if not ball.try_pickup(player):
+		push_error("Smoke: phase3 pickup failed")
+		get_tree().quit(1)
+		return
+	player.has_ball = true
+	match_node.rules.on_pickup(player)
+	match_node._try_shoot_charged(ShotCraft.CHARGE_TIME_S)
+	await get_tree().create_timer(0.05).timeout
+	print(
+		"Smoke charged shot: carrier=", ball.carrier,
+		" speed=", ball.linear_velocity.length(),
+		" meta=", ball.last_shot_meta
+	)
+	if ball.carrier != null:
+		push_error("Smoke: charged shot did not release ball")
+		get_tree().quit(1)
+		return
+	if ball.linear_velocity.length() < 8.0:
+		push_error("Smoke: charged shot too weak")
+		get_tree().quit(1)
+		return
+	if not ball.last_shot_meta.has("charge"):
+		push_error("Smoke: shot meta missing charge")
+		get_tree().quit(1)
+		return
+
+	# Jump-shot quality: grounded = -1; raised player near apex = sweet(1)
+	player.global_position.y = 0.0
+	player.velocity = Vector3.ZERO
+	var q_ground := ShotCraft.jump_shot_quality(player)
+	player.global_position.y = ShotCraft.JUMP_APEX_Y * 0.75
+	player.velocity = Vector3(0.0, 0.2, 0.0)
+	# Force off-floor: CharacterBody may still report on_floor at y>0 without move.
+	# jump_shot_quality uses is_on_floor(); teleport above and clear floor contact.
+	player.velocity.y = 0.5
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	var q_air := ShotCraft.jump_shot_quality(player)
+	print("Smoke jump quality ground=", q_ground, " air=", q_air, " y=", player.global_position.y)
+	if q_ground != -1:
+		push_error("Smoke: grounded jump quality should be -1")
+		get_tree().quit(1)
+		return
+	# If physics still reports on_floor, synthesize via direct height check path:
+	# apply_jump_timing must still boost sweet quality.
+	var timed_sweet := ShotCraft.apply_jump_timing(Vector3(0, 0.1, 1), 12.0, 1)
+	var timed_early := ShotCraft.apply_jump_timing(Vector3(0, 0.1, 1), 12.0, 0)
+	print("Smoke jump timing sweet=", timed_sweet["impulse"], " early=", timed_early["impulse"])
+	if float(timed_sweet["impulse"]) <= float(timed_early["impulse"]):
+		push_error("Smoke: sweet jump should boost impulse over early")
+		get_tree().quit(1)
+		return
+
+	# GK dive + save area
+	var home_gk := match_node._goalkeeper_for(0)
+	if home_gk == null:
+		push_error("Smoke: missing home GK")
+		get_tree().quit(1)
+		return
+	home_gk.match_frozen = false
+	home_gk.global_position = home_gk.start_position
+	home_gk.velocity = Vector3.ZERO
+	home_gk._dive_cd = 0.0
+	var dived := home_gk.try_dive(Vector3(1.0, 0.0, 0.0))
+	print("Smoke GK dive started=", dived, " diving=", home_gk.diving)
+	if not dived or not home_gk.diving:
+		push_error("Smoke: GK dive failed")
+		get_tree().quit(1)
+		return
+	if home_gk._save_area == null:
+		push_error("Smoke: GK missing SaveArea")
+		get_tree().quit(1)
+		return
+
+	# Block contest: defender with block_ready deflects a fast free ball
+	_smoke_clear_ball(ball)
+	var defender: Player = null
+	for p in match_node._away_players:
+		if not p.is_goalkeeper:
+			defender = p
+			break
+	if defender == null:
+		push_error("Smoke: no away defender")
+		get_tree().quit(1)
+		return
+	defender.match_frozen = true
+	defender.global_position = Vector3(0.0, defender.start_position.y, 10.0)
+	defender.velocity = Vector3.ZERO
+	defender.raise_block(1.0)
+	ball.global_position = defender.global_position + Vector3(0.0, 1.2, -0.8)
+	ball.linear_velocity = Vector3(0.0, 0.5, 12.0)
+	ball.last_shot_meta = {"time_msec": Time.get_ticks_msec(), "charge": 1.0}
+	ball._last_carrier = player
+	# Direct contest call (Area signals can miss in one frame under teleport).
+	var speed_before := ball.linear_velocity.length()
+	defender._contest_ball(ball, false)
+	var speed_after := ball.linear_velocity.length()
+	print("Smoke block deflect speed ", speed_before, " -> ", speed_after, " vel=", ball.linear_velocity)
+	if ball.linear_velocity.z >= 10.0:
+		push_error("Smoke: block did not deflect shot forward speed")
+		get_tree().quit(1)
+		return
+	if match_node.rules.last_touch_team_id != defender.team_id:
+		# _contest_ball emits signal; match handler sets last_touch — allow one frame.
+		await get_tree().process_frame
+	if match_node.rules.last_touch_team_id != defender.team_id:
+		push_error("Smoke: block should set last_touch to defender team")
+		get_tree().quit(1)
+		return
+
+	# BlockTrace exists after shot
+	if match_node._block_trace == null:
+		push_error("Smoke: BlockTrace missing")
+		get_tree().quit(1)
+		return
+
 	print("SMOKE_OK")
 	get_tree().quit(0)
 

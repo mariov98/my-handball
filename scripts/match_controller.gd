@@ -1,16 +1,18 @@
 extends Node3D
 class_name MatchController
 
-## Routes input, possession, team switch, scoring, clock, kickoff, AI, and Phase 2 rules.
+## Routes input, possession, team switch, scoring, clock, kickoff, AI, Phase 2 rules,
+## and Phase 3 shot craft / GK dive / block traces.
 
 enum AimMode { FACE, MOUSE_COURT }
 enum MatchState { PRE_KICKOFF, LIVE, GOAL_PAUSE, PERIOD_BREAK, MATCH_OVER, RULE_RESTART }
 
-const SHOOT_IMPULSE := 16.0
+const SHOOT_IMPULSE := 16.0 ## Fallback / legacy tap strength (charge system preferred).
 const GOAL_PAUSE_DELAY := 1.6
 const KICKOFF_FREEZE := 0.85
 const RESTART_FREEZE := 0.75
 const PERIOD_BREAK_DELAY := 2.2
+const BLOCK_TRACE_LEN := 9.5
 
 @export var home_team_path: NodePath
 @export var away_team_path: NodePath
@@ -38,6 +40,10 @@ var _pending_kickoff_team: int = 0
 var rules: HandballRules = HandballRules.new()
 ## Set when rules emit step_taken so the HUD can pulse once.
 var _steps_hud_pulse: bool = false
+## Phase 3 charge-to-shoot.
+var _charging: bool = false
+var _charge_held_s: float = 0.0
+var _block_trace: BlockTrace
 
 @onready var _home_root: Node = get_node(home_team_path)
 @onready var _away_root: Node = get_node(away_team_path)
@@ -53,10 +59,11 @@ func _ready() -> void:
 	_wire_goals()
 	_wire_rules()
 	_configure_ai()
+	_setup_block_trace()
 	camera_rig.setup(ball, true)
 	_refresh_hud()
 	print(
-		"MyHandball Phase 2 rules ready. Period=%ds x%d. Steps/passive/OOB/6m + throw-in/goal throw."
+		"MyHandball Phase 3 GK+shot craft ready. Period=%ds x%d. Power/lob/jump timing + GK dive + blocks."
 		% [int(period_length_seconds), periods_total]
 	)
 	var user_args := OS.get_cmdline_user_args()
@@ -79,6 +86,13 @@ func _ready() -> void:
 		var sn_steps := Node.new()
 		sn_steps.set_script(steps_shot)
 		add_child(sn_steps)
+		return
+	if "--screenshot-phase3" in user_args:
+		await _run_kickoff(0, "Kickoff")
+		var p3_shot := load("res://scripts/screenshot_phase3.gd") as GDScript
+		var sn_p3 := Node.new()
+		sn_p3.set_script(p3_shot)
+		add_child(sn_p3)
 		return
 	if "--screenshot" in user_args:
 		# Kickoff first so the HUD clock/score are on screen, then capture.
@@ -150,6 +164,15 @@ func _wire_rules() -> void:
 	rules.rule_warning.connect(_on_rule_warning)
 	rules.rule_violation.connect(_on_rule_violation)
 	rules.step_taken.connect(_on_step_taken)
+	for p in _all_players():
+		if not p.block_attempted.is_connected(_on_block_attempted):
+			p.block_attempted.connect(_on_block_attempted)
+
+
+func _setup_block_trace() -> void:
+	_block_trace = BlockTrace.new()
+	_block_trace.name = "BlockTrace"
+	add_child(_block_trace)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -166,23 +189,46 @@ func _unhandled_input(event: InputEvent) -> void:
 			_cycle_teammate()
 		get_viewport().set_input_as_handled()
 		return
+	# Phase 3: hold shoot to charge, release to fire. Tap still works (min power).
 	if event.is_action_pressed("shoot") and match_state == MatchState.LIVE:
-		_try_shoot()
+		if controlled_player and controlled_player.has_ball:
+			_charging = true
+			_charge_held_s = 0.0
+			get_viewport().set_input_as_handled()
+		return
+	if event.is_action_released("shoot") and _charging:
+		_release_charged_shot()
 		get_viewport().set_input_as_handled()
 
 
 func _physics_process(delta: float) -> void:
 	_update_camera_attack_side()
+	_update_shot_charge(delta)
 	if match_state != MatchState.LIVE:
 		return
 	clock_remaining = maxf(0.0, clock_remaining - delta)
 	if hud and hud.has_method("set_clock"):
 		hud.set_clock(clock_remaining)
 	_update_rules_hud()
+	_update_shot_hud()
 	if rules.tick(delta, ball, _all_players()):
 		return
 	if clock_remaining <= 0.0:
 		_on_period_expired()
+
+
+func _update_shot_charge(delta: float) -> void:
+	if not _charging:
+		return
+	if match_state != MatchState.LIVE or controlled_player == null or not controlled_player.has_ball:
+		_cancel_charge()
+		return
+	# Keep charging while the shoot action is held (mouse / E / RT).
+	if Input.is_action_pressed("shoot"):
+		_charge_held_s += delta
+	else:
+		# Released outside _unhandled_input (e.g. focus loss) — still fire.
+		_release_charged_shot()
 
 
 func _all_players() -> Array[Player]:
@@ -242,26 +288,147 @@ func _cycle_teammate() -> void:
 		_set_controlled(best)
 
 
-func _try_shoot() -> void:
-	if controlled_player == null or not controlled_player.has_ball:
+func _cancel_charge() -> void:
+	_charging = false
+	_charge_held_s = 0.0
+	if hud and hud.has_method("set_shot_status"):
+		hud.set_shot_status(0.0, false, "", false)
+
+
+func _release_charged_shot() -> void:
+	if not _charging:
 		return
-	var aim := _compute_aim()
-	controlled_player.try_shoot(aim, SHOOT_IMPULSE, ball)
+	var held := _charge_held_s
+	_charging = false
+	_charge_held_s = 0.0
+	_try_shoot_charged(held)
 
 
-func _compute_aim() -> Vector3:
+func _try_shoot_charged(held_s: float) -> void:
+	if controlled_player == null or not controlled_player.has_ball:
+		if hud and hud.has_method("set_shot_status"):
+			hud.set_shot_status(0.0, false, "", false)
+		return
+	var charge := ShotCraft.charge_01(held_s)
+	var lob := Input.is_action_pressed("lob")
+	var aim := _compute_aim(lob)
+	var jump_q := ShotCraft.jump_shot_quality(controlled_player)
+	var impulse := ShotCraft.impulse_for_charge(charge, lob)
+	var timed := ShotCraft.apply_jump_timing(aim, impulse, jump_q)
+	aim = timed["aim"]
+	impulse = timed["impulse"]
+	var up := ShotCraft.up_bias(lob)
+	# Jump shots naturally loft a touch more.
+	if jump_q >= 0:
+		up += 0.08 if jump_q == 1 else 0.04
+	var meta := {
+		"charge": charge,
+		"lob": lob,
+		"jump_quality": jump_q,
+		"impulse": impulse,
+	}
+	var from := controlled_player.global_position + Vector3(0, 1.2, 0)
+	if controlled_player.try_shoot(aim, impulse, ball, up, meta):
+		_spawn_shot_trace(from, aim, lob, jump_q)
+		# Nearby defending outfield raise hands for the contest window.
+		_nudge_defenders_to_block(controlled_player.team_id, from, aim)
+	if hud and hud.has_method("set_shot_status"):
+		hud.set_shot_status(0.0, false, "", false)
+
+
+## Instant tap path used by smoke / scripts (full mid charge, flat).
+func _try_shoot() -> void:
+	_try_shoot_charged(ShotCraft.CHARGE_TIME_S * 0.55)
+
+
+func _compute_aim(lob: bool = false) -> Vector3:
 	if aim_mode == AimMode.MOUSE_COURT:
 		var hit: Variant = _mouse_on_court()
 		if typeof(hit) == TYPE_VECTOR3:
 			var target: Vector3 = hit
+			# Lob aims a bit above the court plane hit so mouse mode can float it.
+			if lob:
+				target.y = 2.4
 			var from: Vector3 = controlled_player.global_position + Vector3(0, 1.2, 0)
 			var dir: Vector3 = target - from
 			if dir.length_squared() > 0.01:
 				return dir.normalized()
 	# Face-direction fallback / default
 	var face := controlled_player.face_direction()
-	face.y = 0.15
+	face.y = 0.42 if lob else 0.12
 	return face.normalized()
+
+
+func _spawn_shot_trace(from: Vector3, aim: Vector3, lob: bool, jump_q: int) -> void:
+	if _block_trace == null:
+		return
+	var contested := _shot_path_contested(from, aim, controlled_player.team_id)
+	var len := BLOCK_TRACE_LEN * (0.85 if lob else 1.0)
+	if jump_q == 1:
+		len *= 1.05
+	_block_trace.show_shot(from, aim, len, contested)
+
+
+func _shot_path_contested(from: Vector3, aim: Vector3, shooter_team: int) -> bool:
+	var dir := aim.normalized()
+	for p in _all_players():
+		if p.team_id == shooter_team or p.is_goalkeeper:
+			continue
+		var to_p: Vector3 = p.global_position + Vector3(0, 1.2, 0) - from
+		var along := to_p.dot(dir)
+		if along < 0.4 or along > BLOCK_TRACE_LEN:
+			continue
+		var closest := from + dir * along
+		if closest.distance_to(p.global_position + Vector3(0, 1.2, 0)) < 1.35:
+			return true
+	# GK in the lane also counts as contested.
+	var gk := _goalkeeper_for(1 - shooter_team)
+	if gk:
+		var to_gk: Vector3 = gk.global_position + Vector3(0, 1.0, 0) - from
+		var along_g := to_gk.dot(dir)
+		if along_g > 0.5 and along_g < BLOCK_TRACE_LEN + 4.0:
+			var closest_g := from + dir * along_g
+			if closest_g.distance_to(gk.global_position + Vector3(0, 1.0, 0)) < 2.2:
+				return true
+	return false
+
+
+func _nudge_defenders_to_block(shooter_team: int, from: Vector3, aim: Vector3) -> void:
+	var dir := aim.normalized()
+	for p in _all_players():
+		if p.team_id == shooter_team or p.is_goalkeeper:
+			continue
+		var to_p: Vector3 = p.global_position + Vector3(0, 1.2, 0) - from
+		var along := to_p.dot(dir)
+		if along < 0.5 or along > 8.0:
+			continue
+		var closest := from + dir * along
+		if closest.distance_to(p.global_position + Vector3(0, 1.2, 0)) < 1.6:
+			p.raise_block(0.55)
+
+
+func _on_block_attempted(blocker: Player, ball_ref: Ball, success: bool) -> void:
+	if blocker:
+		rules.last_touch_team_id = blocker.team_id
+	if not success or _block_trace == null or ball_ref == null:
+		return
+	var n := ball_ref.linear_velocity
+	if n.length_squared() < 0.01:
+		n = Vector3.UP
+	_block_trace.show_block_hit(ball_ref.global_position, n)
+
+
+func _update_shot_hud() -> void:
+	if hud == null or not hud.has_method("set_shot_status"):
+		return
+	if match_state != MatchState.LIVE or controlled_player == null or not controlled_player.has_ball:
+		hud.set_shot_status(0.0, false, "", false)
+		return
+	var charge := ShotCraft.charge_01(_charge_held_s) if _charging else 0.0
+	var lob := _charging and Input.is_action_pressed("lob")
+	var jump_q := ShotCraft.jump_shot_quality(controlled_player)
+	var jump_txt := ShotCraft.jump_label(jump_q)
+	hud.set_shot_status(charge, lob, jump_txt, _charging or jump_q >= 0)
 
 
 func _mouse_on_court() -> Variant:
@@ -295,6 +462,8 @@ func _on_ball_picked_up(player: Player) -> void:
 
 
 func _on_ball_released(player: Player) -> void:
+	if player == controlled_player:
+		_cancel_charge()
 	rules.on_release(player)
 	_update_rules_hud()
 
@@ -543,6 +712,8 @@ func _reset_players_and_ball() -> void:
 
 
 func _set_players_frozen(frozen: bool) -> void:
+	if frozen:
+		_cancel_charge()
 	for p in _home_players:
 		p.match_frozen = frozen
 		if frozen:
