@@ -40,7 +40,7 @@ func _ready() -> void:
 	if power_bar:
 		power_bar.visible = false
 		power_bar.value = 0.0
-	help_label.text = "WASD move · Space jump · hold LMB/E/RT power · RMB/G/RB pass · F/LT lob · C/Ctrl/B dive (GK) · Q cycle · R best · T aim"
+	help_label.text = "WASD move · Space jump · hold LMB/E/RT shoot · RMB/G/RB PASS · F/LT lob · C/Ctrl/B dive (GK) · Q cycle · R best · T aim"
 	_ensure_flash_overlay()
 
 
@@ -73,7 +73,9 @@ func set_shot_status(charge: float, lob: bool, jump_text: String, visible_now: b
 		return
 	if not visible_now:
 		power_bar.visible = false
-		shot_label.visible = false
+		# Keep PASS hint visible when set_pass_hint owns the label.
+		if not shot_label.text.begins_with("PASS"):
+			shot_label.visible = false
 		return
 	var charging := charge > 0.02
 	power_bar.visible = charging
@@ -87,6 +89,7 @@ func set_shot_status(charge: float, lob: bool, jump_text: String, visible_now: b
 			power_bar.modulate = Color(1.0, 0.92, 0.45, 1.0)
 	var bits: PackedStringArray = []
 	if charging:
+		bits.append("SHOOT")
 		bits.append("LOB" if lob else "FLAT")
 		bits.append("%d%%" % int(round(clampf(charge, 0.0, 1.0) * 100.0)))
 	if not jump_text.is_empty():
@@ -99,6 +102,26 @@ func set_shot_status(charge: float, lob: bool, jump_text: String, visible_now: b
 		shot_label.add_theme_color_override("font_color", Color(0.65, 0.88, 1.0, 1.0))
 	else:
 		shot_label.add_theme_color_override("font_color", Color(1.0, 0.95, 0.7, 1.0))
+
+
+## Clear PASS vs hold-to-shoot: show when possessed and not charging.
+func set_pass_hint(visible_now: bool) -> void:
+	if shot_label == null:
+		return
+	if not visible_now:
+		if shot_label.text.begins_with("PASS"):
+			shot_label.visible = false
+			shot_label.text = ""
+		return
+	# Don't clobber an active charge / jump readout.
+	if power_bar and power_bar.visible:
+		return
+	if shot_label.visible and not shot_label.text.begins_with("PASS") and not shot_label.text.is_empty():
+		if shot_label.text.contains("SHOOT") or shot_label.text.contains("JUMP"):
+			return
+	shot_label.visible = true
+	shot_label.text = "PASS · RMB / G / RB"
+	shot_label.add_theme_color_override("font_color", Color(0.7, 0.95, 1.0, 1.0))
 
 
 ## Glanceable steps readout. `pulse` bumps scale when a new plant lands.

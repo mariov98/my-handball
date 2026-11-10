@@ -356,31 +356,58 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 
-	# --- Pass: soft release toward a teammate ---
+	# --- Pass: soft release + wing↔CB↔wing catch circulation (Phase A) ---
 	_smoke_clear_ball(ball)
-	player = match_node._first_outfield(match_node._home_players)
-	match_node._set_controlled(player)
-	player.global_position = Vector3(0.0, player.start_position.y, 0.0)
-	player.rotation.y = 0.0
-	player.velocity = Vector3.ZERO
-	var receiver: Player = null
+	for p in match_node._away_players:
+		p.match_frozen = true
+		p.ai_enabled = false
+	var home_lw: Player = null
+	var home_cb: Player = null
+	var home_rw: Player = null
 	for p in match_node._home_players:
-		if p != player and not p.is_goalkeeper:
-			receiver = p
-			break
-	if receiver == null:
-		push_error("Smoke: no pass receiver")
+		if p.is_goalkeeper:
+			continue
+		match Formations.role_for(p):
+			Formations.Role.LEFT_WING:
+				home_lw = p
+			Formations.Role.RIGHT_WING:
+				home_rw = p
+			_:
+				home_cb = p
+	if home_lw == null or home_cb == null or home_rw == null:
+		push_error("Smoke: missing home LW/CB/RW for pass circulation")
 		get_tree().quit(1)
 		return
-	receiver.global_position = Vector3(0.0, receiver.start_position.y, 6.0)
-	receiver.velocity = Vector3.ZERO
+
+	# Park wing→CB first; keep RW wide/back so cone scoring prefers CB.
+	home_lw.global_position = Vector3(-2.5, home_lw.start_position.y, -1.0)
+	home_cb.global_position = Vector3(0.0, home_cb.start_position.y, 5.0)
+	home_rw.global_position = Vector3(7.5, home_rw.start_position.y, -3.0)
+	for p in [home_lw, home_cb, home_rw]:
+		p.rotation.y = 0.0
+		p.velocity = Vector3.ZERO
+		p.match_frozen = false
+		p.ai_enabled = false
+		p.has_ball = false
+
+	match_node._set_controlled(home_lw)
+	_smoke_lock_pass_bots(match_node, [home_lw, home_cb, home_rw])
+	player = home_lw
+	ball.global_position = player.global_position + Vector3(0.3, 1.1, 0.0)
 	if not ball.try_pickup(player):
 		push_error("Smoke: pass setup pickup failed")
 		get_tree().quit(1)
 		return
 	player.has_ball = true
+	match_node.rules.on_pickup(player)
+	var intended := match_node._best_pass_target(home_lw, Vector3(0, 0, 1))
+	if intended != home_cb:
+		push_error("Smoke: expected CB in pass cone from LW, got %s" % (intended.name if intended else "null"))
+		get_tree().quit(1)
+		return
 	match_node._try_pass()
-	await get_tree().create_timer(0.05).timeout
+	await get_tree().physics_frame
+	await get_tree().physics_frame
 	print(
 		"Smoke pass: carrier=", ball.carrier,
 		" speed=", ball.linear_velocity.length(),
@@ -390,12 +417,17 @@ func _ready() -> void:
 		push_error("Smoke: pass did not release ball")
 		get_tree().quit(1)
 		return
-	if ball.linear_velocity.length() < 5.0:
-		push_error("Smoke: pass too weak")
-		get_tree().quit(1)
-		return
 	if not bool(ball.last_shot_meta.get("pass", false)):
 		push_error("Smoke: pass meta missing")
+		get_tree().quit(1)
+		return
+	var pass_impulse := float(ball.last_shot_meta.get("impulse", 0.0))
+	if pass_impulse < PassCraft.IMPULSE_MIN - 0.1:
+		push_error("Smoke: pass impulse too weak")
+		get_tree().quit(1)
+		return
+	if ball.linear_velocity.length() < 6.0:
+		push_error("Smoke: pass flight too weak")
 		get_tree().quit(1)
 		return
 	# Pass should generally travel toward +Z (receiver ahead).
@@ -403,6 +435,105 @@ func _ready() -> void:
 		push_error("Smoke: pass should travel toward receiver (+Z)")
 		get_tree().quit(1)
 		return
+
+	# Wait for CB catch (sticky + Area).
+	var caught_cb := await _smoke_await_carrier(ball, home_cb, 2.0)
+	print("Smoke pass catch CB=", caught_cb, " carrier=", ball.carrier)
+	if not caught_cb:
+		push_error("Smoke: CB did not catch wing pass")
+		get_tree().quit(1)
+		return
+	if match_node.rules.get_steps() != 0:
+		push_error("Smoke: steps should reset on teammate catch")
+		get_tree().quit(1)
+		return
+
+	# CB → RW
+	match_node._set_controlled(home_cb)
+	_smoke_lock_pass_bots(match_node, [home_lw, home_cb, home_rw])
+	home_cb.global_position = Vector3(0.0, home_cb.start_position.y, 5.0)
+	home_cb.rotation.y = 0.0
+	home_cb.velocity = Vector3.ZERO
+	home_lw.global_position = Vector3(-7.5, home_lw.start_position.y, 3.0)
+	home_rw.global_position = Vector3(3.0, home_rw.start_position.y, 10.5)
+	home_rw.velocity = Vector3.ZERO
+	home_rw.rotation.y = 0.0
+	_smoke_snap_ball_to_carrier(ball)
+	intended = match_node._best_pass_target(home_cb, Vector3(0, 0, 1))
+	if intended != home_rw:
+		push_error("Smoke: expected RW in pass cone from CB, got %s" % (intended.name if intended else "null"))
+		get_tree().quit(1)
+		return
+	match_node._try_pass()
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	if not bool(ball.last_shot_meta.get("pass", false)):
+		push_error("Smoke: CB pass meta missing")
+		get_tree().quit(1)
+		return
+	var caught_rw := await _smoke_await_carrier(ball, home_rw, 2.5)
+	print("Smoke pass catch RW=", caught_rw, " carrier=", ball.carrier)
+	if not caught_rw:
+		push_error("Smoke: RW did not catch CB pass")
+		get_tree().quit(1)
+		return
+
+	# RW → CB (close the wing↔CB↔wing loop)
+	match_node._set_controlled(home_rw)
+	_smoke_lock_pass_bots(match_node, [home_lw, home_cb, home_rw])
+	home_rw.global_position = Vector3(3.0, home_rw.start_position.y, 10.5)
+	home_rw.rotation.y = PI # face back toward CB (-Z)
+	home_rw.velocity = Vector3.ZERO
+	home_lw.global_position = Vector3(-7.5, home_lw.start_position.y, 10.5)
+	home_cb.global_position = Vector3(0.5, home_cb.start_position.y, 5.3)
+	home_cb.velocity = Vector3.ZERO
+	_smoke_snap_ball_to_carrier(ball)
+	intended = match_node._best_pass_target(home_rw, Vector3(0, 0, -1))
+	if intended != home_cb:
+		push_error("Smoke: expected CB in return cone from RW, got %s" % (intended.name if intended else "null"))
+		get_tree().quit(1)
+		return
+	match_node._try_pass()
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	var caught_cb2 := await _smoke_await_carrier(ball, home_cb, 2.2)
+	print("Smoke pass catch CB return=", caught_cb2, " carrier=", ball.carrier)
+	if not caught_cb2:
+		push_error("Smoke: CB did not catch return pass from RW")
+		get_tree().quit(1)
+		return
+	print("Smoke Phase A pass circulation wing↔CB↔wing OK")
+
+	# Pass vs shoot-charge: pass must cancel charge without firing a shot.
+	_smoke_clear_ball(ball)
+	match_node._set_controlled(home_cb)
+	_smoke_lock_pass_bots(match_node, [home_lw, home_cb, home_rw])
+	home_cb.global_position = Vector3(0.0, home_cb.start_position.y, 0.0)
+	home_cb.rotation.y = 0.0
+	home_lw.global_position = Vector3(-3.0, home_lw.start_position.y, 5.0)
+	ball.global_position = home_cb.global_position + Vector3(0.3, 1.1, 0.0)
+	if not ball.try_pickup(home_cb):
+		push_error("Smoke: charge-cancel pickup failed")
+		get_tree().quit(1)
+		return
+	home_cb.has_ball = true
+	match_node._charging = true
+	match_node._charge_held_s = ShotCraft.CHARGE_TIME_S * 0.8
+	match_node._try_pass()
+	await get_tree().create_timer(0.05).timeout
+	if match_node._charging:
+		push_error("Smoke: pass did not cancel shoot charge")
+		get_tree().quit(1)
+		return
+	if not bool(ball.last_shot_meta.get("pass", false)):
+		push_error("Smoke: charge-cancel pass should still be a pass")
+		get_tree().quit(1)
+		return
+	if float(ball.last_shot_meta.get("impulse", 0.0)) > PassCraft.IMPULSE_MAX + 0.5:
+		push_error("Smoke: pass after charge should not use shot impulse")
+		get_tree().quit(1)
+		return
+	print("Smoke pass vs shoot-charge harden OK")
 
 	# --- Phase 2 rules ---
 	match_node.rules.enabled = true
@@ -972,3 +1103,47 @@ func _smoke_clear_ball(ball: Ball) -> void:
 	ball.angular_velocity = Vector3.ZERO
 	ball.collision_layer = 4
 	ball.collision_mask = 1 | 2
+	ball.last_shot_meta = {}
+
+
+func _smoke_await_carrier(ball: Ball, expected: Player, timeout_s: float) -> bool:
+	var frames := int(timeout_s / 0.016) + 4
+	for _i in range(frames):
+		await get_tree().physics_frame
+		# Keep receivers planted — set_controlled re-enables Home off-ball AI.
+		if expected:
+			expected.ai_enabled = false
+			expected.velocity = Vector3.ZERO
+		if ball.carrier == expected and expected.has_ball:
+			return true
+		# Nudge sticky catch if the ball is already close (llvmpipe timing).
+		if ball.carrier == null and expected != null:
+			var chest := expected.global_position + Vector3(0, 1.05, 0)
+			var d := Vector3(ball.global_position.x - chest.x, 0.0, ball.global_position.z - chest.z).length()
+			if d < PassCraft.CATCH_STICKY_RADIUS + 0.8:
+				expected._try_sticky_pass_catch()
+	return ball.carrier == expected and expected.has_ball
+
+
+## set_controlled refreshes Home AI — pin pass-test bots so lanes stay put.
+func _smoke_lock_pass_bots(match_node: MatchController, bots: Array) -> void:
+	for p in match_node._home_players:
+		if p.is_goalkeeper:
+			continue
+		p.ai_enabled = false
+		p.velocity = Vector3.ZERO
+	for p in bots:
+		if p == null:
+			continue
+		(p as Player).ai_enabled = false
+		(p as Player).match_frozen = false
+		(p as Player).velocity = Vector3.ZERO
+
+
+func _smoke_snap_ball_to_carrier(ball: Ball) -> void:
+	if ball.carrier == null:
+		return
+	ball.global_position = ball.carrier.ball_attach.global_position
+	ball.linear_velocity = Vector3.ZERO
+	ball.angular_velocity = Vector3.ZERO
+	ball.freeze = true

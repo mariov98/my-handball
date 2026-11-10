@@ -14,8 +14,9 @@ const KICKOFF_FREEZE := 0.55
 const RESTART_FREEZE := 0.5
 const PERIOD_BREAK_DELAY := 1.7
 const BLOCK_TRACE_LEN := 9.5
-const PASS_IMPULSE_MIN := 8.0
-const PASS_IMPULSE_MAX := 12.5
+## Soft-pass impulse band (kept in sync with PassCraft.IMPULSE_*).
+const PASS_IMPULSE_MIN := 8.5
+const PASS_IMPULSE_MAX := 13.0
 
 @export var home_team_path: NodePath
 @export var away_team_path: NodePath
@@ -46,6 +47,8 @@ var _steps_hud_pulse: bool = false
 ## Phase 3 charge-to-shoot.
 var _charging: bool = false
 var _charge_held_s: float = 0.0
+## After a pass steals the hold, ignore shoot until the shoot action is released.
+var _pass_suppress_shoot: bool = false
 var _block_trace: BlockTrace
 
 @onready var _home_root: Node = get_node(home_team_path)
@@ -66,7 +69,7 @@ func _ready() -> void:
 	camera_rig.setup(ball, true)
 	_refresh_hud()
 	print(
-		"MyHandball camera + feel pass ready. Period=%ds x%d. Goal-centered cam, pass, snappier play."
+		"MyHandball Phase A pass deepen ready. Period=%ds x%d. Pass RMB/G/RB, light lead assist."
 		% [int(period_length_seconds), periods_total]
 	)
 	var user_args := OS.get_cmdline_user_args()
@@ -225,20 +228,26 @@ func _unhandled_input(event: InputEvent) -> void:
 			_cycle_teammate()
 		get_viewport().set_input_as_handled()
 		return
+	# Pass first so RMB/G/RB never starts or finishes a shoot-charge.
 	if event.is_action_pressed("pass_ball") and match_state == MatchState.LIVE:
 		_try_pass()
 		get_viewport().set_input_as_handled()
 		return
 	# Phase 3: hold shoot to charge, release to fire. Tap still works (min power).
 	if event.is_action_pressed("shoot") and match_state == MatchState.LIVE:
+		if _pass_suppress_shoot:
+			get_viewport().set_input_as_handled()
+			return
 		if controlled_player and controlled_player.has_ball:
 			_charging = true
 			_charge_held_s = 0.0
 			get_viewport().set_input_as_handled()
 		return
-	if event.is_action_released("shoot") and _charging:
-		_release_charged_shot()
-		get_viewport().set_input_as_handled()
+	if event.is_action_released("shoot"):
+		_pass_suppress_shoot = false
+		if _charging:
+			_release_charged_shot()
+			get_viewport().set_input_as_handled()
 
 
 func _physics_process(delta: float) -> void:
@@ -258,9 +267,15 @@ func _physics_process(delta: float) -> void:
 
 
 func _update_shot_charge(delta: float) -> void:
+	# Clear pass→shoot latch once the shoot button is fully up.
+	if _pass_suppress_shoot and not Input.is_action_pressed("shoot"):
+		_pass_suppress_shoot = false
 	if not _charging:
 		return
 	if match_state != MatchState.LIVE or controlled_player == null or not controlled_player.has_ball:
+		_cancel_charge()
+		return
+	if _pass_suppress_shoot:
 		_cancel_charge()
 		return
 	# Keep charging while the shoot action is held (mouse / E / RT).
@@ -357,6 +372,9 @@ func _cancel_charge() -> void:
 func _release_charged_shot() -> void:
 	if not _charging:
 		return
+	if _pass_suppress_shoot:
+		_cancel_charge()
+		return
 	var held := _charge_held_s
 	_charging = false
 	_charge_held_s = 0.0
@@ -400,68 +418,45 @@ func _try_shoot() -> void:
 	_try_shoot_charged(ShotCraft.CHARGE_TIME_S * 0.55)
 
 
-## Soft pass to best forward teammate (or a short toss along face).
+## Soft pass to best teammate in the aim cone (light lead assist). Never fires a shot.
 func _try_pass() -> void:
 	if controlled_player == null or not controlled_player.has_ball:
 		return
+	# Harden vs shoot-charge: cancel power hold and suppress shoot until release.
 	if _charging:
 		_cancel_charge()
-	var target := _best_pass_target(controlled_player)
+	_pass_suppress_shoot = true
+	var aim_hint := _compute_aim(false)
+	aim_hint.y = 0.0
+	if aim_hint.length_squared() < 0.01:
+		aim_hint = controlled_player.face_direction()
+		aim_hint.y = 0.0
+	var target := _best_pass_target(controlled_player, aim_hint)
 	if target:
-		var dist := controlled_player.global_position.distance_to(target.global_position)
-		var impulse := clampf(
-			lerpf(PASS_IMPULSE_MIN, PASS_IMPULSE_MAX, dist / 12.0),
-			PASS_IMPULSE_MIN,
-			PASS_IMPULSE_MAX
-		)
-		controlled_player.try_pass_to(target, ball, impulse)
+		controlled_player.try_pass_to(target, ball, -1.0, aim_hint)
 		return
-	# No open mate — soft toss along facing so the action never feels dead.
-	var aim := controlled_player.face_direction()
-	aim.y = 0.12
-	aim = aim.normalized()
+	# No open mate in cone — soft toss along aim so the action never feels dead.
+	var toss := aim_hint.normalized()
+	toss.y = 0.1
+	toss = toss.normalized()
 	controlled_player.try_shoot(
-		aim,
+		toss,
 		PASS_IMPULSE_MIN + 0.5,
 		ball,
-		0.12,
+		PassCraft.LOFT_MIN + 0.04,
 		{"pass": true, "charge": 0.25}
 	)
 
 
-func _best_pass_target(passer: Player) -> Player:
+func _best_pass_target(passer: Player, aim_hint: Vector3 = Vector3.ZERO) -> Player:
 	if passer == null:
 		return null
 	var roster := _home_players if passer.team_id == 0 else _away_players
-	var best: Player = null
-	var best_score := -INF
-	var face := passer.face_direction()
-	face.y = 0.0
-	if face.length_squared() < 0.01:
-		face = Vector3(0.0, 0.0, 1.0 if passer.team_id == 0 else -1.0)
-	else:
-		face = face.normalized()
-	for mate in roster:
-		if mate == passer or mate.is_goalkeeper or mate.match_frozen:
-			continue
-		var to_m := mate.global_position - passer.global_position
-		to_m.y = 0.0
-		var d := to_m.length()
-		if d < 2.2 or d > 15.0:
-			continue
-		var dir := to_m / d
-		var forward := dir.dot(face)
-		if forward < -0.15:
-			continue
-		var toward_goal := dir.z * (1.0 if passer.team_id == 0 else -1.0)
-		var score := forward * 2.2 + toward_goal * 1.5 + d * 0.04
-		# Prefer uncontrolled teammates so the human can switch onto the catch.
-		if not mate.controlled:
-			score += 0.35
-		if score > best_score:
-			best_score = score
-			best = mate
-	return best
+	var aim := aim_hint
+	if aim.length_squared() < 0.01:
+		aim = passer.face_direction()
+	var best := PassCraft.best_in_cone(passer, roster, aim, passer.team_id)
+	return best as Player
 
 
 func _compute_aim(lob: bool = false) -> Vector3:
@@ -546,12 +541,17 @@ func _update_shot_hud() -> void:
 		return
 	if match_state != MatchState.LIVE or controlled_player == null or not controlled_player.has_ball:
 		hud.set_shot_status(0.0, false, "", false)
+		if hud.has_method("set_pass_hint"):
+			hud.set_pass_hint(false)
 		return
 	var charge := ShotCraft.charge_01(_charge_held_s) if _charging else 0.0
 	var lob := _charging and Input.is_action_pressed("lob")
 	var jump_q := ShotCraft.jump_shot_quality(controlled_player)
 	var jump_txt := ShotCraft.jump_label(jump_q)
+	# While charging, shot HUD owns the line; otherwise surface a clear PASS prompt.
 	hud.set_shot_status(charge, lob, jump_txt, _charging or jump_q >= 0)
+	if hud.has_method("set_pass_hint"):
+		hud.set_pass_hint(not _charging)
 
 
 func _mouse_on_court() -> Variant:

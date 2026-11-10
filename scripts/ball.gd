@@ -31,6 +31,7 @@ func _physics_process(delta: float) -> void:
 		var flying := carrier == null and not freeze and linear_velocity.length() >= TRAIL_MIN_SPEED
 		_trail.call("set_active", flying)
 	if carrier == null:
+		_soft_pass_steer(delta)
 		return
 	# Kinematic follow while possessed — freeze physics.
 	freeze = true
@@ -38,6 +39,45 @@ func _physics_process(delta: float) -> void:
 	global_position = global_position.lerp(target, 1.0 - exp(-FOLLOW_LERP * delta))
 	linear_velocity = Vector3.ZERO
 	angular_velocity = Vector3.ZERO
+
+
+## Light in-flight nudge toward the intended pass receiver — catchable, not magnetized.
+func _soft_pass_steer(delta: float) -> void:
+	if freeze or not bool(last_shot_meta.get("pass", false)):
+		return
+	var intended: Variant = last_shot_meta.get("pass_target", null)
+	if intended == null or not is_instance_valid(intended):
+		return
+	if not (intended is Node3D):
+		return
+	var recv := intended as Node3D
+	var to_recv := recv.global_position + Vector3(0, 1.1, 0) - global_position
+	var dist := to_recv.length()
+	if dist <= 0.15 or dist > PassCraft.FLIGHT_STEER_DIST:
+		return
+	var speed := linear_velocity.length()
+	if speed < 2.5:
+		return
+	# Only steer when still generally traveling toward the receiver.
+	var toward := to_recv.normalized()
+	if linear_velocity.normalized().dot(toward) < 0.15:
+		return
+	var blend := clampf(PassCraft.FLIGHT_STEER * delta * (1.0 - dist / PassCraft.FLIGHT_STEER_DIST), 0.0, 0.35)
+	var steered := linear_velocity.lerp(toward * speed, blend)
+	linear_velocity = steered
+
+
+func is_pass_in_flight() -> bool:
+	return carrier == null and bool(last_shot_meta.get("pass", false))
+
+
+func pass_intended_receiver() -> Player:
+	if not is_pass_in_flight():
+		return null
+	var intended: Variant = last_shot_meta.get("pass_target", null)
+	if intended != null and is_instance_valid(intended) and intended is Player:
+		return intended as Player
+	return null
 
 
 func try_pickup(player: Player) -> bool:
@@ -77,7 +117,10 @@ func release_and_shoot(
 	freeze = false
 	collision_layer = 4  # layer 3 bit = 4
 	collision_mask = 1 | 2 | 4  # court + player + ball (self unused)
-	_ignore_carrier_until = Time.get_ticks_msec() + 200
+	var is_pass := bool(shot_meta.get("pass", false))
+	# Passes clear the passer quickly but stay catchable for teammates sooner.
+	var ignore_ms := 100 if is_pass else 200
+	_ignore_carrier_until = Time.get_ticks_msec() + ignore_ms
 	last_shot_meta = shot_meta.duplicate()
 	last_shot_meta["time_msec"] = Time.get_ticks_msec()
 	last_shot_meta["shooter"] = shooter
@@ -85,19 +128,29 @@ func release_and_shoot(
 	if dir.length_squared() < 0.001:
 		dir = Vector3(0, 0.2, 1)
 	var loft := SHOOT_UP_BIAS if up_bias < 0.0 else up_bias
+	# Flat-ish passes: keep loft modest so the catch stays at chest height.
+	if is_pass:
+		loft = clampf(loft, PassCraft.LOFT_MIN, PassCraft.LOFT_MAX)
 	dir.y = maxf(dir.y, 0.0) + loft
 	dir = dir.normalized()
 	last_shot_meta["dir"] = dir
 	last_shot_meta["impulse"] = impulse_strength
 	linear_velocity = Vector3.ZERO
 	angular_velocity = Vector3.ZERO
-	apply_central_impulse(dir * impulse_strength)
+	# Passes skip player rigid collisions briefly so the throw doesn't die in the
+	# passer capsule; Area pickup / sticky catch still see the ball layer.
+	if is_pass:
+		collision_mask = 1
+		# Direct velocity keeps soft-pass pace readable (mass 0.45 would amplify impulse).
+		linear_velocity = dir * clampf(impulse_strength, PassCraft.IMPULSE_MIN, PassCraft.IMPULSE_MAX)
+	else:
+		apply_central_impulse(dir * impulse_strength)
 	if _trail and _trail.has_method("set_active"):
 		_trail.call("set_active", true)
 	if shooter:
 		released.emit(shooter)
 	# Restore collision after short delay so ball clears the hand
-	get_tree().create_timer(0.25).timeout.connect(_restore_collision)
+	get_tree().create_timer(0.22 if is_pass else 0.25).timeout.connect(_restore_collision)
 
 
 func _restore_collision() -> void:
