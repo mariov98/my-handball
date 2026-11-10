@@ -2,8 +2,11 @@ extends CharacterBody3D
 class_name Player
 
 ## Capsule outfield / GK. Controlled player receives match input; AI teammates chase/block.
+## Phase 3: GK dive/track, outfield block volume for contested shots.
 
 signal possession_changed(has_ball: bool)
+signal dive_started
+signal block_attempted(blocker: Player, ball: Ball, success: bool)
 
 const SPEED := 8.5
 const AIR_CONTROL := 0.45
@@ -17,10 +20,20 @@ const PICKUP_COOLDOWN := 0.35
 const AI_CHASE_SPEED_SCALE := 0.92
 const AI_BLOCK_SPEED_SCALE := 0.85
 const AI_ATTACK_SPEED_SCALE := 0.88
-const AI_GK_SPEED_SCALE := 0.7
+const AI_GK_SPEED_SCALE := 0.78
+const AI_GK_TRACK_SPEED_SCALE := 1.05
 const AI_SHOOT_RANGE := 11.0
 const AI_SHOOT_COOLDOWN := 1.4
 const AI_BLOCK_DEPTH := 4.5
+
+# Phase 3 GK dive
+const DIVE_DURATION := 0.58
+const DIVE_COOLDOWN := 0.85
+const DIVE_SPEED := 13.5
+const DIVE_UP := 3.2
+const GK_LATERAL_BOOST := 1.22
+const AI_DIVE_REACT_DIST := 14.0
+const AI_DIVE_MIN_BALL_SPEED := 6.0
 
 @export var team_id: int = 0 ## 0 = home (blue), 1 = away (red)
 @export var is_goalkeeper: bool = false
@@ -35,16 +48,28 @@ var start_yaw: float = 0.0
 ## Set by MatchController so AI can chase / shoot.
 var match_ball: Ball = null
 var match_frozen: bool = false
+## True while GK dive impulse is active.
+var diving: bool = false
+## Brief window after dive / raise where blocks are sticky.
+var block_ready: bool = false
 
 var _bob_phase: float = 0.0
 var _pickup_block: float = 0.0
 var _ai_shoot_cd: float = 0.0
-## AI carry distance — shoot before Phase 2 traveling (~3 plants + reception zero).
+## AI carry distance — shoot before Phase 2 traveling fires.
 var _ai_carry_dist: float = 0.0
 var _ai_carry_last_xz: Vector3 = Vector3.ZERO
 var _ai_carry_sampling: bool = false
 var _mesh: MeshInstance3D
 var _mesh_base_y: float = 0.9
+var _dive_timer: float = 0.0
+var _dive_cd: float = 0.0
+var _block_timer: float = 0.0
+var _dive_dir: Vector3 = Vector3.ZERO
+var _arm_l: MeshInstance3D
+var _arm_r: MeshInstance3D
+var _save_area: Area3D
+var _block_area: Area3D
 
 @onready var ball_attach: Marker3D = $BallAttach
 @onready var pickup_area: Area3D = $PickupArea
@@ -53,8 +78,13 @@ var _mesh_base_y: float = 0.9
 func _ready() -> void:
 	start_position = global_position
 	start_yaw = rotation.y
+	_ensure_craft_nodes()
 	_apply_team_material()
 	pickup_area.body_entered.connect(_on_pickup_body_entered)
+	if _save_area:
+		_save_area.body_entered.connect(_on_save_body_entered)
+	if _block_area:
+		_block_area.body_entered.connect(_on_block_body_entered)
 
 
 func _physics_process(delta: float) -> void:
@@ -62,6 +92,23 @@ func _physics_process(delta: float) -> void:
 		_pickup_block = maxf(0.0, _pickup_block - delta)
 	if _ai_shoot_cd > 0.0:
 		_ai_shoot_cd = maxf(0.0, _ai_shoot_cd - delta)
+	if _dive_cd > 0.0:
+		_dive_cd = maxf(0.0, _dive_cd - delta)
+	if _block_timer > 0.0:
+		_block_timer = maxf(0.0, _block_timer - delta)
+		block_ready = _block_timer > 0.0 or diving
+	else:
+		block_ready = diving
+
+	if diving:
+		_dive_timer -= delta
+		if _dive_timer <= 0.0:
+			diving = false
+			_set_dive_pose(false)
+		else:
+			# Keep lateral dive velocity dominant while airborne-ish.
+			velocity.x = _dive_dir.x * DIVE_SPEED
+			velocity.z = _dive_dir.z * DIVE_SPEED
 
 	if not is_on_floor():
 		velocity.y -= ProjectSettings.get_setting("physics/3d/default_gravity") * delta
@@ -69,43 +116,98 @@ func _physics_process(delta: float) -> void:
 	var wish := Vector3.ZERO
 	if match_frozen:
 		wish = Vector3.ZERO
+	elif diving:
+		wish = Vector3.ZERO
 	elif controlled:
 		var input_dir := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
 		# WASD / left stick are camera-relative: forward = into the screen along
 		# the current camera facing projected onto the court plane.
 		wish = camera_relative_wish(input_dir)
+		if is_goalkeeper and Input.is_action_just_pressed("dive"):
+			try_dive(_preferred_dive_dir(wish))
 	elif ai_enabled:
 		wish = _ai_wish(delta)
 
 	var target_speed := SPEED * (0.85 if is_goalkeeper else 1.0)
+	if is_goalkeeper and not diving:
+		# Quicker lateral shuffle on the line.
+		target_speed *= GK_LATERAL_BOOST
 	if ai_enabled and not controlled:
-		target_speed *= AI_GK_SPEED_SCALE if is_goalkeeper else AI_CHASE_SPEED_SCALE
+		if is_goalkeeper:
+			target_speed *= AI_GK_SPEED_SCALE * AI_GK_TRACK_SPEED_SCALE
+		else:
+			target_speed *= AI_CHASE_SPEED_SCALE
 	var control := 1.0 if is_on_floor() else AIR_CONTROL
-	var desired := wish * target_speed
-	velocity.x = lerpf(velocity.x, desired.x, control)
-	velocity.z = lerpf(velocity.z, desired.z, control)
+	if not diving:
+		var desired := wish * target_speed
+		velocity.x = lerpf(velocity.x, desired.x, control)
+		velocity.z = lerpf(velocity.z, desired.z, control)
 
-	if controlled and not match_frozen and Input.is_action_just_pressed("jump") and is_on_floor():
+	if controlled and not match_frozen and not diving and Input.is_action_just_pressed("jump") and is_on_floor():
 		velocity.y = JUMP_VELOCITY
 
 	move_and_slide()
 
 	var planar := Vector3(velocity.x, 0.0, velocity.z)
-	if planar.length() > FACE_THRESHOLD:
+	if planar.length() > FACE_THRESHOLD and not diving:
 		var target_yaw := atan2(planar.x, planar.z)
 		rotation.y = lerp_angle(rotation.y, target_yaw, 1.0 - exp(-12.0 * delta))
 
 	_update_bob(delta, planar.length())
+	_update_arm_pose(delta)
 
 
-func try_shoot(aim_dir: Vector3, impulse_strength: float, ball: Ball) -> bool:
+func try_shoot(
+	aim_dir: Vector3,
+	impulse_strength: float,
+	ball: Ball,
+	up_bias: float = -1.0,
+	shot_meta: Dictionary = {}
+) -> bool:
 	if not has_ball or ball == null or ball.carrier != self:
 		return false
 	_pickup_block = PICKUP_COOLDOWN
 	has_ball = false
 	possession_changed.emit(false)
-	ball.release_and_shoot(aim_dir, impulse_strength)
+	ball.release_and_shoot(aim_dir, impulse_strength, up_bias, shot_meta)
 	return true
+
+
+## GK dive toward a planar direction. Returns true if dive started.
+func try_dive(dir: Vector3) -> bool:
+	if not is_goalkeeper or diving or match_frozen or has_ball:
+		return false
+	if _dive_cd > 0.0:
+		return false
+	var flat := Vector3(dir.x, 0.0, dir.z)
+	if flat.length_squared() < 0.01:
+		# Default dive toward ball or across goal.
+		if match_ball:
+			flat = Vector3(
+				match_ball.global_position.x - global_position.x,
+				0.0,
+				match_ball.global_position.z - global_position.z
+			)
+		else:
+			flat = face_direction()
+			flat.y = 0.0
+	if flat.length_squared() < 0.01:
+		flat = Vector3.RIGHT if team_id == 0 else Vector3.LEFT
+	_dive_dir = flat.normalized()
+	diving = true
+	_dive_timer = DIVE_DURATION
+	_dive_cd = DIVE_COOLDOWN + DIVE_DURATION
+	_block_timer = DIVE_DURATION + 0.15
+	block_ready = true
+	velocity = _dive_dir * DIVE_SPEED + Vector3(0.0, DIVE_UP, 0.0)
+	_set_dive_pose(true)
+	dive_started.emit()
+	return true
+
+
+func raise_block(duration: float = 0.45) -> void:
+	_block_timer = maxf(_block_timer, duration)
+	block_ready = true
 
 
 func reset_to_start() -> void:
@@ -118,6 +220,12 @@ func reset_to_start() -> void:
 	_ai_carry_dist = 0.0
 	_ai_carry_sampling = false
 	_bob_phase = 0.0
+	diving = false
+	_dive_timer = 0.0
+	_dive_cd = 0.0
+	_block_timer = 0.0
+	block_ready = false
+	_set_dive_pose(false)
 	if _mesh:
 		_mesh.position.y = _mesh_base_y
 
@@ -177,6 +285,14 @@ func own_goal_point() -> Vector3:
 	return Vector3(0.0, 1.2, goal_z)
 
 
+func _preferred_dive_dir(wish: Vector3) -> Vector3:
+	if wish.length_squared() > 0.05:
+		return wish
+	if match_ball:
+		return match_ball.global_position - global_position
+	return face_direction()
+
+
 func _ai_wish(delta: float) -> Vector3:
 	if match_ball == null:
 		return _steer_toward(start_position)
@@ -198,17 +314,45 @@ func _ai_wish(delta: float) -> Vector3:
 func _ai_gk_wish() -> Vector3:
 	var ball_pos := match_ball.global_position
 	var home := start_position
-	var track_x := clampf(ball_pos.x, -3.2, 3.2)
+	var track_x := clampf(ball_pos.x, -3.4, 3.4)
 	# Ease slightly off the line toward the ball when it approaches.
 	var gap := absf(ball_pos.z - home.z)
 	var approach := clampf(1.0 - gap / 12.0, 0.0, 1.0)
 	var toward_court := 1.0 if team_id == 0 else -1.0
-	var target := Vector3(track_x, 0.0, home.z + toward_court * approach * 1.5)
+	var target := Vector3(track_x, 0.0, home.z + toward_court * approach * 1.8)
 	if team_id == 0:
 		target.z = clampf(target.z, -18.5, -14.0)
 	else:
 		target.z = clampf(target.z, 14.0, 18.5)
+
+	# Predict incoming shot and dive into the flight path.
+	if match_ball.carrier == null and not diving and _dive_cd <= 0.0:
+		var speed := match_ball.linear_velocity.length()
+		var toward_goal := match_ball.linear_velocity.z * (-toward_court)
+		if speed >= AI_DIVE_MIN_BALL_SPEED and toward_goal > 2.0 and gap < AI_DIVE_REACT_DIST:
+			var intercept := _predict_gk_intercept(ball_pos, match_ball.linear_velocity)
+			var to_int := intercept - global_position
+			to_int.y = 0.0
+			if to_int.length() < 4.2:
+				try_dive(to_int)
+				return Vector3.ZERO
+			# Shuffle hard toward intercept before diving.
+			target.x = clampf(intercept.x, -3.4, 3.4)
+
 	return _steer_toward(target)
+
+
+func _predict_gk_intercept(ball_pos: Vector3, ball_vel: Vector3) -> Vector3:
+	var goal_z := start_position.z
+	if absf(ball_vel.z) < 0.05:
+		return Vector3(clampf(ball_pos.x, -3.2, 3.2), 1.0, goal_z)
+	var t := (goal_z - ball_pos.z) / ball_vel.z
+	t = clampf(t, 0.0, 1.1)
+	var hit := ball_pos + ball_vel * t
+	hit.x = clampf(hit.x, -3.4, 3.4)
+	hit.y = clampf(hit.y, 0.3, 2.2)
+	hit.z = goal_z
+	return hit
 
 
 func _ai_chase_free_ball() -> Vector3:
@@ -234,6 +378,9 @@ func _ai_defend_block(carrier: Player) -> Vector3:
 	slot.x += (float(player_index) - 2.0) * 1.6
 	slot.x = clampf(slot.x, -8.5, 8.5)
 	slot = _keep_outfield_legal(slot)
+	# Hands up when the attacker is close with the ball.
+	if carrier.has_ball and carrier_pos.distance_to(global_position) < 3.8:
+		raise_block(0.2)
 	return _steer_toward(slot) * AI_BLOCK_SPEED_SCALE
 
 
@@ -268,11 +415,15 @@ func _ai_attack_with_ball(_delta: float) -> Vector3:
 		_ai_carry_last_xz = xz
 	var flat := Vector3(goal.x - me.x, 0.0, goal.z - me.z)
 	var dist := flat.length()
-	# Shoot inside range, or early to avoid traveling (~reception zero + 3 plants @ 1.65 m).
-	var must_release := _ai_carry_dist >= 5.2
+	# Shoot inside range, or early to avoid traveling (3 steps ≈ 3.45 m).
+	var must_release := _ai_carry_dist >= 2.6
 	if (dist <= AI_SHOOT_RANGE or must_release) and _ai_shoot_cd <= 0.0 and match_ball != null:
 		var aim := (goal - (me + Vector3(0, 1.2, 0))).normalized()
-		if try_shoot(aim, 15.0, match_ball):
+		var lob := dist < 7.0 and (player_index % 2) == 0
+		var impulse := ShotCraft.impulse_for_charge(0.7, lob)
+		var up := ShotCraft.up_bias(lob)
+		var meta := {"lob": lob, "ai": true, "charge": 0.7}
+		if try_shoot(aim, impulse, match_ball, up, meta):
 			_ai_shoot_cd = AI_SHOOT_COOLDOWN
 			_ai_carry_sampling = false
 			_ai_carry_dist = 0.0
@@ -317,6 +468,170 @@ func _on_pickup_body_entered(body: Node3D) -> void:
 			possession_changed.emit(true)
 
 
+func _on_save_body_entered(body: Node3D) -> void:
+	if not is_goalkeeper or match_frozen or has_ball:
+		return
+	if not (body is Ball):
+		return
+	var ball := body as Ball
+	if ball.carrier != null:
+		return
+	# Only contest free balls that aren't our own throw.
+	if ball._last_carrier == self:
+		return
+	var approaching := true
+	if ball.linear_velocity.length() > 1.0:
+		var to_gk := global_position - ball.global_position
+		approaching = ball.linear_velocity.dot(to_gk) > 0.0
+	if not approaching and not diving:
+		return
+	_contest_ball(ball, true)
+
+
+func _on_block_body_entered(body: Node3D) -> void:
+	if is_goalkeeper or match_frozen or has_ball or not block_ready:
+		return
+	if not (body is Ball):
+		return
+	var ball := body as Ball
+	if ball.carrier != null:
+		return
+	if ball._last_carrier != null and ball._last_carrier.team_id == team_id:
+		return
+	# Fresh shot window (~1.1s) or fast ball.
+	var age_ok := true
+	if ball.last_shot_meta.has("time_msec"):
+		age_ok = Time.get_ticks_msec() - int(ball.last_shot_meta["time_msec"]) < 1100
+	if not age_ok and ball.linear_velocity.length() < 7.0:
+		return
+	_contest_ball(ball, false)
+
+
+func _contest_ball(ball: Ball, is_save: bool) -> void:
+	var vel := ball.linear_velocity
+	var speed := vel.length()
+	var success := diving or block_ready or is_save
+	if speed < 2.0 and not diving:
+		# Soft gather — try pickup.
+		if ball.try_pickup(self):
+			has_ball = true
+			possession_changed.emit(true)
+			block_attempted.emit(self, ball, true)
+		return
+	# Deflect: kill most forward speed, push outward from defender.
+	var away := ball.global_position - global_position
+	away.y = 0.0
+	if away.length_squared() < 0.01:
+		away = face_direction()
+		away.y = 0.0
+	away = away.normalized()
+	var deflect_speed := clampf(speed * (0.35 if is_save else 0.48), 3.5, 11.0)
+	var up := 2.2 if is_save else 1.4
+	ball.linear_velocity = away * deflect_speed + Vector3(0.0, up, 0.0)
+	ball.angular_velocity = Vector3(randf_range(-8.0, 8.0), randf_range(-4.0, 4.0), randf_range(-8.0, 8.0))
+	block_attempted.emit(self, ball, success)
+	# Short cooldown so one contact doesn't spam.
+	if is_goalkeeper:
+		_pickup_block = 0.12
+	else:
+		_block_timer = 0.08
+		block_ready = false
+
+
+func _ensure_craft_nodes() -> void:
+	# Procedural arm boxes + contest areas — keeps player.tscn primitive-only.
+	_arm_l = get_node_or_null("ArmL") as MeshInstance3D
+	_arm_r = get_node_or_null("ArmR") as MeshInstance3D
+	if _arm_l == null:
+		_arm_l = _make_arm("ArmL", Vector3(-0.55, 1.15, 0.0))
+	if _arm_r == null:
+		_arm_r = _make_arm("ArmR", Vector3(0.55, 1.15, 0.0))
+
+	_save_area = get_node_or_null("SaveArea") as Area3D
+	if _save_area == null and is_goalkeeper:
+		_save_area = Area3D.new()
+		_save_area.name = "SaveArea"
+		_save_area.collision_layer = 0
+		_save_area.collision_mask = 4
+		_save_area.monitoring = true
+		_save_area.monitorable = false
+		var save_shape := CollisionShape3D.new()
+		var box := BoxShape3D.new()
+		box.size = Vector3(1.8, 1.6, 1.1)
+		save_shape.shape = box
+		save_shape.position = Vector3(0.0, 1.0, 0.15)
+		_save_area.add_child(save_shape)
+		add_child(_save_area)
+
+	_block_area = get_node_or_null("BlockArea") as Area3D
+	if _block_area == null and not is_goalkeeper:
+		_block_area = Area3D.new()
+		_block_area.name = "BlockArea"
+		_block_area.collision_layer = 0
+		_block_area.collision_mask = 4
+		_block_area.monitoring = true
+		_block_area.monitorable = false
+		var block_shape := CollisionShape3D.new()
+		var sphere := SphereShape3D.new()
+		sphere.radius = 0.95
+		block_shape.shape = sphere
+		block_shape.position = Vector3(0.0, 1.25, 0.35)
+		_block_area.add_child(block_shape)
+		add_child(_block_area)
+
+	# GK reads wider / lower arms at rest; outfield arms hang until block.
+	_set_dive_pose(false)
+
+
+func _make_arm(arm_name: String, pos: Vector3) -> MeshInstance3D:
+	var arm := MeshInstance3D.new()
+	arm.name = arm_name
+	var mesh := BoxMesh.new()
+	mesh.size = Vector3(0.55, 0.16, 0.16) if is_goalkeeper else Vector3(0.42, 0.12, 0.12)
+	arm.mesh = mesh
+	arm.position = pos
+	add_child(arm)
+	return arm
+
+
+func _set_dive_pose(active: bool) -> void:
+	if _arm_l == null or _arm_r == null:
+		return
+	if active:
+		_arm_l.position = Vector3(-0.85, 0.85, 0.1)
+		_arm_r.position = Vector3(0.85, 0.85, 0.1)
+		_arm_l.rotation_degrees = Vector3(0, 0, 25)
+		_arm_r.rotation_degrees = Vector3(0, 0, -25)
+		if _save_area and _save_area.get_child_count() > 0:
+			var shape := _save_area.get_child(0) as CollisionShape3D
+			if shape and shape.shape is BoxShape3D:
+				(shape.shape as BoxShape3D).size = Vector3(2.6, 1.2, 1.4)
+	else:
+		if is_goalkeeper:
+			_arm_l.position = Vector3(-0.7, 1.2, 0.05)
+			_arm_r.position = Vector3(0.7, 1.2, 0.05)
+		else:
+			_arm_l.position = Vector3(-0.45, 1.05, 0.0)
+			_arm_r.position = Vector3(0.45, 1.05, 0.0)
+		_arm_l.rotation_degrees = Vector3.ZERO
+		_arm_r.rotation_degrees = Vector3.ZERO
+		if _save_area and _save_area.get_child_count() > 0:
+			var shape2 := _save_area.get_child(0) as CollisionShape3D
+			if shape2 and shape2.shape is BoxShape3D:
+				(shape2.shape as BoxShape3D).size = Vector3(1.8, 1.6, 1.1)
+
+
+func _update_arm_pose(_delta: float) -> void:
+	if diving or _arm_l == null:
+		return
+	if not is_goalkeeper and block_ready:
+		_arm_l.position = Vector3(-0.55, 1.45, 0.25)
+		_arm_r.position = Vector3(0.55, 1.45, 0.25)
+	elif not is_goalkeeper:
+		_arm_l.position = Vector3(-0.45, 1.05, 0.0)
+		_arm_r.position = Vector3(0.45, 1.05, 0.0)
+
+
 func _apply_team_material() -> void:
 	_mesh = get_node_or_null("MeshInstance3D") as MeshInstance3D
 	if _mesh == null:
@@ -331,10 +646,21 @@ func _apply_team_material() -> void:
 		var head_mat := StandardMaterial3D.new()
 		head_mat.albedo_color = body_color.lightened(0.25)
 		head.material_override = head_mat
+	# Arm materials — GK slightly brighter so the line reads.
+	var arm_mat := StandardMaterial3D.new()
+	arm_mat.albedo_color = body_color.lightened(0.1 if is_goalkeeper else 0.0)
+	arm_mat.roughness = 0.65
+	if _arm_l:
+		_arm_l.material_override = arm_mat
+	if _arm_r:
+		_arm_r.material_override = arm_mat
 
 
 func _update_bob(delta: float, speed: float) -> void:
 	if _mesh == null:
+		return
+	if diving:
+		_mesh.position.y = lerpf(_mesh.position.y, _mesh_base_y - 0.25, 1.0 - exp(-10.0 * delta))
 		return
 	if is_on_floor() and speed > 0.5:
 		_bob_phase += delta * BOB_SPEED * clampf(speed / SPEED, 0.4, 1.2)

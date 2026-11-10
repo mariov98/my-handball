@@ -176,6 +176,46 @@ theme_override_font_sizes/font_size = 16
 text = "Aim: Face"
 horizontal_alignment = 2
 
+[node name="ShotLabel" type="Label" parent="Root"]
+visible = false
+layout_mode = 1
+anchors_preset = 3
+anchor_left = 1.0
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -300.0
+offset_top = -140.0
+offset_right = -16.0
+offset_bottom = -114.0
+grow_horizontal = 0
+grow_vertical = 0
+theme_override_colors/font_color = Color(1, 0.95, 0.7, 1)
+theme_override_colors/font_shadow_color = Color(0, 0, 0, 0.65)
+theme_override_constants/shadow_offset_x = 1
+theme_override_constants/shadow_offset_y = 1
+theme_override_font_sizes/font_size = 16
+text = "FLAT · 50%"
+horizontal_alignment = 2
+
+[node name="PowerBar" type="ProgressBar" parent="Root"]
+visible = false
+layout_mode = 1
+anchors_preset = 3
+anchor_left = 1.0
+anchor_top = 1.0
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = -220.0
+offset_top = -110.0
+offset_right = -16.0
+offset_bottom = -94.0
+grow_horizontal = 0
+grow_vertical = 0
+max_value = 100.0
+show_percentage = false
+value = 0.0
+
 [node name="HelpLabel" type="Label" parent="Root"]
 layout_mode = 1
 anchors_preset = 2
@@ -183,7 +223,7 @@ anchor_top = 1.0
 anchor_bottom = 1.0
 offset_left = 16.0
 offset_top = -40.0
-offset_right = 900.0
+offset_right = 980.0
 offset_bottom = -12.0
 grow_vertical = 0
 theme_override_colors/font_color = Color(0.8, 0.8, 0.8, 0.9)

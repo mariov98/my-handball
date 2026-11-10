@@ -51,7 +51,17 @@ func try_pickup(player: Player) -> bool:
 var _last_carrier: Player = null
 
 
-func release_and_shoot(aim_dir: Vector3, impulse_strength: float) -> void:
+## Optional `up_bias` overrides the default loft (flat vs lob from ShotCraft).
+## `shot_meta` is informational for block/GK systems (lob, jump quality, etc.).
+var last_shot_meta: Dictionary = {}
+
+
+func release_and_shoot(
+	aim_dir: Vector3,
+	impulse_strength: float,
+	up_bias: float = -1.0,
+	shot_meta: Dictionary = {}
+) -> void:
 	var shooter := carrier
 	_last_carrier = shooter
 	carrier = null
@@ -59,15 +69,17 @@ func release_and_shoot(aim_dir: Vector3, impulse_strength: float) -> void:
 	collision_layer = 4  # layer 3 bit = 4
 	collision_mask = 1 | 2 | 4  # court + player + ball (self unused)
 	_ignore_carrier_until = Time.get_ticks_msec() + 280
-	# Brief collision ignore with shooter via layers restored after delay
-	if shooter:
-		# Temporarily disable player-ball collisions for shooter only by delaying layer
-		pass
+	last_shot_meta = shot_meta.duplicate()
+	last_shot_meta["time_msec"] = Time.get_ticks_msec()
+	last_shot_meta["shooter"] = shooter
 	var dir := aim_dir.normalized()
 	if dir.length_squared() < 0.001:
 		dir = Vector3(0, 0.2, 1)
-	dir.y = maxf(dir.y, 0.0) + SHOOT_UP_BIAS
+	var loft := SHOOT_UP_BIAS if up_bias < 0.0 else up_bias
+	dir.y = maxf(dir.y, 0.0) + loft
 	dir = dir.normalized()
+	last_shot_meta["dir"] = dir
+	last_shot_meta["impulse"] = impulse_strength
 	linear_velocity = Vector3.ZERO
 	angular_velocity = Vector3.ZERO
 	apply_central_impulse(dir * impulse_strength)

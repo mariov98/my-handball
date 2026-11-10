@@ -1,6 +1,6 @@
 # MyHandball
 
-Desktop handball prototype built with **Godot 4.3** (GDScript). **Phase 2** adds sport-logic approximations (steps, passive play, out of bounds, 6 m goal area, throw-in / goal throw) on top of the Phase 1 mini match — still capsules/boxes/spheres only.
+Desktop handball prototype built with **Godot 4.3** (GDScript). **Phase 3** adds GK dive/track feel, charged shot power / lob, jump-shot timing, and readable block traces — on top of Phase 2 rules and the Phase 1 mini match. Still capsules/boxes/spheres only.
 
 ## Requirements (Windows)
 
@@ -28,7 +28,9 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 |--------|------------------|---------|
 | Move (camera-relative) | WASD | Left stick |
 | Jump | Space | A / South |
-| Shoot (needs ball) | Left mouse / **E** | RT / R2 |
+| **Shoot (hold for power)** | Hold Left mouse / **E** | Hold RT / R2 |
+| **Lob** (while charging) | Hold **F** | Hold LT / L2 |
+| **Dive** (GK only) | **C** or Ctrl | B / East |
 | Switch teammate | **Q** or Tab | LB / RB (bumpers) |
 | Toggle aim mode | **T** | Y / North |
 
@@ -37,9 +39,29 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 **Aim modes**
 
 - **Face** — shot goes where the capsule is facing (default).
-- **Mouse** — shot aims toward the mouse cursor projected onto the court plane.
+- **Mouse** — shot aims toward the mouse cursor projected onto the court plane (lob lifts the aim point).
 
-## Phase 2 — handball rules core
+## Phase 3 — GK + shot craft
+
+Handball-informed **feel** pass. Primitives only; HUD shows power / jump timing only while relevant.
+
+| Feature | How it feels in play |
+|---------|----------------------|
+| **Shot power** | Hold shoot to charge (~0.7 s to full). Release to fire. Short tap = softer; full hold = hard flat. HUD power bar + FLAT/LOB % while charging. |
+| **Lob** | Hold **F** / LT while charging for a higher, slightly softer floater — useful over a set defense / into the far corner. |
+| **Jump-shot timing** | Shoot in the air near the apex for a **sweet** window (bonus impulse, tight scatter). Early / late releases are weaker and a bit wilder. HUD shows `JUMP · sweet/early/late`. |
+| **Dedicated GK** | Wider arm boxes + save volume. Faster lateral track on the line. **Dive** (C / Ctrl / B) launches into a low save stretch. Away AI GK predicts flight and dives into the path. Switch onto Home GK with Q to take the line yourself. |
+| **Block traces** | Shots draw a brief aim ribbon. Contested lanes tint warmer. Defenders near the flight path raise arms and can **deflect**; saves/blocks flash a hit marker. Last touch updates for OOB after a tip. |
+
+### Intentional simplifications (Phase 3)
+
+- No stamina / dive stamina meter; dive is cooldown-gated only.
+- Block is proximity + “hands up” window, not full animation or foul contact rules.
+- Jump sweet spot uses height vs an approximate apex (not a full jump-state machine).
+- Charge is binary hold time (no separate analog trigger axis beyond RT as digital shoot).
+- Still no 7 m, exclusions, or formation tactics (Phase 4+).
+
+## Phase 2 — handball rules core (still in)
 
 These are **handball-informed approximations** for a playable prototype — recognizable feel over perfect IHF fidelity. When a rule fires, the HUD shows a banner and a short freeze restart.
 
@@ -53,14 +75,6 @@ These are **handball-informed approximations** for a playable prototype — reco
 
 HUD shows a large glanceable **Steps n/3** (color + pulse per plant) and a separate Passive / PASSIVE line. Traveling uses a red **TRAVELING** banner.
 
-### Intentional simplifications
-
-- No 7 m throws as set pieces, no 2-minute exclusions, no formal 9 m free-throw wall.
-- Steps are gait-distance plants (not animated feet); no separate dribble / bounce reset; pivot pauses gait but does not wipe taken steps; resume may still use remaining plants.
-- Passive is progress-to-goal only (no referee “warning gesture” state machine).
-- Goal area is a semicircle distance check, not the full IHF D construction drawings.
-- OOB uses soft bounds because walls keep the rigid ball from leaving the arena.
-
 ## Phase 1 — mini match (still in)
 
 You control **Home** (blue). **Away** (red) runs basic AI. Both ends of the court are live scoring goals.
@@ -69,9 +83,9 @@ You control **Home** (blue). **Away** (red) runs basic AI. Both ends of the cour
 |---------|----------|
 | **Clock** | Counts down per period (default **2:00** × **2** halves). Tunable via `period_length_seconds` / `periods_total` on `MatchController`. |
 | **Kickoff / restart** | Opening kickoff to Home. After a goal, the **conceding** team restarts from center with possession. Period 2 kickoff goes to Away. Short freeze + banner, then live play. |
-| **Opponent AI** | Away outfield: chase free ball, block lanes when defending, support when a teammate carries, drive + shoot near the goal (outside 6 m). Away GK tracks the ball laterally on the line. |
+| **Opponent AI** | Away outfield: chase free ball, block lanes when defending, support when a teammate carries, drive + shoot near the goal (outside 6 m). Away GK tracks + dives on shots. |
 | **Camera** | Elevated 3/4 behind the team with (or last with) the ball; smooth flip on possession change. |
-| **UI** | Score, clock, period, rules status, GOAL / kickoff / rule / period / full-time banners. |
+| **UI** | Score, clock, period, steps/rules, shot power, GOAL / kickoff / rule / period / full-time banners. |
 
 ### Sandbox period length
 
@@ -95,7 +109,7 @@ scenes/actors/    player.tscn, ball.tscn
 scenes/match/     match.tscn (main), camera_rig.tscn
 scenes/ui/        hud.tscn
 scripts/          player, ball, court, camera_rig, goal_area, match_controller,
-                  handball_rules, hud
+                  handball_rules, shot_craft, block_trace, hud
 resources/        materials / physics (reserved)
 ```
 
@@ -126,13 +140,20 @@ resources/        materials / physics (reserved)
 - [ ] Walk grounded into opponent 6 m with/without ball → goal-area free throw; jump into crease and shoot still works
 - [ ] After any rule restart, play returns LIVE and clock still ticks
 
+### Phase 3 craft
+- [ ] Hold shoot → power bar fills → release → harder shot than a tap
+- [ ] Hold F/LT while charging → LOB label + higher arc
+- [ ] Jump and release near apex → `JUMP · sweet`; early/late labels when mistimed
+- [ ] Switch to Home GK → C/Ctrl dive stretches save volume; Away GK dives at shots
+- [ ] Shoot through a set defender → warm contested ribbon and/or deflection tip
+
 ### Optional automated smoke (dev)
 
 ```bash
 godot --path . -- --smoke
 ```
 
-Expect `SMOKE_OK` after Phase 1 checks plus traveling, sideline throw-in, goal throw, goal-area foul, and passive turnover.
+Expect `SMOKE_OK` after Phase 1–2 checks plus charged shot, jump timing, GK dive, and block deflect.
 
 ## License
 
