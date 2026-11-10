@@ -83,54 +83,98 @@ func _ready() -> void:
 		p.match_frozen = true
 	_smoke_clear_ball(ball)
 
-	# --- Yaw pivot must be the ball, not court-center / far goal ---
-	var lateral_ball := Vector3(6.0, 0.9, -2.0)
-	ball.global_position = lateral_ball
-	player.global_position = lateral_ball + Vector3(0.2, 0.0, 0.2)
-	# Snap attack facing so mid-lerp from any earlier AI possession doesn't
-	# shrink the orbit radius under the geometric assertions.
+	# --- Center corridor: square goal-centered frame (no side skew) ---
+	var center_ball := Vector3(0.0, 0.9, -2.0)
+	ball.global_position = center_ball
+	player.global_position = center_ball + Vector3(0.2, 0.0, 0.2)
 	cam.set_attack_direction(true)
 	cam.attack_sign = 1.0
 	match_node._attack_team_id = 0
 	match_node._update_camera_attack_side()
-	# Snap desired pose so we can measure geometry without waiting on lerps.
+	cam.global_position = cam._desired_position(center_ball)
+	var center_look: Vector3 = cam._look_target(center_ball)
+	var center_pivot: Vector3 = cam.pivot_point(center_ball)
+	var center_cam_flat := Vector3(cam.global_position.x, 0.0, cam.global_position.z)
+	var center_offset := center_cam_flat - center_pivot
+	print(
+		"Smoke center cam: cam_x=", cam.global_position.x,
+		" look_x=", center_look.x,
+		" yaw=", cam.ball_yaw(center_ball),
+		" offset=", center_offset
+	)
+	if absf(cam.ball_yaw(center_ball)) > 0.001:
+		push_error("Smoke: center corridor should have zero yaw")
+		get_tree().quit(1)
+		return
+	if absf(cam.global_position.x) > 0.35:
+		push_error("Smoke: center camera should sit on the attack axis (goal-square)")
+		get_tree().quit(1)
+		return
+	if absf(center_look.x) > 0.2:
+		push_error("Smoke: center look should keep the goal in the middle")
+		get_tree().quit(1)
+		return
+	if absf(center_offset.z - (-cam.attack_sign * cam.follow_distance)) > 0.2:
+		push_error("Smoke: center camera should sit behind the ball on Z")
+		get_tree().quit(1)
+		return
+	# Look should pull toward the far goal (not stay glued on the ball).
+	var goal_z := cam.attack_sign * cam.goal_depth
+	if absf(center_look.z - goal_z) > absf(center_ball.z - goal_z) * 0.75:
+		push_error("Smoke: center look should blend toward the far goal")
+		get_tree().quit(1)
+		return
+
+	# --- Side ball: subtle yaw about the ball; look X << ball X (goal stays anchor) ---
+	var lateral_ball := Vector3(6.0, 0.9, -2.0)
+	ball.global_position = lateral_ball
+	player.global_position = lateral_ball + Vector3(0.2, 0.0, 0.2)
+	cam.set_attack_direction(true)
+	cam.attack_sign = 1.0
+	match_node._attack_team_id = 0
+	match_node._update_camera_attack_side()
 	cam.global_position = cam._desired_position(lateral_ball)
 	var look_pt: Vector3 = cam._look_target(lateral_ball)
 	var pivot: Vector3 = cam.pivot_point(lateral_ball)
 	var cam_flat := Vector3(cam.global_position.x, 0.0, cam.global_position.z)
 	var pivot_to_cam := cam_flat - pivot
-	var expected_len := Vector2(cam.side_bias, cam.follow_distance).length()
-	var look_flat_dist := Vector2(look_pt.x - pivot.x, look_pt.z - pivot.z).length()
+	var yaw := cam.ball_yaw(lateral_ball)
+	var cf := cam.corridor_factor(lateral_ball.x)
+	var expected_lateral := cam.side_bias * cam.attack_sign * cf
+	var expected_len := Vector2(expected_lateral, cam.follow_distance).length()
 	print(
-		"Smoke pivot: pivot=", pivot,
+		"Smoke side cam: pivot=", pivot,
 		" cam_flat=", cam_flat,
 		" |offset|=", pivot_to_cam.length(),
 		" expected≈", expected_len,
-		" look_lead=", look_flat_dist
+		" yaw=", yaw,
+		" look_x=", look_pt.x,
+		" ball_x=", lateral_ball.x
 	)
 	if pivot.distance_to(Vector3(lateral_ball.x, 0.0, lateral_ball.z)) > 0.01:
 		push_error("Smoke: pivot is not at the ball")
 		get_tree().quit(1)
 		return
-	if absf(pivot_to_cam.length() - expected_len) > 0.15:
+	if absf(pivot_to_cam.length() - expected_len) > 0.2:
 		push_error("Smoke: camera offset length not orbiting ball")
 		get_tree().quit(1)
 		return
-	# Look lead stays near the ball (<< distance to far goal ~20m).
-	if look_flat_dist > cam.look_ahead + 0.5:
-		push_error("Smoke: look target too far from ball (goal-anchored?)")
+	if yaw <= 0.0 or yaw > cam.max_ball_yaw + 0.001:
+		push_error("Smoke: side ball should apply subtle positive yaw")
 		get_tree().quit(1)
 		return
-	# With positive ball X yaw, camera should sit left of a pure +X side bias orbit
-	# relative to the ball — i.e. offset is rotated around the ball, not world origin.
-	var yaw := cam.ball_yaw(lateral_ball)
+	# Goal remains the visual anchor — look X must not track the ball into center.
+	if absf(look_pt.x) >= absf(lateral_ball.x) * 0.45:
+		push_error("Smoke: look X tracks ball too hard (should keep goal anchored)")
+		get_tree().quit(1)
+		return
 	var unyawed := pivot_to_cam.rotated(Vector3.UP, -yaw)
-	print("Smoke pivot unyawed offset=", unyawed, " yaw=", yaw)
-	if absf(unyawed.x - cam.side_bias * cam.attack_sign) > 0.2:
+	print("Smoke side unyawed offset=", unyawed)
+	if absf(unyawed.x - expected_lateral) > 0.25:
 		push_error("Smoke: yaw is not rotating around ball pivot")
 		get_tree().quit(1)
 		return
-	if absf(unyawed.z - (-cam.attack_sign * cam.follow_distance)) > 0.2:
+	if absf(unyawed.z - (-cam.attack_sign * cam.follow_distance)) > 0.25:
 		push_error("Smoke: yaw orbit Z not ball-centered")
 		get_tree().quit(1)
 		return
@@ -309,6 +353,54 @@ func _ready() -> void:
 	print("Smoke switch: ", before.name if before else "null", " -> ", after.name if after else "null")
 	if after == null or after == before:
 		push_error("Smoke: switch failed")
+		get_tree().quit(1)
+		return
+
+	# --- Pass: soft release toward a teammate ---
+	_smoke_clear_ball(ball)
+	player = match_node._first_outfield(match_node._home_players)
+	match_node._set_controlled(player)
+	player.global_position = Vector3(0.0, player.start_position.y, 0.0)
+	player.rotation.y = 0.0
+	player.velocity = Vector3.ZERO
+	var receiver: Player = null
+	for p in match_node._home_players:
+		if p != player and not p.is_goalkeeper:
+			receiver = p
+			break
+	if receiver == null:
+		push_error("Smoke: no pass receiver")
+		get_tree().quit(1)
+		return
+	receiver.global_position = Vector3(0.0, receiver.start_position.y, 6.0)
+	receiver.velocity = Vector3.ZERO
+	if not ball.try_pickup(player):
+		push_error("Smoke: pass setup pickup failed")
+		get_tree().quit(1)
+		return
+	player.has_ball = true
+	match_node._try_pass()
+	await get_tree().create_timer(0.05).timeout
+	print(
+		"Smoke pass: carrier=", ball.carrier,
+		" speed=", ball.linear_velocity.length(),
+		" meta=", ball.last_shot_meta
+	)
+	if ball.carrier != null:
+		push_error("Smoke: pass did not release ball")
+		get_tree().quit(1)
+		return
+	if ball.linear_velocity.length() < 5.0:
+		push_error("Smoke: pass too weak")
+		get_tree().quit(1)
+		return
+	if not bool(ball.last_shot_meta.get("pass", false)):
+		push_error("Smoke: pass meta missing")
+		get_tree().quit(1)
+		return
+	# Pass should generally travel toward +Z (receiver ahead).
+	if ball.linear_velocity.z <= 1.0:
+		push_error("Smoke: pass should travel toward receiver (+Z)")
 		get_tree().quit(1)
 		return
 

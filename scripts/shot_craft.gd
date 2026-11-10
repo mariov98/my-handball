@@ -3,12 +3,12 @@ class_name ShotCraft
 
 ## Phase 3 shot feel helpers: charge power, lob loft, jump-shot timing window.
 
-const CHARGE_TIME_S := 0.70
-const IMPULSE_MIN := 9.5
-const IMPULSE_MAX := 21.5
-const FLAT_UP_BIAS := 0.06
-const LOB_UP_BIAS := 0.62
-const LOB_IMPULSE_SCALE := 0.82
+const CHARGE_TIME_S := 0.58
+const IMPULSE_MIN := 10.5
+const IMPULSE_MAX := 22.0
+const FLAT_UP_BIAS := 0.05
+const LOB_UP_BIAS := 0.58
+const LOB_IMPULSE_SCALE := 0.84
 ## Jump-shot sweet spot: fraction of apex height (0–1) that counts as "good".
 const JUMP_SWEET_MIN := 0.55
 const JUMP_SWEET_MAX := 0.98

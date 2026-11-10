@@ -6,8 +6,8 @@ class_name Ball
 signal picked_up(player: Player)
 signal released(player: Player)
 
-const FOLLOW_LERP := 28.0
-const SHOOT_UP_BIAS := 0.18
+const FOLLOW_LERP := 40.0
+const SHOOT_UP_BIAS := 0.16
 
 var carrier: Player = null
 var start_position: Vector3 = Vector3.ZERO
@@ -77,7 +77,7 @@ func release_and_shoot(
 	freeze = false
 	collision_layer = 4  # layer 3 bit = 4
 	collision_mask = 1 | 2 | 4  # court + player + ball (self unused)
-	_ignore_carrier_until = Time.get_ticks_msec() + 280
+	_ignore_carrier_until = Time.get_ticks_msec() + 200
 	last_shot_meta = shot_meta.duplicate()
 	last_shot_meta["time_msec"] = Time.get_ticks_msec()
 	last_shot_meta["shooter"] = shooter

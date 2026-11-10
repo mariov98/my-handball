@@ -8,12 +8,14 @@ enum AimMode { FACE, MOUSE_COURT }
 enum MatchState { PRE_KICKOFF, LIVE, GOAL_PAUSE, PERIOD_BREAK, MATCH_OVER, RULE_RESTART }
 
 const SHOOT_IMPULSE := 16.0 ## Fallback / legacy tap strength (charge system preferred).
-const GOAL_PAUSE_DELAY := 1.6
-const GOAL_SLOWMO_SCALE := 0.32
-const KICKOFF_FREEZE := 0.85
-const RESTART_FREEZE := 0.75
-const PERIOD_BREAK_DELAY := 2.2
+const GOAL_PAUSE_DELAY := 1.25
+const GOAL_SLOWMO_SCALE := 0.38
+const KICKOFF_FREEZE := 0.55
+const RESTART_FREEZE := 0.5
+const PERIOD_BREAK_DELAY := 1.7
 const BLOCK_TRACE_LEN := 9.5
+const PASS_IMPULSE_MIN := 8.0
+const PASS_IMPULSE_MAX := 12.5
 
 @export var home_team_path: NodePath
 @export var away_team_path: NodePath
@@ -64,7 +66,7 @@ func _ready() -> void:
 	camera_rig.setup(ball, true)
 	_refresh_hud()
 	print(
-		"MyHandball Phase 5 presentation ready. Period=%ds x%d. Materials + trails + goal juice."
+		"MyHandball camera + feel pass ready. Period=%ds x%d. Goal-centered cam, pass, snappier play."
 		% [int(period_length_seconds), periods_total]
 	)
 	var user_args := OS.get_cmdline_user_args()
@@ -108,6 +110,13 @@ func _ready() -> void:
 		var sn_p5 := Node.new()
 		sn_p5.set_script(p5_shot)
 		add_child(sn_p5)
+		return
+	if "--screenshot-camera-feel" in user_args:
+		await _run_kickoff(0, "Kickoff")
+		var cam_shot := load("res://scripts/screenshot_camera_feel.gd") as GDScript
+		var sn_cam := Node.new()
+		sn_cam.set_script(cam_shot)
+		add_child(sn_cam)
 		return
 	if "--screenshot" in user_args:
 		# Kickoff first so the HUD clock/score are on screen, then capture.
@@ -214,6 +223,10 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("switch_player"):
 		if match_state == MatchState.LIVE:
 			_cycle_teammate()
+		get_viewport().set_input_as_handled()
+		return
+	if event.is_action_pressed("pass_ball") and match_state == MatchState.LIVE:
+		_try_pass()
 		get_viewport().set_input_as_handled()
 		return
 	# Phase 3: hold shoot to charge, release to fire. Tap still works (min power).
@@ -385,6 +398,70 @@ func _try_shoot_charged(held_s: float) -> void:
 ## Instant tap path used by smoke / scripts (full mid charge, flat).
 func _try_shoot() -> void:
 	_try_shoot_charged(ShotCraft.CHARGE_TIME_S * 0.55)
+
+
+## Soft pass to best forward teammate (or a short toss along face).
+func _try_pass() -> void:
+	if controlled_player == null or not controlled_player.has_ball:
+		return
+	if _charging:
+		_cancel_charge()
+	var target := _best_pass_target(controlled_player)
+	if target:
+		var dist := controlled_player.global_position.distance_to(target.global_position)
+		var impulse := clampf(
+			lerpf(PASS_IMPULSE_MIN, PASS_IMPULSE_MAX, dist / 12.0),
+			PASS_IMPULSE_MIN,
+			PASS_IMPULSE_MAX
+		)
+		controlled_player.try_pass_to(target, ball, impulse)
+		return
+	# No open mate — soft toss along facing so the action never feels dead.
+	var aim := controlled_player.face_direction()
+	aim.y = 0.12
+	aim = aim.normalized()
+	controlled_player.try_shoot(
+		aim,
+		PASS_IMPULSE_MIN + 0.5,
+		ball,
+		0.12,
+		{"pass": true, "charge": 0.25}
+	)
+
+
+func _best_pass_target(passer: Player) -> Player:
+	if passer == null:
+		return null
+	var roster := _home_players if passer.team_id == 0 else _away_players
+	var best: Player = null
+	var best_score := -INF
+	var face := passer.face_direction()
+	face.y = 0.0
+	if face.length_squared() < 0.01:
+		face = Vector3(0.0, 0.0, 1.0 if passer.team_id == 0 else -1.0)
+	else:
+		face = face.normalized()
+	for mate in roster:
+		if mate == passer or mate.is_goalkeeper or mate.match_frozen:
+			continue
+		var to_m := mate.global_position - passer.global_position
+		to_m.y = 0.0
+		var d := to_m.length()
+		if d < 2.2 or d > 15.0:
+			continue
+		var dir := to_m / d
+		var forward := dir.dot(face)
+		if forward < -0.15:
+			continue
+		var toward_goal := dir.z * (1.0 if passer.team_id == 0 else -1.0)
+		var score := forward * 2.2 + toward_goal * 1.5 + d * 0.04
+		# Prefer uncontrolled teammates so the human can switch onto the catch.
+		if not mate.controlled:
+			score += 0.35
+		if score > best_score:
+			best_score = score
+			best = mate
+	return best
 
 
 func _compute_aim(lob: bool = false) -> Vector3:
