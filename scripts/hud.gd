@@ -10,7 +10,7 @@ class_name MatchHUD
 
 func _ready() -> void:
 	goal_label.visible = false
-	help_label.text = "WASD/stick move · Space/A jump · LMB/RT/E shoot · Q/Tab/bumpers switch · T/Y aim mode"
+	help_label.text = "WASD/stick camera-relative · Space/A jump · LMB/RT/E shoot · Q/Tab/bumpers switch · T/Y aim mode"
 
 
 func set_score(home: int, away: int) -> void:
