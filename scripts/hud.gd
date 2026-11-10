@@ -36,7 +36,7 @@ func _ready() -> void:
 	if power_bar:
 		power_bar.visible = false
 		power_bar.value = 0.0
-	help_label.text = "WASD move · Space jump · hold LMB/E/RT power · F/LT lob · C/Ctrl/B dive (GK) · Q switch · T aim"
+	help_label.text = "WASD move · Space jump · hold LMB/E/RT power · F/LT lob · C/Ctrl/B dive (GK) · Q cycle · R best · T aim"
 
 
 func set_score(home: int, away: int) -> void:
@@ -145,14 +145,14 @@ func flash_restart(code: String, team_id: int) -> void:
 		"traveling":
 			title = "TRAVELING"
 			color = COLOR_BANNER_TRAVEL
-			_flash_center(banner_label, "%s — free throw %s" % [title, team], 1.05, 0.4, color)
+			_flash_center(banner_label, "%s — 9m free throw %s" % [title, team], 1.05, 0.4, color)
 			steps_label.add_theme_color_override("font_color", COLOR_STEPS_TRAVEL)
 			return
 		"passive":
-			title = "Passive — free throw"
+			title = "Passive — 9m free throw"
 			color = COLOR_BANNER_WARN
 		"goal_area":
-			title = "Free throw (6m)"
+			title = "Free throw (9m wall)"
 		_:
 			title = code.capitalize()
 	_flash_center(banner_label, "%s — %s" % [title, team], 0.75, 0.35, color)

@@ -638,6 +638,147 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 
+	# --- Phase 4: formations / set pieces / off-ball / switch-best ---
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+
+	# Role map: idx 1=LW, 2=CB, 3=RW
+	var lw: Player = null
+	var cb: Player = null
+	var rw: Player = null
+	for p in match_node._home_players:
+		if p.is_goalkeeper:
+			continue
+		match Formations.role_for(p):
+			Formations.Role.LEFT_WING:
+				lw = p
+			Formations.Role.RIGHT_WING:
+				rw = p
+			Formations.Role.CENTER_BACK:
+				cb = p
+	if lw == null or cb == null or rw == null:
+		push_error("Smoke: missing LW/CB/RW role mapping")
+		get_tree().quit(1)
+		return
+	var atk_lw := Formations.attack_slot(lw, Vector3(0, 0, 10))
+	var atk_rw := Formations.attack_slot(rw, Vector3(0, 0, 10))
+	var atk_cb := Formations.attack_slot(cb, Vector3(0, 0, 10))
+	print("Smoke attack slots LW=", atk_lw, " CB=", atk_cb, " RW=", atk_rw)
+	if atk_lw.x >= -3.0 or atk_rw.x <= 3.0:
+		push_error("Smoke: wings should sit wide on attack")
+		get_tree().quit(1)
+		return
+	if atk_cb.z >= atk_lw.z:
+		# Home attacks +Z: CB (backcourt) should be deeper (smaller z) than wings near arc.
+		# When progress is high CB can pivot closer — use a mid ball for backcourt check.
+		atk_cb = Formations.attack_slot(cb, Vector3(0, 0, 2))
+		atk_lw = Formations.attack_slot(lw, Vector3(0, 0, 2))
+		if atk_cb.z >= atk_lw.z - 0.5:
+			push_error("Smoke: CB should sit deeper than wings in backcourt shape")
+			get_tree().quit(1)
+			return
+
+	var def_lw := Formations.defense_slot(lw, Vector3(2, 0, -8), null)
+	var def_rw := Formations.defense_slot(rw, Vector3(2, 0, -8), null)
+	print("Smoke defense slots LW=", def_lw, " RW=", def_rw)
+	if def_lw.x >= def_rw.x:
+		push_error("Smoke: defense LW should be left of RW")
+		get_tree().quit(1)
+		return
+	if Court.in_goal_area(def_lw, 0) or Court.in_goal_area(def_rw, 0):
+		push_error("Smoke: defense slots must stay outside own 6m")
+		get_tree().quit(1)
+		return
+
+	# Set piece: free-throw wall places defenders ~3m+ from taker, award team around spot
+	var foul_spot := Vector3(1.5, 0.0, 12.0)
+	var away_taker := match_node._nearest_outfield(1, foul_spot)
+	if away_taker == null:
+		push_error("Smoke: no away taker for set piece")
+		get_tree().quit(1)
+		return
+	match_node._place_set_piece("traveling", 1, foul_spot, away_taker)
+	var wall_ok := false
+	var min_wall_d := INF
+	for p in match_node._home_players:
+		if p.is_goalkeeper:
+			continue
+		var d := p.global_position.distance_to(away_taker.global_position)
+		min_wall_d = minf(min_wall_d, d)
+		if d >= Formations.WALL_GAP_M * 0.85:
+			wall_ok = true
+	print(
+		"Smoke set piece: taker=", away_taker.global_position,
+		" min_wall_d=", min_wall_d, " wall_ok=", wall_ok
+	)
+	if away_taker.global_position.distance_to(foul_spot) > 1.25:
+		push_error("Smoke: free-throw taker not placed at foul spot")
+		get_tree().quit(1)
+		return
+	if not wall_ok or min_wall_d < 2.0:
+		push_error("Smoke: 9m wall should keep defenders off the taker")
+		get_tree().quit(1)
+		return
+
+	# Home off-ball AI: uncontrolled teammates have ai_enabled
+	match_node._set_controlled(cb)
+	match_node._refresh_home_ai()
+	var offball_ai := 0
+	for p in match_node._home_players:
+		if p != match_node.controlled_player and p.ai_enabled:
+			offball_ai += 1
+	print("Smoke home off-ball AI count=", offball_ai)
+	if offball_ai < 3:
+		push_error("Smoke: expected uncontrolled home players to run off-ball AI")
+		get_tree().quit(1)
+		return
+
+	# Switch-to-best: free ball near LW → should prefer LW over far RW
+	_smoke_clear_ball(ball)
+	lw.global_position = Vector3(-4.0, lw.start_position.y, 0.0)
+	rw.global_position = Vector3(8.0, rw.start_position.y, -10.0)
+	cb.global_position = Vector3(0.0, cb.start_position.y, -8.0)
+	ball.global_position = Vector3(-3.5, 1.0, 0.2)
+	ball.linear_velocity = Vector3.ZERO
+	match_node._set_controlled(cb)
+	match_node._switch_to_best()
+	print("Smoke switch-best free ball -> ", match_node.controlled_player.name if match_node.controlled_player else "null")
+	if match_node.controlled_player != lw:
+		push_error("Smoke: switch-best should pick nearest (LW) on free ball")
+		get_tree().quit(1)
+		return
+
+	# Switch-to-best defending: prefer outfielder near carrier
+	_smoke_clear_ball(ball)
+	var away_carrier := match_node._first_outfield(match_node._away_players)
+	away_carrier.global_position = Vector3(2.0, away_carrier.start_position.y, -6.0)
+	if not ball.try_pickup(away_carrier):
+		push_error("Smoke: away carrier pickup failed")
+		get_tree().quit(1)
+		return
+	away_carrier.has_ball = true
+	match_node.rules.on_pickup(away_carrier)
+	match_node._attack_team_id = 1
+	lw.global_position = Vector3(1.5, lw.start_position.y, -5.0)
+	rw.global_position = Vector3(-7.0, rw.start_position.y, 8.0)
+	cb.global_position = Vector3(0.0, cb.start_position.y, 10.0)
+	match_node._set_controlled(cb)
+	match_node._switch_to_best()
+	print("Smoke switch-best defend -> ", match_node.controlled_player.name if match_node.controlled_player else "null")
+	if match_node.controlled_player != lw:
+		push_error("Smoke: switch-best should pick nearest defender to carrier")
+		get_tree().quit(1)
+		return
+
+	# Cycle switch still advances roster
+	var before_cycle := match_node.controlled_player
+	match_node._cycle_teammate()
+	if match_node.controlled_player == null or match_node.controlled_player == before_cycle:
+		push_error("Smoke: cycle switch failed")
+		get_tree().quit(1)
+		return
+	print("Smoke cycle switch OK")
+
 	print("SMOKE_OK")
 	get_tree().quit(0)
 
