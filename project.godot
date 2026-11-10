@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="MyHandball"
-config/description="Phase 4 handball — formations, set pieces, off-ball positioning, switch-to-best."
+config/description="Phase 5 handball — presentation pass: materials, ball trails, goal juice."
 run/main_scene="res://scenes/match/match.tscn"
 config/features=PackedStringArray("4.3", "Forward Plus")
 config/icon="res://icon.svg"

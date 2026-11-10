@@ -1,6 +1,6 @@
 # MyHandball
 
-Desktop handball prototype built with **Godot 4.3** (GDScript). **Phase 4** adds tactics lite — formations, set-piece restarts, auto off-ball positioning, and switch-to-best — on top of Phase 3 craft, Phase 2 rules, and the Phase 1 mini match. Still capsules/boxes/spheres only.
+Desktop handball prototype built with **Godot 4.3** (GDScript). **Phase 5** is a presentation pass — clearer materials, ball trails, and punchier goal juice — on top of Phase 4 tactics, Phase 3 craft, Phase 2 rules, and the Phase 1 mini match. Still engine primitives (polished capsules, no Mixamo).
 
 ## Requirements (Windows)
 
@@ -44,7 +44,25 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 - **Face** — shot goes where the capsule is facing (default).
 - **Mouse** — shot aims toward the mouse cursor projected onto the court plane (lob lifts the aim point).
 
-## Phase 4 — tactics lite
+## Phase 5 — presentation pass
+
+Readability and juice **without** reworking gameplay systems. Engine materials + mesh primitives only.
+
+| Feature | How it feels in play |
+|---------|----------------------|
+| **Court materials** | Warm indoor wood floor, brighter lines, blue/red crease tints, red goal posts + white net, low sideline boards, hall lighting. |
+| **Team kits** | Punchier Home blue / Away red, white chest stripe, socks/shoes/shoulders, skin-tone heads, selection rim on the controlled player. |
+| **Ball** | Glossy handball orange with dark seam rings; **mesh trail** while the free ball flies (works under OpenGL3). |
+| **Goal juice** | Slow-mo (`Engine.time_scale`), full-screen flash, scale-punch **GOAL! HOME/AWAY** banner, score label bump — then kickoff as before. |
+
+### Intentional skips (Phase 5)
+
+- No Mixamo / custom humanoid rigs or animation retargeting (prefer polished capsules).
+- No Asset Store shopping / custom modeling pipeline.
+- No career / sim depth (Phase 6).
+- Trail is mesh dots (not GPU particles) so headless / llvmpipe smoke stays green.
+
+## Phase 4 — tactics lite (still in)
 
 Team-play primitives for **3 outfield + GK**. Spacing is handball-recognizable (wing / backcourt / soft pivot) without full playbooks.
 
@@ -129,7 +147,7 @@ scenes/court/     court.tscn
 scenes/actors/    player.tscn, ball.tscn
 scenes/match/     match.tscn (main), camera_rig.tscn
 scenes/ui/        hud.tscn
-scripts/          player, ball, court, camera_rig, goal_area, match_controller,
+scripts/          player, ball, ball_trail, court, camera_rig, goal_area, match_controller,
                   handball_rules, shot_craft, block_trace, formations, hud
 resources/        materials / physics (reserved)
 ```
@@ -175,13 +193,19 @@ resources/        materials / physics (reserved)
 - [ ] Free ball near one teammate → **R** jumps to them; defending → **R** picks the cover man
 - [ ] **Q** still cycles roster in order (distinct from **R**)
 
+### Phase 5 presentation
+- [ ] Court reads as wood hall with crease tints, red posts, boards
+- [ ] Home/Away kits + controlled player rim are obvious at a glance
+- [ ] Shoot → orange ball trail follows the shot
+- [ ] Score → slow-mo + flash + punchy GOAL banner, then normal-speed kickoff
+
 ### Optional automated smoke (dev)
 
 ```bash
 godot --path . -- --smoke
 ```
 
-Expect `SMOKE_OK` after Phase 1–3 checks plus formation slots, 9 m wall placement, off-ball AI flags, and switch-best / cycle.
+Expect `SMOKE_OK` after Phase 1–5 checks (rules, craft, tactics, trail/kits, goal juice time_scale restore).
 
 ## License
 
