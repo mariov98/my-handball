@@ -98,6 +98,17 @@ theme_override_constants/shadow_offset_y = 1
 theme_override_font_sizes/font_size = 18
 text = ""
 
+[node name="FlashOverlay" type="ColorRect" parent="Root"]
+visible = false
+layout_mode = 1
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+mouse_filter = 2
+color = Color(1, 1, 1, 0)
+
 [node name="GoalLabel" type="Label" parent="Root"]
 visible = false
 layout_mode = 1
@@ -106,17 +117,18 @@ anchor_left = 0.5
 anchor_top = 0.5
 anchor_right = 0.5
 anchor_bottom = 0.5
-offset_left = -200.0
-offset_top = -60.0
-offset_right = 200.0
-offset_bottom = 60.0
+offset_left = -280.0
+offset_top = -70.0
+offset_right = 280.0
+offset_bottom = 70.0
 grow_horizontal = 2
 grow_vertical = 2
+pivot_offset = Vector2(280, 70)
 theme_override_colors/font_color = Color(1, 0.85, 0.2, 1)
-theme_override_colors/font_shadow_color = Color(0, 0, 0, 0.8)
-theme_override_constants/shadow_offset_x = 3
-theme_override_constants/shadow_offset_y = 3
-theme_override_font_sizes/font_size = 72
+theme_override_colors/font_shadow_color = Color(0, 0, 0, 0.85)
+theme_override_constants/shadow_offset_x = 4
+theme_override_constants/shadow_offset_y = 4
+theme_override_font_sizes/font_size = 84
 text = "GOAL!"
 horizontal_alignment = 1
 vertical_alignment = 1

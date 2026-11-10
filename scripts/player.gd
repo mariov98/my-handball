@@ -71,6 +71,8 @@ var _arm_l: MeshInstance3D
 var _arm_r: MeshInstance3D
 var _save_area: Area3D
 var _block_area: Area3D
+var _body_mat: StandardMaterial3D
+var _kit_nodes_ready: bool = false
 
 @onready var ball_attach: Marker3D = $BallAttach
 @onready var pickup_area: Area3D = $PickupArea
@@ -80,6 +82,7 @@ func _ready() -> void:
 	start_position = global_position
 	start_yaw = rotation.y
 	_ensure_craft_nodes()
+	_ensure_kit_nodes()
 	_apply_team_material()
 	pickup_area.body_entered.connect(_on_pickup_body_entered)
 	if _save_area:
@@ -643,28 +646,105 @@ func _update_arm_pose(_delta: float) -> void:
 		_arm_r.position = Vector3(0.45, 1.05, 0.0)
 
 
+func _ensure_kit_nodes() -> void:
+	if _kit_nodes_ready:
+		return
+	_kit_nodes_ready = true
+	# White chest stripe + dark socks/shoes so kits read without custom meshes.
+	if get_node_or_null("ChestStripe") == null:
+		var stripe := MeshInstance3D.new()
+		stripe.name = "ChestStripe"
+		var box := BoxMesh.new()
+		box.size = Vector3(0.72, 0.14, 0.38)
+		stripe.mesh = box
+		stripe.position = Vector3(0.0, 1.15, 0.02)
+		add_child(stripe)
+	if get_node_or_null("SockL") == null:
+		_make_kit_box("SockL", Vector3(0.16, 0.28, 0.16), Vector3(-0.14, 0.22, 0.0))
+		_make_kit_box("SockR", Vector3(0.16, 0.28, 0.16), Vector3(0.14, 0.22, 0.0))
+		_make_kit_box("ShoeL", Vector3(0.2, 0.08, 0.32), Vector3(-0.14, 0.04, 0.04))
+		_make_kit_box("ShoeR", Vector3(0.2, 0.08, 0.32), Vector3(0.14, 0.04, 0.04))
+	# Soft shoulder pads for a slightly more humanoid silhouette (still boxes).
+	if get_node_or_null("ShoulderL") == null:
+		_make_kit_box("ShoulderL", Vector3(0.22, 0.16, 0.22), Vector3(-0.38, 1.55, 0.0))
+		_make_kit_box("ShoulderR", Vector3(0.22, 0.16, 0.22), Vector3(0.38, 1.55, 0.0))
+
+
+func _make_kit_box(node_name: String, size: Vector3, pos: Vector3) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	mi.name = node_name
+	var box := BoxMesh.new()
+	box.size = size
+	mi.mesh = box
+	mi.position = pos
+	add_child(mi)
+	return mi
+
+
+## Rim highlight so the controlled athlete is obvious among eight capsules.
+func set_selection_highlight(active: bool) -> void:
+	if _body_mat == null:
+		return
+	if active:
+		_body_mat.emission_enabled = true
+		_body_mat.emission = body_color.lightened(0.35)
+		_body_mat.emission_energy_multiplier = 0.85
+	else:
+		_body_mat.emission_enabled = true
+		_body_mat.emission = body_color.darkened(0.2)
+		_body_mat.emission_energy_multiplier = 0.12 if is_goalkeeper else 0.05
+
+
 func _apply_team_material() -> void:
 	_mesh = get_node_or_null("MeshInstance3D") as MeshInstance3D
 	if _mesh == null:
 		return
 	_mesh_base_y = _mesh.position.y
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = body_color
-	mat.roughness = 0.7
-	_mesh.material_override = mat
+	_body_mat = StandardMaterial3D.new()
+	_body_mat.albedo_color = body_color
+	_body_mat.roughness = 0.48
+	_body_mat.metallic = 0.08
+	_body_mat.emission_enabled = true
+	_body_mat.emission = body_color.darkened(0.25)
+	_body_mat.emission_energy_multiplier = 0.12 if is_goalkeeper else 0.05
+	_mesh.material_override = _body_mat
 	var head := get_node_or_null("Head") as MeshInstance3D
 	if head:
 		var head_mat := StandardMaterial3D.new()
-		head_mat.albedo_color = body_color.lightened(0.25)
+		# Skin-ish head so the kit/body contrast reads (darker so it isn't washed to white).
+		head_mat.albedo_color = Color(0.72, 0.52, 0.38)
+		head_mat.roughness = 0.7
 		head.material_override = head_mat
 	# Arm materials — GK slightly brighter so the line reads.
 	var arm_mat := StandardMaterial3D.new()
-	arm_mat.albedo_color = body_color.lightened(0.1 if is_goalkeeper else 0.0)
-	arm_mat.roughness = 0.65
+	arm_mat.albedo_color = body_color.lightened(0.12 if is_goalkeeper else 0.05)
+	arm_mat.roughness = 0.5
 	if _arm_l:
 		_arm_l.material_override = arm_mat
 	if _arm_r:
 		_arm_r.material_override = arm_mat
+
+	var stripe := get_node_or_null("ChestStripe") as MeshInstance3D
+	if stripe:
+		var stripe_mat := StandardMaterial3D.new()
+		stripe_mat.albedo_color = Color(0.95, 0.95, 0.97) if not is_goalkeeper else Color(0.15, 0.15, 0.18)
+		stripe_mat.roughness = 0.55
+		stripe.material_override = stripe_mat
+	var sock_mat := StandardMaterial3D.new()
+	sock_mat.albedo_color = body_color.darkened(0.35)
+	sock_mat.roughness = 0.7
+	for sock_name in ["SockL", "SockR", "ShoulderL", "ShoulderR"]:
+		var sock := get_node_or_null(sock_name) as MeshInstance3D
+		if sock:
+			sock.material_override = sock_mat
+	var shoe_mat := StandardMaterial3D.new()
+	shoe_mat.albedo_color = Color(0.12, 0.12, 0.14)
+	shoe_mat.roughness = 0.6
+	for shoe_name in ["ShoeL", "ShoeR"]:
+		var shoe := get_node_or_null(shoe_name) as MeshInstance3D
+		if shoe:
+			shoe.material_override = shoe_mat
+	set_selection_highlight(controlled)
 
 
 func _update_bob(delta: float, speed: float) -> void:

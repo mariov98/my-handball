@@ -13,6 +13,8 @@ var carrier: Player = null
 var start_position: Vector3 = Vector3.ZERO
 
 var _ignore_carrier_until: float = 0.0
+var _trail: Node3D = null
+const TRAIL_MIN_SPEED := 3.5
 
 
 func _ready() -> void:
@@ -20,9 +22,14 @@ func _ready() -> void:
 	contact_monitor = true
 	max_contacts_reported = 4
 	continuous_cd = true
+	_apply_presentation_material()
+	_ensure_trail()
 
 
 func _physics_process(delta: float) -> void:
+	if _trail and _trail.has_method("set_active"):
+		var flying := carrier == null and not freeze and linear_velocity.length() >= TRAIL_MIN_SPEED
+		_trail.call("set_active", flying)
 	if carrier == null:
 		return
 	# Kinematic follow while possessed — freeze physics.
@@ -44,6 +51,8 @@ func try_pickup(player: Player) -> bool:
 	angular_velocity = Vector3.ZERO
 	collision_layer = 0  # avoid shoving while held
 	collision_mask = 0
+	if _trail and _trail.has_method("set_active"):
+		_trail.call("set_active", false)
 	picked_up.emit(player)
 	return true
 
@@ -83,6 +92,8 @@ func release_and_shoot(
 	linear_velocity = Vector3.ZERO
 	angular_velocity = Vector3.ZERO
 	apply_central_impulse(dir * impulse_strength)
+	if _trail and _trail.has_method("set_active"):
+		_trail.call("set_active", true)
 	if shooter:
 		released.emit(shooter)
 	# Restore collision after short delay so ball clears the hand
@@ -106,3 +117,43 @@ func reset_to_start() -> void:
 	collision_layer = 4
 	collision_mask = 1 | 2
 	_ignore_carrier_until = 0.0
+	if _trail:
+		if _trail.has_method("clear"):
+			_trail.call("clear")
+		if _trail.has_method("set_active"):
+			_trail.call("set_active", false)
+
+
+func _ensure_trail() -> void:
+	_trail = get_node_or_null("BallTrail") as Node3D
+	if _trail == null:
+		var trail_script := load("res://scripts/ball_trail.gd") as GDScript
+		_trail = Node3D.new()
+		_trail.set_script(trail_script)
+		_trail.name = "BallTrail"
+		add_child(_trail)
+
+
+func _apply_presentation_material() -> void:
+	var mesh := get_node_or_null("MeshInstance3D") as MeshInstance3D
+	if mesh == null:
+		return
+	var mat := StandardMaterial3D.new()
+	# Classic handball orange — unshaded so it stays vivid under OpenGL3/llvmpipe.
+	mat.albedo_color = Color(0.98, 0.38, 0.05)
+	mat.roughness = 0.4
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mesh.material_override = mat
+	# Dark seam band for silhouette readability (engine primitives only).
+	if get_node_or_null("SeamBand") == null:
+		var band := MeshInstance3D.new()
+		band.name = "SeamBand"
+		var torus := TorusMesh.new()
+		torus.inner_radius = 0.105
+		torus.outer_radius = 0.122
+		band.mesh = torus
+		var seam := StandardMaterial3D.new()
+		seam.albedo_color = Color(0.1, 0.06, 0.04)
+		seam.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		band.material_override = seam
+		add_child(band)

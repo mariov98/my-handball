@@ -1,14 +1,15 @@
 extends Node3D
 class_name MatchController
 
-## Routes input, possession, team switch, scoring, clock, kickoff, AI, Phase 2 rules,
-## Phase 3 shot craft / GK dive / block traces, and Phase 4 tactics lite.
+## Routes input, possession, team switch, scoring, clock, kickoff, AI, Phase 2–4
+## rules/tactics, and Phase 5 presentation (materials / trail / goal juice).
 
 enum AimMode { FACE, MOUSE_COURT }
 enum MatchState { PRE_KICKOFF, LIVE, GOAL_PAUSE, PERIOD_BREAK, MATCH_OVER, RULE_RESTART }
 
 const SHOOT_IMPULSE := 16.0 ## Fallback / legacy tap strength (charge system preferred).
 const GOAL_PAUSE_DELAY := 1.6
+const GOAL_SLOWMO_SCALE := 0.32
 const KICKOFF_FREEZE := 0.85
 const RESTART_FREEZE := 0.75
 const PERIOD_BREAK_DELAY := 2.2
@@ -63,7 +64,7 @@ func _ready() -> void:
 	camera_rig.setup(ball, true)
 	_refresh_hud()
 	print(
-		"MyHandball Phase 4 tactics lite ready. Period=%ds x%d. Formations + set pieces + off-ball + switch-best."
+		"MyHandball Phase 5 presentation ready. Period=%ds x%d. Materials + trails + goal juice."
 		% [int(period_length_seconds), periods_total]
 	)
 	var user_args := OS.get_cmdline_user_args()
@@ -101,6 +102,13 @@ func _ready() -> void:
 		sn_p4.set_script(p4_shot)
 		add_child(sn_p4)
 		return
+	if "--screenshot-phase5" in user_args:
+		await _run_kickoff(0, "Kickoff")
+		var p5_shot := load("res://scripts/screenshot_phase5.gd") as GDScript
+		var sn_p5 := Node.new()
+		sn_p5.set_script(p5_shot)
+		add_child(sn_p5)
+		return
 	if "--screenshot" in user_args:
 		# Kickoff first so the HUD clock/score are on screen, then capture.
 		await _run_kickoff(0, "Kickoff")
@@ -117,8 +125,9 @@ func _spawn_roster() -> void:
 	if player_scene == null:
 		player_scene = load("res://scenes/actors/player.tscn") as PackedScene
 	# Home attacks +Z (toward away goal). Layout: GK near own goal, 3 outfield.
-	var home_color := Color(0.2, 0.45, 0.95)
-	var away_color := Color(0.9, 0.25, 0.22)
+	# Punchier kit colors for Phase 5 readability.
+	var home_color := Color(0.12, 0.42, 0.92)
+	var away_color := Color(0.92, 0.16, 0.14)
 	var home_spots: Array = [
 		{"pos": Vector3(0, 0, -17.5), "yaw": 0.0, "gk": true, "idx": 0},
 		{"pos": Vector3(-3.5, 0, -6.0), "yaw": 0.0, "gk": false, "idx": 1},
@@ -276,9 +285,13 @@ func _wire_goals() -> void:
 func _set_controlled(player: Player) -> void:
 	if controlled_player:
 		controlled_player.controlled = false
+		if controlled_player.has_method("set_selection_highlight"):
+			controlled_player.set_selection_highlight(false)
 	controlled_player = player
 	controlled_team_id = player.team_id
 	controlled_player.controlled = true
+	if controlled_player.has_method("set_selection_highlight"):
+		controlled_player.set_selection_highlight(true)
 	_refresh_home_ai()
 	if hud and hud.has_method("set_controlled"):
 		var role := "GK" if player.is_goalkeeper else Formations.role_label(Formations.role_for(player))
@@ -679,11 +692,14 @@ func _on_goal_scored(scoring_team_id: int, goal_owner_team_id: int) -> void:
 	print("GOAL! Home %d — Away %d (kickoff → team %d)" % [score_home, score_away, goal_owner_team_id])
 	if hud and hud.has_method("set_score"):
 		hud.set_score(score_home, score_away)
+	# Phase 5 juice: slow-mo + punchy banner / screen flash (wall-clock pause).
+	Engine.time_scale = GOAL_SLOWMO_SCALE
 	if hud and hud.has_method("flash_goal"):
-		hud.flash_goal()
+		hud.flash_goal(scoring_team_id)
 	# Conceding team (goal owner) restarts from center.
 	_pending_kickoff_team = goal_owner_team_id
-	await get_tree().create_timer(GOAL_PAUSE_DELAY).timeout
+	await get_tree().create_timer(GOAL_PAUSE_DELAY, true, true).timeout
+	Engine.time_scale = 1.0
 	if match_state == MatchState.MATCH_OVER:
 		return
 	await _run_kickoff(_pending_kickoff_team, "Restart")

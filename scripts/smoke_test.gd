@@ -779,6 +779,64 @@ func _ready() -> void:
 		return
 	print("Smoke cycle switch OK")
 
+	# --- Phase 5 presentation ---
+	if ball.get_node_or_null("BallTrail") == null and ball._trail == null:
+		push_error("Smoke: ball trail missing")
+		get_tree().quit(1)
+		return
+	var court := match_node.get_node_or_null("Court") as Node3D
+	if court == null:
+		# Court may be sibling under match scene.
+		for child in match_node.get_children():
+			if child is Court:
+				court = child
+				break
+	if court == null or court.get_node_or_null("Boards") == null:
+		push_error("Smoke: court boards / presentation geometry missing")
+		get_tree().quit(1)
+		return
+	var kit_ok := false
+	for p in match_node._home_players:
+		if p.get_node_or_null("ChestStripe") != null and p.get_node_or_null("ShoeL") != null:
+			kit_ok = true
+			break
+	print("Smoke presentation kits=", kit_ok, " trail=", ball._trail != null)
+	if not kit_ok:
+		push_error("Smoke: polished kit nodes missing on home players")
+		get_tree().quit(1)
+		return
+
+	# Goal juice restores time scale (ignore_time_scale pause path).
+	Engine.time_scale = 1.0
+	_smoke_clear_ball(ball)
+	match_node.match_state = MatchController.MatchState.LIVE
+	match_node.rules.begin_lockout()
+	match_node.rules.end_lockout()
+	match_node.rules._oob_cooldown = 0.0
+	match_node._set_players_frozen(false)
+	for p in match_node._away_players:
+		p.match_frozen = true
+		p.ai_enabled = false
+	var scorer := match_node._first_outfield(match_node._home_players)
+	match_node._set_controlled(scorer)
+	ball.global_position = Vector3(0.0, 1.1, 19.35)
+	ball.linear_velocity = Vector3(0, 0, 8)
+	# Drive into away goal mouth.
+	await get_tree().create_timer(0.05).timeout
+	ball.global_position = Vector3(0.0, 1.0, 19.55)
+	await get_tree().create_timer(0.2).timeout
+	# Either scored already or force the celebration path.
+	if match_node.match_state == MatchController.MatchState.LIVE:
+		match_node._on_goal_scored(0, 1)
+	await get_tree().create_timer(MatchController.GOAL_PAUSE_DELAY + 0.15, true, true).timeout
+	print("Smoke goal juice time_scale=", Engine.time_scale, " state=", match_node.match_state)
+	if absf(Engine.time_scale - 1.0) > 0.001:
+		push_error("Smoke: Engine.time_scale not restored after goal juice")
+		get_tree().quit(1)
+		return
+	Engine.time_scale = 1.0
+	print("Smoke Phase 5 presentation OK")
+
 	print("SMOKE_OK")
 	get_tree().quit(0)
 

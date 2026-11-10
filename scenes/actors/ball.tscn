@@ -7,8 +7,12 @@ radius = 0.12
 height = 0.24
 
 [sub_resource type="StandardMaterial3D" id="Mat_ball"]
-albedo_color = Color(0.92, 0.55, 0.12, 1)
-roughness = 0.55
+albedo_color = Color(0.95, 0.42, 0.08, 1)
+roughness = 0.38
+metallic = 0.05
+emission_enabled = true
+emission = Color(0.55, 0.18, 0.02, 1)
+emission_energy_multiplier = 0.35
 
 [sub_resource type="SphereShape3D" id="SphereShape_ball"]
 radius = 0.12

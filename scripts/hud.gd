@@ -9,6 +9,8 @@ const COLOR_BANNER_DEFAULT := Color(0.95, 0.98, 1.0, 1.0)
 const COLOR_BANNER_WARN := Color(1.0, 0.86, 0.35, 1.0)
 const COLOR_BANNER_TRAVEL := Color(1.0, 0.42, 0.32, 1.0)
 const COLOR_PASSIVE := Color(1.0, 0.72, 0.45, 1.0)
+const COLOR_GOAL_HOME := Color(0.45, 0.85, 1.0, 1.0)
+const COLOR_GOAL_AWAY := Color(1.0, 0.72, 0.35, 1.0)
 
 @onready var score_label: Label = $Root/ScoreLabel
 @onready var clock_label: Label = $Root/ClockLabel
@@ -24,6 +26,8 @@ const COLOR_PASSIVE := Color(1.0, 0.72, 0.45, 1.0)
 @onready var power_bar: ProgressBar = $Root/PowerBar
 
 var _steps_pulse: Tween
+var _goal_tween: Tween
+var _flash_rect: ColorRect
 
 
 func _ready() -> void:
@@ -37,6 +41,7 @@ func _ready() -> void:
 		power_bar.visible = false
 		power_bar.value = 0.0
 	help_label.text = "WASD move · Space jump · hold LMB/E/RT power · F/LT lob · C/Ctrl/B dive (GK) · Q cycle · R best · T aim"
+	_ensure_flash_overlay()
 
 
 func set_score(home: int, away: int) -> void:
@@ -124,8 +129,44 @@ func set_rules_status(text: String) -> void:
 		rules_label.add_theme_color_override("font_color", Color(1.0, 0.92, 0.55, 1.0))
 
 
-func flash_goal() -> void:
-	_flash_center(goal_label, "GOAL!", 1.0, 0.5, COLOR_BANNER_DEFAULT)
+## Punchy goal banner + full-screen flash. `scoring_team_id` tints Home/Away.
+func flash_goal(scoring_team_id: int = 0) -> void:
+	_ensure_flash_overlay()
+	# Clear other center banners so GOAL owns the frame.
+	banner_label.visible = false
+	banner_label.modulate.a = 0.0
+	var tint := COLOR_GOAL_HOME if scoring_team_id == 0 else COLOR_GOAL_AWAY
+	var team := "HOME" if scoring_team_id == 0 else "AWAY"
+	goal_label.text = "GOAL!  %s" % team
+	goal_label.visible = true
+	goal_label.modulate = Color(1, 1, 1, 1)
+	goal_label.add_theme_color_override("font_color", tint)
+	goal_label.scale = Vector2(0.55, 0.55)
+	goal_label.pivot_offset = goal_label.size * 0.5
+	if _goal_tween and _goal_tween.is_valid():
+		_goal_tween.kill()
+	# Tweens intentionally follow Engine.time_scale so the punch lands in slow-mo.
+	_goal_tween = create_tween()
+	_goal_tween.tween_property(goal_label, "scale", Vector2(1.18, 1.18), 0.14).set_trans(Tween.TRANS_BACK).set_ease(Tween.EASE_OUT)
+	_goal_tween.tween_property(goal_label, "scale", Vector2(1.0, 1.0), 0.12)
+	_goal_tween.tween_interval(0.85)
+	_goal_tween.tween_property(goal_label, "modulate:a", 0.0, 0.45)
+	_goal_tween.tween_callback(func() -> void: goal_label.visible = false)
+
+	# White → team-tint screen flash.
+	_flash_rect.visible = true
+	_flash_rect.color = Color(1, 1, 1, 0.55)
+	var flash_tw := create_tween()
+	flash_tw.tween_property(_flash_rect, "color", Color(tint.r, tint.g, tint.b, 0.28), 0.12)
+	flash_tw.tween_property(_flash_rect, "color:a", 0.0, 0.55)
+	flash_tw.tween_callback(func() -> void: _flash_rect.visible = false)
+
+	# Score label punch so the new total is noticeable.
+	score_label.scale = Vector2(1.0, 1.0)
+	score_label.pivot_offset = Vector2(score_label.size.x * 0.5, score_label.size.y * 0.5)
+	var score_tw := create_tween()
+	score_tw.tween_property(score_label, "scale", Vector2(1.2, 1.2), 0.1)
+	score_tw.tween_property(score_label, "scale", Vector2.ONE, 0.2)
 
 
 func flash_kickoff(reason: String, team_id: int) -> void:
@@ -193,6 +234,25 @@ func _pulse_steps() -> void:
 	_steps_pulse = create_tween()
 	_steps_pulse.tween_property(steps_label, "scale", Vector2(1.12, 1.12), 0.07)
 	_steps_pulse.tween_property(steps_label, "scale", Vector2.ONE, 0.12)
+
+
+func _ensure_flash_overlay() -> void:
+	if _flash_rect and is_instance_valid(_flash_rect):
+		return
+	var existing := get_node_or_null("Root/FlashOverlay") as ColorRect
+	if existing:
+		_flash_rect = existing
+		_flash_rect.visible = false
+		return
+	_flash_rect = ColorRect.new()
+	_flash_rect.name = "FlashOverlay"
+	_flash_rect.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_flash_rect.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_flash_rect.color = Color(1, 1, 1, 0)
+	_flash_rect.visible = false
+	$Root.add_child(_flash_rect)
+	# Keep flash under banners so GOAL text stays readable.
+	$Root.move_child(_flash_rect, 0)
 
 
 func _flash_center(label: Label, text: String, hold: float, fade: float, color: Color = COLOR_BANNER_DEFAULT) -> void:

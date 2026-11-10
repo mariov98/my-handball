@@ -86,8 +86,10 @@ func _build_floor() -> void:
 	mesh_inst.mesh = box
 	mesh_inst.position = Vector3(0, -0.1, 0)
 	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.18, 0.55, 0.32)
-	mat.roughness = 0.85
+	# Indoor hall wood — warm parquet tone, readable under ACES.
+	mat.albedo_color = Color(0.62, 0.42, 0.26)
+	mat.roughness = 0.55
+	mat.metallic = 0.0
 	mesh_inst.material_override = mat
 	body.add_child(mesh_inst)
 
@@ -98,28 +100,56 @@ func _build_floor() -> void:
 	col.position = Vector3(0, -0.1, 0)
 	body.add_child(col)
 
+	# Soft painted crease tints so the 6 m area reads at a glance.
+	_add_crease_tint(Vector3(0, 0.005, -HALF_LENGTH + 3.0), Color(0.22, 0.38, 0.72, 0.22))
+	_add_crease_tint(Vector3(0, 0.005, HALF_LENGTH - 3.0), Color(0.72, 0.28, 0.24, 0.22))
+
+
+func _add_crease_tint(pos: Vector3, color: Color) -> void:
+	var mi := MeshInstance3D.new()
+	var box := BoxMesh.new()
+	box.size = Vector3(GOAL_WIDTH + 6.2, 0.01, 6.0)
+	mi.mesh = box
+	mi.position = pos
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = color
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.roughness = 1.0
+	mi.material_override = mat
+	add_child(mi)
+
 
 func _build_lines() -> void:
 	var lines := Node3D.new()
 	lines.name = "Lines"
 	add_child(lines)
 	var line_mat := StandardMaterial3D.new()
-	line_mat.albedo_color = Color(0.95, 0.95, 0.92)
-	line_mat.roughness = 0.9
+	line_mat.albedo_color = Color(0.98, 0.98, 0.96)
+	line_mat.roughness = 0.7
+	line_mat.emission_enabled = true
+	line_mat.emission = Color(0.85, 0.85, 0.8)
+	line_mat.emission_energy_multiplier = 0.25
 
 	# Center line
-	_add_line_box(lines, Vector3(HALF_WIDTH * 2.0, 0.02, 0.08), Vector3(0, 0.01, 0), line_mat)
+	_add_line_box(lines, Vector3(HALF_WIDTH * 2.0, 0.02, 0.1), Vector3(0, 0.01, 0), line_mat)
 	# Sidelines + end lines as thin raised strips (visual only; walls handle collision)
-	_add_line_box(lines, Vector3(0.08, 0.02, HALF_LENGTH * 2.0), Vector3(-HALF_WIDTH, 0.01, 0), line_mat)
-	_add_line_box(lines, Vector3(0.08, 0.02, HALF_LENGTH * 2.0), Vector3(HALF_WIDTH, 0.01, 0), line_mat)
-	_add_line_box(lines, Vector3(HALF_WIDTH * 2.0, 0.02, 0.08), Vector3(0, 0.01, -HALF_LENGTH), line_mat)
-	_add_line_box(lines, Vector3(HALF_WIDTH * 2.0, 0.02, 0.08), Vector3(0, 0.01, HALF_LENGTH), line_mat)
+	_add_line_box(lines, Vector3(0.1, 0.02, HALF_LENGTH * 2.0), Vector3(-HALF_WIDTH, 0.01, 0), line_mat)
+	_add_line_box(lines, Vector3(0.1, 0.02, HALF_LENGTH * 2.0), Vector3(HALF_WIDTH, 0.01, 0), line_mat)
+	_add_line_box(lines, Vector3(HALF_WIDTH * 2.0, 0.02, 0.1), Vector3(0, 0.01, -HALF_LENGTH), line_mat)
+	_add_line_box(lines, Vector3(HALF_WIDTH * 2.0, 0.02, 0.1), Vector3(0, 0.01, HALF_LENGTH), line_mat)
 	# 6 m goal-area arcs approximated as bars
-	_add_line_box(lines, Vector3(GOAL_WIDTH + 6.0, 0.02, 0.08), Vector3(0, 0.01, -HALF_LENGTH + 6.0), line_mat)
-	_add_line_box(lines, Vector3(GOAL_WIDTH + 6.0, 0.02, 0.08), Vector3(0, 0.01, HALF_LENGTH - 6.0), line_mat)
-	# 9 m free-throw lines
-	_add_line_box(lines, Vector3(GOAL_WIDTH + 9.0, 0.02, 0.06), Vector3(0, 0.01, -HALF_LENGTH + 9.0), line_mat)
-	_add_line_box(lines, Vector3(GOAL_WIDTH + 9.0, 0.02, 0.06), Vector3(0, 0.01, HALF_LENGTH - 9.0), line_mat)
+	_add_line_box(lines, Vector3(GOAL_WIDTH + 6.0, 0.02, 0.1), Vector3(0, 0.01, -HALF_LENGTH + 6.0), line_mat)
+	_add_line_box(lines, Vector3(GOAL_WIDTH + 6.0, 0.02, 0.1), Vector3(0, 0.01, HALF_LENGTH - 6.0), line_mat)
+	# 9 m free-throw lines (slightly thinner / dashed feel via narrower strip)
+	var dashed := line_mat.duplicate() as StandardMaterial3D
+	dashed.albedo_color = Color(0.92, 0.92, 0.9)
+	_add_line_box(lines, Vector3(GOAL_WIDTH + 9.0, 0.02, 0.07), Vector3(0, 0.01, -HALF_LENGTH + 9.0), dashed)
+	_add_line_box(lines, Vector3(GOAL_WIDTH + 9.0, 0.02, 0.07), Vector3(0, 0.01, HALF_LENGTH - 9.0), dashed)
+	# Center circle hint
+	_add_line_box(lines, Vector3(3.6, 0.015, 0.08), Vector3(0, 0.012, 1.8), line_mat)
+	_add_line_box(lines, Vector3(3.6, 0.015, 0.08), Vector3(0, 0.012, -1.8), line_mat)
+	_add_line_box(lines, Vector3(0.08, 0.015, 3.6), Vector3(1.8, 0.012, 0), line_mat)
+	_add_line_box(lines, Vector3(0.08, 0.015, 3.6), Vector3(-1.8, 0.012, 0), line_mat)
 
 
 func _add_line_box(parent: Node3D, size: Vector3, pos: Vector3, mat: Material) -> void:
@@ -162,23 +192,29 @@ func _build_goal(origin: Vector3, owner_team_id: int) -> void:
 	goal_root.position = origin
 	add_child(goal_root)
 
+	# Classic handball red posts + white net (unshaded posts stay red under OpenGL3).
 	var post_mat := StandardMaterial3D.new()
-	post_mat.albedo_color = Color(0.92, 0.92, 0.95)
-	post_mat.metallic = 0.2
+	post_mat.albedo_color = Color(0.92, 0.08, 0.08)
+	post_mat.metallic = 0.0
+	post_mat.roughness = 0.55
+	post_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 	var net_mat := StandardMaterial3D.new()
-	net_mat.albedo_color = Color(0.85, 0.85, 0.9, 0.35)
+	net_mat.albedo_color = Color(0.92, 0.94, 0.97, 0.32)
 	net_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	net_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	net_mat.roughness = 0.9
+	net_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
 
 	var facing := 1.0 if owner_team_id == 0 else -1.0
-	# Posts + crossbar
-	_add_goal_box(goal_root, Vector3(0.12, GOAL_HEIGHT, 0.12), Vector3(-GOAL_WIDTH * 0.5, GOAL_HEIGHT * 0.5, 0), post_mat)
-	_add_goal_box(goal_root, Vector3(0.12, GOAL_HEIGHT, 0.12), Vector3(GOAL_WIDTH * 0.5, GOAL_HEIGHT * 0.5, 0), post_mat)
-	_add_goal_box(goal_root, Vector3(GOAL_WIDTH + 0.12, 0.12, 0.12), Vector3(0, GOAL_HEIGHT, 0), post_mat)
+	# Posts + crossbar (slightly thicker for readability)
+	_add_goal_box(goal_root, Vector3(0.14, GOAL_HEIGHT, 0.14), Vector3(-GOAL_WIDTH * 0.5, GOAL_HEIGHT * 0.5, 0), post_mat)
+	_add_goal_box(goal_root, Vector3(0.14, GOAL_HEIGHT, 0.14), Vector3(GOAL_WIDTH * 0.5, GOAL_HEIGHT * 0.5, 0), post_mat)
+	_add_goal_box(goal_root, Vector3(GOAL_WIDTH + 0.14, 0.14, 0.14), Vector3(0, GOAL_HEIGHT, 0), post_mat)
 	# Back net / depth
-	_add_goal_box(goal_root, Vector3(GOAL_WIDTH, GOAL_HEIGHT, 0.08), Vector3(0, GOAL_HEIGHT * 0.5, facing * GOAL_DEPTH), net_mat)
-	_add_goal_box(goal_root, Vector3(0.08, GOAL_HEIGHT, GOAL_DEPTH), Vector3(-GOAL_WIDTH * 0.5, GOAL_HEIGHT * 0.5, facing * GOAL_DEPTH * 0.5), net_mat)
-	_add_goal_box(goal_root, Vector3(0.08, GOAL_HEIGHT, GOAL_DEPTH), Vector3(GOAL_WIDTH * 0.5, GOAL_HEIGHT * 0.5, facing * GOAL_DEPTH * 0.5), net_mat)
+	_add_goal_box(goal_root, Vector3(GOAL_WIDTH, GOAL_HEIGHT, 0.06), Vector3(0, GOAL_HEIGHT * 0.5, facing * GOAL_DEPTH), net_mat)
+	_add_goal_box(goal_root, Vector3(0.06, GOAL_HEIGHT, GOAL_DEPTH), Vector3(-GOAL_WIDTH * 0.5, GOAL_HEIGHT * 0.5, facing * GOAL_DEPTH * 0.5), net_mat)
+	_add_goal_box(goal_root, Vector3(0.06, GOAL_HEIGHT, GOAL_DEPTH), Vector3(GOAL_WIDTH * 0.5, GOAL_HEIGHT * 0.5, facing * GOAL_DEPTH * 0.5), net_mat)
+	_add_goal_box(goal_root, Vector3(GOAL_WIDTH, 0.06, GOAL_DEPTH), Vector3(0, GOAL_HEIGHT, facing * GOAL_DEPTH * 0.5), net_mat)
 
 	# Trigger mouth just inside the goal line toward net
 	var area := Area3D.new()
@@ -224,19 +260,52 @@ func _add_goal_box(parent: Node3D, size: Vector3, pos: Vector3, mat: Material) -
 func _build_lights() -> void:
 	var sun := DirectionalLight3D.new()
 	sun.name = "Sun"
-	sun.rotation_degrees = Vector3(-50, 35, 0)
-	sun.light_energy = 1.15
+	sun.rotation_degrees = Vector3(-55, 28, 0)
+	sun.light_energy = 1.25
+	sun.light_color = Color(1.0, 0.97, 0.92)
 	sun.shadow_enabled = true
 	add_child(sun)
+
+	# Soft fill so away-side capsules don't flatten into the wood.
+	var fill := DirectionalLight3D.new()
+	fill.name = "Fill"
+	fill.rotation_degrees = Vector3(-30, -140, 0)
+	fill.light_energy = 0.35
+	fill.light_color = Color(0.75, 0.82, 0.95)
+	fill.shadow_enabled = false
+	add_child(fill)
 
 	var env := WorldEnvironment.new()
 	env.name = "WorldEnvironment"
 	var environment := Environment.new()
 	environment.background_mode = Environment.BG_COLOR
-	environment.background_color = Color(0.45, 0.62, 0.78)
+	environment.background_color = Color(0.28, 0.34, 0.42)
 	environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	environment.ambient_light_color = Color(0.55, 0.6, 0.65)
-	environment.ambient_light_energy = 0.55
+	environment.ambient_light_color = Color(0.62, 0.64, 0.68)
+	environment.ambient_light_energy = 0.62
 	environment.tonemap_mode = Environment.TONE_MAPPER_ACES
+	# Glow is Forward+/Mobile only — skip so OpenGL3 smoke stays clean.
 	env.environment = environment
 	add_child(env)
+
+	# Low sideline boards — color cue for home/away ends without blocking vision.
+	_add_boards()
+
+
+func _add_boards() -> void:
+	var boards := Node3D.new()
+	boards.name = "Boards"
+	add_child(boards)
+	var home_mat := StandardMaterial3D.new()
+	home_mat.albedo_color = Color(0.15, 0.32, 0.72)
+	home_mat.roughness = 0.75
+	var away_mat := StandardMaterial3D.new()
+	away_mat.albedo_color = Color(0.72, 0.18, 0.16)
+	away_mat.roughness = 0.75
+	var side_mat := StandardMaterial3D.new()
+	side_mat.albedo_color = Color(0.85, 0.86, 0.88)
+	side_mat.roughness = 0.8
+	_add_line_box(boards, Vector3(HALF_WIDTH * 2.0 + 0.4, 0.9, 0.12), Vector3(0, 0.45, -HALF_LENGTH - 0.35), home_mat)
+	_add_line_box(boards, Vector3(HALF_WIDTH * 2.0 + 0.4, 0.9, 0.12), Vector3(0, 0.45, HALF_LENGTH + 0.35), away_mat)
+	_add_line_box(boards, Vector3(0.12, 0.9, HALF_LENGTH * 2.0 + 0.8), Vector3(-HALF_WIDTH - 0.35, 0.45, 0), side_mat)
+	_add_line_box(boards, Vector3(0.12, 0.9, HALF_LENGTH * 2.0 + 0.8), Vector3(HALF_WIDTH + 0.35, 0.45, 0), side_mat)
