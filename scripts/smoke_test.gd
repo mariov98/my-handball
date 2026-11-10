@@ -1,5 +1,5 @@
 extends Node
-## Headless-ish smoke: possess → camera flip → camera-relative move → shoot → score → switch.
+## Headless-ish smoke: cam-relative, possess, flip, both goals + kickoff, AI, clock, switch.
 
 func _ready() -> void:
 	await get_tree().process_frame
@@ -10,11 +10,44 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 
+	# Smoke bypasses opening kickoff — force a live match state.
+	match_node.match_state = MatchController.MatchState.LIVE
+	match_node._set_players_frozen(false)
+	match_node.clock_remaining = match_node.period_length_seconds
+	match_node._refresh_hud()
+
 	var player: Player = match_node.controlled_player
+	if player == null:
+		var starter := match_node._first_outfield(match_node._home_players)
+		if starter:
+			match_node._set_controlled(starter)
+			player = starter
 	var ball: Ball = match_node.ball
 	var cam: CameraRig = match_node.camera_rig
 	if player == null or ball == null or cam == null:
 		push_error("Smoke: missing player/ball/camera")
+		get_tree().quit(1)
+		return
+
+	# --- Away AI must be enabled (Phase 1) ---
+	var away_ai_ok := false
+	for p in match_node._away_players:
+		if p.ai_enabled:
+			away_ai_ok = true
+			break
+	print("Smoke away AI enabled=", away_ai_ok)
+	if not away_ai_ok:
+		push_error("Smoke: away AI not enabled")
+		get_tree().quit(1)
+		return
+
+	# --- Clock ticks while LIVE ---
+	var clock_before := match_node.clock_remaining
+	await get_tree().create_timer(0.35).timeout
+	var clock_after := match_node.clock_remaining
+	print("Smoke clock: before=", clock_before, " after=", clock_after)
+	if clock_after >= clock_before:
+		push_error("Smoke: clock did not tick")
 		get_tree().quit(1)
 		return
 
@@ -42,10 +75,20 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 
+	# Freeze away AI during scripted possession so they don't steal the free ball.
+	for p in match_node._away_players:
+		p.match_frozen = true
+	_smoke_clear_ball(ball)
+
 	# --- Yaw pivot must be the ball, not court-center / far goal ---
 	var lateral_ball := Vector3(6.0, 0.9, -2.0)
 	ball.global_position = lateral_ball
 	player.global_position = lateral_ball + Vector3(0.2, 0.0, 0.2)
+	# Snap attack facing so mid-lerp from any earlier AI possession doesn't
+	# shrink the orbit radius under the geometric assertions.
+	cam.set_attack_direction(true)
+	cam.attack_sign = 1.0
+	match_node._attack_team_id = 0
 	match_node._update_camera_attack_side()
 	# Snap desired pose so we can measure geometry without waiting on lerps.
 	cam.global_position = cam._desired_position(lateral_ball)
@@ -89,14 +132,15 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 
-	# Teleport player onto ball and wait for pickup
+	# Force possession for the controlled home player.
+	_smoke_clear_ball(ball)
 	player.global_position = ball.global_position + Vector3(0.2, 0, 0.2)
-	await get_tree().create_timer(0.3).timeout
-	if not player.has_ball:
-		# Force pickup if area timing missed
-		if ball.try_pickup(player):
-			player.has_ball = true
-	print("Smoke possess: ", player.has_ball)
+	if ball.try_pickup(player):
+		player.has_ball = true
+	else:
+		# Area timing / layer edge case — still fail loudly.
+		player.has_ball = false
+	print("Smoke possess: ", player.has_ball, " carrier=", ball.carrier)
 	if not player.has_ball:
 		push_error("Smoke: possess failed")
 		get_tree().quit(1)
@@ -149,12 +193,25 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 
-	# Return ball to home for score path (clear shoot ignore so home can re-grab).
-	away.has_ball = false
-	ball.carrier = null
-	ball._last_carrier = null
-	ball._ignore_carrier_until = 0.0
-	ball.freeze = false
+	# --- Away AI chase wish (should move toward free ball) ---
+	_smoke_clear_ball(ball)
+	ball.global_position = Vector3(2.0, 0.2, 0.0)
+	away.global_position = Vector3(-4.0, 0.0, 8.0)
+	away.match_frozen = false
+	var ai_wish := away._ai_wish(0.016)
+	print("Smoke AI chase wish=", ai_wish)
+	if ai_wish.length() < 0.2:
+		push_error("Smoke: away AI chase wish too small")
+		get_tree().quit(1)
+		return
+	# Wish should generally point toward +X/−Z from away's spot toward ball at (2,0,0)
+	if ai_wish.x <= 0.0:
+		push_error("Smoke: away AI chase should move +X toward ball")
+		get_tree().quit(1)
+		return
+
+	# Return ball to home for home-goal score path.
+	_smoke_clear_ball(ball)
 	ball.collision_layer = 0
 	ball.collision_mask = 0
 	if not ball.try_pickup(player):
@@ -163,23 +220,79 @@ func _ready() -> void:
 		return
 	player.has_ball = true
 	match_node._update_camera_attack_side()
+	# Keep away frozen while we force scores / kickoffs.
+	for p in match_node._away_players:
+		p.match_frozen = true
 
 	# Aim at away goal (+Z) and shoot
 	var ok := player.try_shoot(Vector3(0, 0.25, 1).normalized(), 22.0, ball)
 	print("Smoke shoot: ", ok, " carrier=", ball.carrier)
 	await get_tree().create_timer(0.2).timeout
 
-	# Drive ball into away goal mouth to force score
+	# Drive ball into away goal mouth to force home score
+	match_node.match_state = MatchController.MatchState.LIVE
+	ball.collision_layer = 4
+	ball.collision_mask = 1 | 2
 	ball.global_position = Vector3(0, 1.0, 19.7)
 	ball.linear_velocity = Vector3(0, 0, 8)
-	await get_tree().create_timer(0.8).timeout
-	print("Smoke score home=", match_node.score_home, " away=", match_node.score_away)
+	await get_tree().create_timer(0.9).timeout
+	print("Smoke score after home goal: home=", match_node.score_home, " away=", match_node.score_away)
+	if match_node.score_home < 1:
+		push_error("Smoke: home goal did not score")
+		get_tree().quit(1)
+		return
+
+	# Wait for goal pause + kickoff (conceding = away owns that goal → away kickoff)
+	await get_tree().create_timer(MatchController.GOAL_PAUSE_DELAY + MatchController.KICKOFF_FREEZE + 0.4).timeout
+	print(
+		"Smoke after home-goal kickoff: state=", match_node.match_state,
+		" carrier_team=", ball.carrier.team_id if ball.carrier else -1
+	)
+	if match_node.match_state != MatchController.MatchState.LIVE:
+		push_error("Smoke: expected LIVE after restart kickoff")
+		get_tree().quit(1)
+		return
+	if ball.carrier == null or ball.carrier.team_id != 1:
+		push_error("Smoke: expected away team kickoff after conceding")
+		get_tree().quit(1)
+		return
+
+	# --- Away scores into home goal ---
+	# Clear possession cleanly and drive into home mouth (-Z).
+	if ball.carrier:
+		ball.carrier.has_ball = false
+	ball.carrier = null
+	ball._last_carrier = null
+	ball._ignore_carrier_until = 0.0
+	ball.freeze = false
+	ball.collision_layer = 4
+	ball.collision_mask = 1 | 2
+	match_node.match_state = MatchController.MatchState.LIVE
+	ball.global_position = Vector3(0, 1.0, -19.7)
+	ball.linear_velocity = Vector3(0, 0, -8)
+	await get_tree().create_timer(0.9).timeout
+	print("Smoke score after away goal: home=", match_node.score_home, " away=", match_node.score_away)
+	if match_node.score_away < 1:
+		push_error("Smoke: away goal did not score")
+		get_tree().quit(1)
+		return
+
+	await get_tree().create_timer(MatchController.GOAL_PAUSE_DELAY + MatchController.KICKOFF_FREEZE + 0.4).timeout
+	print(
+		"Smoke after away-goal kickoff: carrier_team=",
+		ball.carrier.team_id if ball.carrier else -1
+	)
+	if ball.carrier == null or ball.carrier.team_id != 0:
+		push_error("Smoke: expected home kickoff after conceding at home goal")
+		get_tree().quit(1)
+		return
 
 	# Switch teammate
+	match_node.match_state = MatchController.MatchState.LIVE
 	var before := match_node.controlled_player
 	match_node._cycle_teammate()
 	var after := match_node.controlled_player
-	print("Smoke switch: ", before.name, " -> ", after.name if after else "null")
+	print("Smoke switch: ", before.name if before else "null", " -> ", after.name if after else "null")
 	if after == null or after == before:
 		push_error("Smoke: switch failed")
 		get_tree().quit(1)
@@ -187,3 +300,16 @@ func _ready() -> void:
 
 	print("SMOKE_OK")
 	get_tree().quit(0)
+
+
+func _smoke_clear_ball(ball: Ball) -> void:
+	if ball.carrier:
+		ball.carrier.has_ball = false
+	ball.carrier = null
+	ball._last_carrier = null
+	ball._ignore_carrier_until = 0.0
+	ball.freeze = false
+	ball.linear_velocity = Vector3.ZERO
+	ball.angular_velocity = Vector3.ZERO
+	ball.collision_layer = 4
+	ball.collision_mask = 1 | 2
