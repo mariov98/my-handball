@@ -1,7 +1,7 @@
 extends CharacterBody3D
 class_name Player
 
-## Capsule outfield / GK. Controlled player receives match input; others idle.
+## Capsule outfield / GK. Controlled player receives match input; AI teammates chase/block.
 
 signal possession_changed(has_ball: bool)
 
@@ -13,18 +13,32 @@ const BOB_AMOUNT := 0.04
 const BOB_SPEED := 12.0
 const PICKUP_COOLDOWN := 0.35
 
+# AI tuning
+const AI_CHASE_SPEED_SCALE := 0.92
+const AI_BLOCK_SPEED_SCALE := 0.85
+const AI_ATTACK_SPEED_SCALE := 0.88
+const AI_GK_SPEED_SCALE := 0.7
+const AI_SHOOT_RANGE := 11.0
+const AI_SHOOT_COOLDOWN := 1.4
+const AI_BLOCK_DEPTH := 4.5
+
 @export var team_id: int = 0 ## 0 = home (blue), 1 = away (red)
 @export var is_goalkeeper: bool = false
 @export var player_index: int = 0
 @export var body_color: Color = Color(0.2, 0.45, 0.9)
 
 var controlled: bool = false
+var ai_enabled: bool = false
 var has_ball: bool = false
 var start_position: Vector3 = Vector3.ZERO
 var start_yaw: float = 0.0
+## Set by MatchController so AI can chase / shoot.
+var match_ball: Ball = null
+var match_frozen: bool = false
 
 var _bob_phase: float = 0.0
 var _pickup_block: float = 0.0
+var _ai_shoot_cd: float = 0.0
 var _mesh: MeshInstance3D
 var _mesh_base_y: float = 0.9
 
@@ -42,25 +56,32 @@ func _ready() -> void:
 func _physics_process(delta: float) -> void:
 	if _pickup_block > 0.0:
 		_pickup_block = maxf(0.0, _pickup_block - delta)
+	if _ai_shoot_cd > 0.0:
+		_ai_shoot_cd = maxf(0.0, _ai_shoot_cd - delta)
 
 	if not is_on_floor():
 		velocity.y -= ProjectSettings.get_setting("physics/3d/default_gravity") * delta
 
-	var input_dir := Vector2.ZERO
-	if controlled:
-		input_dir = Input.get_vector("move_left", "move_right", "move_forward", "move_back")
-
-	# WASD / left stick are camera-relative: forward = into the screen along
-	# the current camera facing projected onto the court plane.
-	var wish := camera_relative_wish(input_dir)
+	var wish := Vector3.ZERO
+	if match_frozen:
+		wish = Vector3.ZERO
+	elif controlled:
+		var input_dir := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
+		# WASD / left stick are camera-relative: forward = into the screen along
+		# the current camera facing projected onto the court plane.
+		wish = camera_relative_wish(input_dir)
+	elif ai_enabled:
+		wish = _ai_wish(delta)
 
 	var target_speed := SPEED * (0.85 if is_goalkeeper else 1.0)
+	if ai_enabled and not controlled:
+		target_speed *= AI_GK_SPEED_SCALE if is_goalkeeper else AI_CHASE_SPEED_SCALE
 	var control := 1.0 if is_on_floor() else AIR_CONTROL
 	var desired := wish * target_speed
 	velocity.x = lerpf(velocity.x, desired.x, control)
 	velocity.z = lerpf(velocity.z, desired.z, control)
 
-	if controlled and Input.is_action_just_pressed("jump") and is_on_floor():
+	if controlled and not match_frozen and Input.is_action_just_pressed("jump") and is_on_floor():
 		velocity.y = JUMP_VELOCITY
 
 	move_and_slide()
@@ -89,6 +110,7 @@ func reset_to_start() -> void:
 	velocity = Vector3.ZERO
 	has_ball = false
 	_pickup_block = 0.0
+	_ai_shoot_cd = 0.0
 	_bob_phase = 0.0
 	if _mesh:
 		_mesh.position.y = _mesh_base_y
@@ -138,8 +160,120 @@ func camera_relative_wish(input_dir: Vector2) -> Vector3:
 	return wish
 
 
+func opponent_goal_point() -> Vector3:
+	# Home attacks +Z; away attacks -Z.
+	var goal_z := 19.5 if team_id == 0 else -19.5
+	return Vector3(0.0, 1.2, goal_z)
+
+
+func own_goal_point() -> Vector3:
+	var goal_z := -19.5 if team_id == 0 else 19.5
+	return Vector3(0.0, 1.2, goal_z)
+
+
+func _ai_wish(delta: float) -> Vector3:
+	if match_ball == null:
+		return _steer_toward(start_position)
+
+	if is_goalkeeper:
+		return _ai_gk_wish()
+
+	if has_ball and match_ball.carrier == self:
+		return _ai_attack_with_ball(delta)
+
+	var carrier := match_ball.carrier
+	if carrier == null:
+		return _ai_chase_free_ball()
+	if carrier.team_id == team_id:
+		return _ai_support_attack(carrier)
+	return _ai_defend_block(carrier)
+
+
+func _ai_gk_wish() -> Vector3:
+	var ball_pos := match_ball.global_position
+	var home := start_position
+	var track_x := clampf(ball_pos.x, -3.2, 3.2)
+	# Ease slightly off the line toward the ball when it approaches.
+	var gap := absf(ball_pos.z - home.z)
+	var approach := clampf(1.0 - gap / 12.0, 0.0, 1.0)
+	var toward_court := 1.0 if team_id == 0 else -1.0
+	var target := Vector3(track_x, 0.0, home.z + toward_court * approach * 1.5)
+	if team_id == 0:
+		target.z = clampf(target.z, -18.5, -14.0)
+	else:
+		target.z = clampf(target.z, 14.0, 18.5)
+	return _steer_toward(target)
+
+
+func _ai_chase_free_ball() -> Vector3:
+	var target := match_ball.global_position
+	target.y = 0.0
+	return _steer_toward(target)
+
+
+func _ai_defend_block(carrier: Player) -> Vector3:
+	# Stand between carrier and own goal (simple block / lane deny).
+	var own_goal := own_goal_point()
+	own_goal.y = 0.0
+	var carrier_pos := carrier.global_position
+	carrier_pos.y = 0.0
+	var to_goal := own_goal - carrier_pos
+	var dist := to_goal.length()
+	var dir := to_goal / maxf(dist, 0.001)
+	var block_dist := minf(AI_BLOCK_DEPTH, dist * 0.45)
+	var slot := carrier_pos + dir * block_dist
+	# Spread defenders slightly by index so they don't stack.
+	slot.x += (float(player_index) - 2.0) * 1.6
+	slot.x = clampf(slot.x, -8.5, 8.5)
+	return _steer_toward(slot) * AI_BLOCK_SPEED_SCALE
+
+
+func _ai_support_attack(carrier: Player) -> Vector3:
+	var goal := opponent_goal_point()
+	goal.y = 0.0
+	var carrier_pos := carrier.global_position
+	carrier_pos.y = 0.0
+	var to_goal := goal - carrier_pos
+	if to_goal.length_squared() < 0.001:
+		return Vector3.ZERO
+	var ahead := to_goal.normalized()
+	var side := Vector3(ahead.z, 0.0, -ahead.x) # perpendicular on XZ
+	var lane := (float(player_index) - 2.0) * 2.4
+	var slot := carrier_pos + ahead * 3.5 + side * lane
+	slot.x = clampf(slot.x, -8.5, 8.5)
+	slot.z = clampf(slot.z, -16.0, 16.0)
+	return _steer_toward(slot) * AI_ATTACK_SPEED_SCALE
+
+
+func _ai_attack_with_ball(_delta: float) -> Vector3:
+	var goal := opponent_goal_point()
+	var me := global_position
+	var flat := Vector3(goal.x - me.x, 0.0, goal.z - me.z)
+	var dist := flat.length()
+	# Shoot when inside range and roughly facing the goal.
+	if dist <= AI_SHOOT_RANGE and _ai_shoot_cd <= 0.0 and match_ball != null:
+		var aim := (goal - (me + Vector3(0, 1.2, 0))).normalized()
+		if try_shoot(aim, 15.0, match_ball):
+			_ai_shoot_cd = AI_SHOOT_COOLDOWN
+			return Vector3.ZERO
+	# Approach goal with a slight lateral weave by index.
+	var approach := Vector3(goal.x + (float(player_index) - 2.0) * 1.2, 0.0, goal.z)
+	return _steer_toward(approach) * AI_ATTACK_SPEED_SCALE
+
+
+
+func _steer_toward(world_target: Vector3) -> Vector3:
+	var delta_xz := Vector3(world_target.x - global_position.x, 0.0, world_target.z - global_position.z)
+	var dist := delta_xz.length()
+	if dist < 0.35:
+		return Vector3.ZERO
+	# Ease near target so AI doesn't vibrate on the spot.
+	var scale := clampf(dist / 2.0, 0.25, 1.0)
+	return delta_xz.normalized() * scale
+
+
 func _on_pickup_body_entered(body: Node3D) -> void:
-	if _pickup_block > 0.0 or has_ball:
+	if _pickup_block > 0.0 or has_ball or match_frozen:
 		return
 	if body is Ball:
 		var ball := body as Ball
