@@ -2,7 +2,7 @@ extends Node3D
 class_name MatchController
 
 ## Routes input, possession, team switch, scoring, clock, kickoff, AI, Phase 2 rules,
-## and Phase 3 shot craft / GK dive / block traces.
+## Phase 3 shot craft / GK dive / block traces, and Phase 4 tactics lite.
 
 enum AimMode { FACE, MOUSE_COURT }
 enum MatchState { PRE_KICKOFF, LIVE, GOAL_PAUSE, PERIOD_BREAK, MATCH_OVER, RULE_RESTART }
@@ -63,7 +63,7 @@ func _ready() -> void:
 	camera_rig.setup(ball, true)
 	_refresh_hud()
 	print(
-		"MyHandball Phase 3 GK+shot craft ready. Period=%ds x%d. Power/lob/jump timing + GK dive + blocks."
+		"MyHandball Phase 4 tactics lite ready. Period=%ds x%d. Formations + set pieces + off-ball + switch-best."
 		% [int(period_length_seconds), periods_total]
 	)
 	var user_args := OS.get_cmdline_user_args()
@@ -93,6 +93,13 @@ func _ready() -> void:
 		var sn_p3 := Node.new()
 		sn_p3.set_script(p3_shot)
 		add_child(sn_p3)
+		return
+	if "--screenshot-phase4" in user_args:
+		await _run_kickoff(0, "Kickoff")
+		var p4_shot := load("res://scripts/screenshot_phase4.gd") as GDScript
+		var sn_p4 := Node.new()
+		sn_p4.set_script(p4_shot)
+		add_child(sn_p4)
 		return
 	if "--screenshot" in user_args:
 		# Kickoff first so the HUD clock/score are on screen, then capture.
@@ -151,11 +158,17 @@ func _spawn_player(parent: Node, team_id: int, color: Color, spot: Dictionary) -
 func _configure_ai() -> void:
 	for p in _home_players:
 		p.match_ball = ball
-		# Human team: only the controlled player moves; teammates stay idle for Phase 1.
-		p.ai_enabled = false
+		# Phase 4: uncontrolled home teammates hold formation slots (off-ball AI).
+		p.ai_enabled = p != controlled_player
 	for p in _away_players:
 		p.match_ball = ball
 		p.ai_enabled = true
+
+
+func _refresh_home_ai() -> void:
+	for p in _home_players:
+		p.ai_enabled = p != controlled_player
+		p.match_ball = ball
 
 
 func _wire_rules() -> void:
@@ -182,6 +195,11 @@ func _unhandled_input(event: InputEvent) -> void:
 		aim_mode = AimMode.MOUSE_COURT if aim_mode == AimMode.FACE else AimMode.FACE
 		if hud and hud.has_method("set_aim_mode"):
 			hud.set_aim_mode(_aim_mode_label())
+		get_viewport().set_input_as_handled()
+		return
+	if event.is_action_pressed("switch_best"):
+		if match_state == MatchState.LIVE:
+			_switch_to_best()
 		get_viewport().set_input_as_handled()
 		return
 	if event.is_action_pressed("switch_player"):
@@ -261,8 +279,9 @@ func _set_controlled(player: Player) -> void:
 	controlled_player = player
 	controlled_team_id = player.team_id
 	controlled_player.controlled = true
+	_refresh_home_ai()
 	if hud and hud.has_method("set_controlled"):
-		var role := "GK" if player.is_goalkeeper else "OF"
+		var role := "GK" if player.is_goalkeeper else Formations.role_label(Formations.role_for(player))
 		hud.set_controlled("Team %s #%d (%s)" % [
 			"Home" if player.team_id == 0 else "Away",
 			player.player_index + 1,
@@ -274,15 +293,29 @@ func _cycle_teammate() -> void:
 	var roster := _home_players if controlled_team_id == 0 else _away_players
 	if roster.size() < 2:
 		return
-	# Prefer nearest teammate to the ball (not current).
+	# Cycle: next roster index (wrap), skipping nobody — readable team control.
+	var start_i := 0
+	for i in range(roster.size()):
+		if roster[i] == controlled_player:
+			start_i = i
+			break
+	var next_i := (start_i + 1) % roster.size()
+	_set_controlled(roster[next_i])
+
+
+## Switch-to-best: ball nearest / open receiver / best defender (Phase 4).
+func _switch_to_best() -> void:
+	var roster := _home_players if controlled_team_id == 0 else _away_players
+	if roster.size() < 2:
+		return
 	var best: Player = null
-	var best_d := INF
+	var best_score := -INF
 	for p in roster:
 		if p == controlled_player:
 			continue
-		var d := p.global_position.distance_squared_to(ball.global_position)
-		if d < best_d:
-			best_d = d
+		var s := Formations.switch_score(p, controlled_player, ball, _attack_team_id)
+		if s > best_score:
+			best_score = s
 			best = p
 	if best:
 		_set_controlled(best)
@@ -508,18 +541,15 @@ func _run_rule_restart(code: String, _message: String, awarding_team_id: int, sp
 		if taker == null and not roster.is_empty():
 			taker = roster[0]
 
+	# Phase 4: place both teams into set-piece shape (9 m wall / throw-in lanes).
+	_place_set_piece(code, awarding_team_id, spot, taker)
+
 	if taker:
-		var place := spot
-		place.y = 0.0
-		if use_gk:
-			place = taker.start_position
-			place.z = clampf(place.z, -17.5, 17.5)
-		taker.global_position = place
-		# Face midfield / attack.
 		var face_yaw := 0.0 if awarding_team_id == 0 else PI
 		if code == "throw_in":
-			# Face inward from the sideline.
 			face_yaw = -PI * 0.5 if spot.x > 0.0 else PI * 0.5
+		elif Formations.is_free_throw_code(code):
+			face_yaw = Formations.free_throw_taker_yaw(awarding_team_id, spot)
 		taker.rotation.y = face_yaw
 		taker.velocity = Vector3.ZERO
 		ball.global_position = taker.ball_attach.global_position
@@ -529,12 +559,15 @@ func _run_rule_restart(code: String, _message: String, awarding_team_id: int, sp
 		camera_rig.set_attack_direction(awarding_team_id == 0)
 		rules.on_pickup(taker)
 
-	# Human always controls home.
-	var home_starter := _first_outfield(_home_players)
-	if home_starter:
-		_set_controlled(home_starter)
-	elif not _home_players.is_empty():
-		_set_controlled(_home_players[0])
+	# Prefer controlling the home taker on home awards; else first outfield.
+	if awarding_team_id == 0 and taker and taker.team_id == 0:
+		_set_controlled(taker)
+	else:
+		var home_starter := _first_outfield(_home_players)
+		if home_starter:
+			_set_controlled(home_starter)
+		elif not _home_players.is_empty():
+			_set_controlled(_home_players[0])
 
 	_refresh_hud()
 	_update_rules_hud()
@@ -548,6 +581,25 @@ func _run_rule_restart(code: String, _message: String, awarding_team_id: int, sp
 	_set_players_frozen(false)
 	match_state = MatchState.LIVE
 	_update_rules_hud()
+
+
+func _place_set_piece(code: String, awarding_team_id: int, spot: Vector3, taker: Player) -> void:
+	for p in _all_players():
+		var place := Formations.set_piece_slot(p, code, awarding_team_id, spot, taker)
+		p.global_position = place
+		p.velocity = Vector3.ZERO
+		var face := 0.0 if p.team_id == 0 else PI
+		if code == "throw_in":
+			face = -PI * 0.5 if spot.x > 0.0 else PI * 0.5
+		elif Formations.is_free_throw_code(code):
+			if p.team_id == awarding_team_id:
+				face = Formations.free_throw_taker_yaw(awarding_team_id, spot)
+			else:
+				# Wall faces the taker / midfield.
+				var to_spot := spot - p.global_position
+				if to_spot.length_squared() > 0.01:
+					face = atan2(to_spot.x, to_spot.z)
+		p.rotation.y = face
 
 
 func _clear_possession() -> void:
@@ -666,6 +718,8 @@ func _run_kickoff(kickoff_team_id: int, reason: String = "Kickoff") -> void:
 	rules.begin_lockout()
 	_set_players_frozen(true)
 	_reset_players_and_ball()
+	# Phase 4: compact kickoff shape (wings + backcourt) instead of spawn freeze.
+	_place_kickoff_shape(kickoff_team_id)
 	var roster := _home_players if kickoff_team_id == 0 else _away_players
 	var taker := _first_outfield(roster)
 	if taker == null and not roster.is_empty():
@@ -700,6 +754,14 @@ func _run_kickoff(kickoff_team_id: int, reason: String = "Kickoff") -> void:
 	_set_players_frozen(false)
 	match_state = MatchState.LIVE
 	_update_rules_hud()
+
+
+func _place_kickoff_shape(kickoff_team_id: int) -> void:
+	for p in _all_players():
+		var slot := Formations.kickoff_slot(p, kickoff_team_id)
+		p.global_position = slot
+		p.rotation.y = 0.0 if p.team_id == 0 else PI
+		p.velocity = Vector3.ZERO
 
 
 func _reset_players_and_ball() -> void:

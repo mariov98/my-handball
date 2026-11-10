@@ -3,6 +3,7 @@ class_name Player
 
 ## Capsule outfield / GK. Controlled player receives match input; AI teammates chase/block.
 ## Phase 3: GK dive/track, outfield block volume for contested shots.
+## Phase 4: formation-aware off-ball slots (wing / backcourt / pivot-ish).
 
 signal possession_changed(has_ball: bool)
 signal dive_started
@@ -295,7 +296,7 @@ func _preferred_dive_dir(wish: Vector3) -> Vector3:
 
 func _ai_wish(delta: float) -> Vector3:
 	if match_ball == null:
-		return _steer_toward(start_position)
+		return _steer_toward(Formations.attack_slot(self, start_position))
 
 	if is_goalkeeper:
 		return _ai_gk_wish()
@@ -305,7 +306,7 @@ func _ai_wish(delta: float) -> Vector3:
 
 	var carrier := match_ball.carrier
 	if carrier == null:
-		return _ai_chase_free_ball()
+		return _ai_free_ball_position()
 	if carrier.team_id == team_id:
 		return _ai_support_attack(carrier)
 	return _ai_defend_block(carrier)
@@ -355,49 +356,59 @@ func _predict_gk_intercept(ball_pos: Vector3, ball_vel: Vector3) -> Vector3:
 	return hit
 
 
-func _ai_chase_free_ball() -> Vector3:
-	var target := match_ball.global_position
-	target.y = 0.0
-	# Don't chase into either crease as an outfield player.
-	target = _keep_outfield_legal(target)
-	return _steer_toward(target)
+func _ai_free_ball_position() -> Vector3:
+	# Nearest outfield teammate presses the free ball; others hold shape.
+	var my_d := global_position.distance_squared_to(match_ball.global_position)
+	var i_am_chaser := true
+	var parent_n := get_parent()
+	if parent_n:
+		for sibling in parent_n.get_children():
+			if sibling == self or not (sibling is Player):
+				continue
+			var mate := sibling as Player
+			if mate.is_goalkeeper or mate.match_frozen:
+				continue
+			if mate.global_position.distance_squared_to(match_ball.global_position) + 0.35 < my_d:
+				i_am_chaser = false
+				break
+	if i_am_chaser:
+		var target := match_ball.global_position
+		target.y = 0.0
+		target = _keep_outfield_legal(target)
+		return _steer_toward(target)
+	# Hold attack/defense-neutral mid shape toward last ball side.
+	var slot := Formations.attack_slot(self, match_ball.global_position)
+	# Bias slightly toward ball without full chase.
+	slot = slot.lerp(Vector3(match_ball.global_position.x, 0.0, match_ball.global_position.z), 0.2)
+	slot = _keep_outfield_legal(slot)
+	return _steer_toward(slot) * AI_ATTACK_SPEED_SCALE
 
 
 func _ai_defend_block(carrier: Player) -> Vector3:
-	# Stand between carrier and own goal (simple block / lane deny).
-	var own_goal := own_goal_point()
-	own_goal.y = 0.0
+	var ball_pos := match_ball.global_position if match_ball else carrier.global_position
+	var slot := Formations.defense_slot(self, ball_pos, carrier)
+	# Micro-adjust toward the carrier lane so the wall isn't glued to spots.
 	var carrier_pos := carrier.global_position
 	carrier_pos.y = 0.0
-	var to_goal := own_goal - carrier_pos
-	var dist := to_goal.length()
-	var dir := to_goal / maxf(dist, 0.001)
-	var block_dist := minf(AI_BLOCK_DEPTH, dist * 0.45)
-	var slot := carrier_pos + dir * block_dist
-	# Spread defenders slightly by index so they don't stack.
-	slot.x += (float(player_index) - 2.0) * 1.6
-	slot.x = clampf(slot.x, -8.5, 8.5)
+	slot.x = lerpf(slot.x, carrier_pos.x, 0.12)
 	slot = _keep_outfield_legal(slot)
-	# Hands up when the attacker is close with the ball.
 	if carrier.has_ball and carrier_pos.distance_to(global_position) < 3.8:
 		raise_block(0.2)
 	return _steer_toward(slot) * AI_BLOCK_SPEED_SCALE
 
 
 func _ai_support_attack(carrier: Player) -> Vector3:
-	var goal := opponent_goal_point()
-	goal.y = 0.0
-	var carrier_pos := carrier.global_position
-	carrier_pos.y = 0.0
-	var to_goal := goal - carrier_pos
-	if to_goal.length_squared() < 0.001:
-		return Vector3.ZERO
-	var ahead := to_goal.normalized()
-	var side := Vector3(ahead.z, 0.0, -ahead.x) # perpendicular on XZ
-	var lane := (float(player_index) - 2.0) * 2.4
-	var slot := carrier_pos + ahead * 3.5 + side * lane
-	slot.x = clampf(slot.x, -8.5, 8.5)
-	slot.z = clampf(slot.z, -16.0, 16.0)
+	# Formation attack slots (LW / CB-pivot / RW) with a soft orbit away from the carrier.
+	var ball_pos := carrier.global_position
+	var slot := Formations.attack_slot(self, ball_pos)
+	var to_carrier := slot.distance_to(Vector3(ball_pos.x, 0.0, ball_pos.z))
+	if to_carrier < 2.2:
+		# Don't stack on the ball carrier — slide wider.
+		var side := 1.0 if Formations.role_for(self) == Formations.Role.RIGHT_WING else -1.0
+		if Formations.role_for(self) == Formations.Role.CENTER_BACK:
+			side = 0.0
+			slot.z += (-1.0 if team_id == 0 else 1.0) * 1.5
+		slot.x += side * 2.0
 	slot = _keep_outfield_legal(slot)
 	return _steer_toward(slot) * AI_ATTACK_SPEED_SCALE
 
