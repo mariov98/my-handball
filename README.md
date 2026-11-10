@@ -26,11 +26,13 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 
 | Action | Keyboard / mouse | Gamepad |
 |--------|------------------|---------|
-| Move | WASD | Left stick |
+| Move (camera-relative) | WASD | Left stick |
 | Jump | Space | A / South |
 | Shoot (needs ball) | Left mouse / **E** | RT / R2 |
 | Switch teammate | **Q** or Tab | LB / RB (bumpers) |
 | Toggle aim mode | **T** | Y / North |
+
+**Movement** is relative to the **current camera**: W / stick-up walks into the screen along the camera forward projected onto the court. When possession flips and the camera yaws behind the new attack, the same stick direction keeps matching what you see.
 
 **Aim modes**
 
@@ -42,7 +44,7 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 - IHF-ish court (40×20 m units): floor, lines, sideline/end walls, goals with mouth triggers
 - **3 outfield + 1 GK** capsules per side (home blue, away red)
 - Ball: pickup on contact, follow attach point, impulse shot
-- Elevated **3/4 camera** behind the attack; lightly tracks the ball
+- Elevated **3/4 camera** behind the team with the ball; smooth flip on possession change; subtle yaw when the ball drifts left/right
 - Score UI + **GOAL!** flash + automatic reset
 
 Opponent AI is intentionally idle (static dummies). Full rules, networking, and custom art are out of scope for Phase 0.

@@ -50,9 +50,9 @@ func _physics_process(delta: float) -> void:
 	if controlled:
 		input_dir = Input.get_vector("move_left", "move_right", "move_forward", "move_back")
 
-	var wish := Vector3(input_dir.x, 0.0, input_dir.y)
-	if wish.length_squared() > 1.0:
-		wish = wish.normalized()
+	# WASD / left stick are camera-relative: forward = into the screen along
+	# the current camera facing projected onto the court plane.
+	var wish := camera_relative_wish(input_dir)
 
 	var target_speed := SPEED * (0.85 if is_goalkeeper else 1.0)
 	var control := 1.0 if is_on_floor() else AIR_CONTROL
@@ -97,6 +97,45 @@ func reset_to_start() -> void:
 func face_direction() -> Vector3:
 	# With rotation.y = atan2(x, z), local +Z faces the move direction.
 	return global_transform.basis.z
+
+
+## Map stick/WASD into a planar wish vector relative to the active camera.
+## input_dir from Input.get_vector: +x = right, +y = back (W is negative y).
+func camera_relative_wish(input_dir: Vector2) -> Vector3:
+	if input_dir.length_squared() < 0.0001:
+		return Vector3.ZERO
+
+	var cam := get_viewport().get_camera_3d()
+	if cam == null:
+		var fallback := Vector3(input_dir.x, 0.0, input_dir.y)
+		if fallback.length_squared() > 1.0:
+			fallback = fallback.normalized()
+		return fallback
+
+	# Camera looks along -basis.z; project that onto the court (XZ).
+	var forward := -cam.global_transform.basis.z
+	forward.y = 0.0
+	if forward.length_squared() < 0.0001:
+		# Near top-down: use the camera's projected "up" as forward.
+		forward = -cam.global_transform.basis.y
+		forward.y = 0.0
+	if forward.length_squared() < 0.0001:
+		forward = Vector3(0.0, 0.0, 1.0)
+	else:
+		forward = forward.normalized()
+
+	var right := cam.global_transform.basis.x
+	right.y = 0.0
+	if right.length_squared() < 0.0001:
+		right = Vector3.RIGHT
+	else:
+		right = right.normalized()
+
+	# W / stick-up → into the screen (along camera forward on the court).
+	var wish := right * input_dir.x + forward * (-input_dir.y)
+	if wish.length_squared() > 1.0:
+		wish = wish.normalized()
+	return wish
 
 
 func _on_pickup_body_entered(body: Node3D) -> void:

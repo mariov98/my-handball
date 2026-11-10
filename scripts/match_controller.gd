@@ -23,6 +23,8 @@ var score_away: int = 0
 var _resetting: bool = false
 var _home_players: Array[Player] = []
 var _away_players: Array[Player] = []
+## Last team that possessed the ball — camera stays behind them while the ball is free.
+var _attack_team_id: int = 0
 
 @onready var _home_root: Node = get_node(home_team_path)
 @onready var _away_root: Node = get_node(away_team_path)
@@ -45,13 +47,19 @@ func _ready() -> void:
 		hud.set_score(score_home, score_away)
 	if hud and hud.has_method("set_aim_mode"):
 		hud.set_aim_mode(_aim_mode_label())
-	print("MyHandball Phase 0 ready. Controls: WASD/stick move, Space/A jump, LMB/RT/E shoot, Q/Tab/bumpers switch, T/Y aim mode.")
-	if "--screenshot" in OS.get_cmdline_user_args():
+	print("MyHandball Phase 0 ready. Controls: WASD/stick camera-relative move, Space/A jump, LMB/RT/E shoot, Q/Tab/bumpers switch, T/Y aim mode.")
+	var user_args := OS.get_cmdline_user_args()
+	if "--screenshot-demo" in user_args:
+		var demo := load("res://scripts/screenshot_demo.gd") as GDScript
+		var dn := Node.new()
+		dn.set_script(demo)
+		add_child(dn)
+	elif "--screenshot" in user_args:
 		var shot := load("res://scripts/screenshot_once.gd") as GDScript
 		var sn := Node.new()
 		sn.set_script(shot)
 		add_child(sn)
-	if "--smoke" in OS.get_cmdline_user_args():
+	if "--smoke" in user_args:
 		var smoke := load("res://scripts/smoke_test.gd") as GDScript
 		var node := Node.new()
 		node.set_script(smoke)
@@ -210,11 +218,10 @@ func _mouse_on_court() -> Variant:
 
 
 func _update_camera_attack_side() -> void:
-	# Behind whoever currently attacks (controlled team, or ball carrier's team).
-	var team := controlled_team_id
+	# Camera sits behind the team that has (or last had) the ball.
 	if ball.carrier:
-		team = ball.carrier.team_id
-	camera_rig.set_attack_direction(team == 0)
+		_attack_team_id = ball.carrier.team_id
+	camera_rig.set_attack_direction(_attack_team_id == 0)
 
 
 func _on_goal_scored(scoring_team_id: int, _goal_owner_team_id: int) -> void:
@@ -247,6 +254,7 @@ func _reset_play() -> void:
 		_set_controlled(starter)
 	elif not _home_players.is_empty():
 		_set_controlled(_home_players[0])
+	_attack_team_id = 0
 	camera_rig.set_attack_direction(true)
 
 
