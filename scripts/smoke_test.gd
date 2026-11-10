@@ -11,6 +11,9 @@ func _ready() -> void:
 		return
 
 	# Smoke bypasses opening kickoff — force a live match state.
+	# Keep Phase 2 rules off until the dedicated rules section so Away AI
+	# kickoffs don't trip traveling during Phase 1 assertions.
+	match_node.rules.enabled = false
 	match_node.match_state = MatchController.MatchState.LIVE
 	match_node._set_players_frozen(false)
 	match_node.clock_remaining = match_node.period_length_seconds
@@ -220,9 +223,11 @@ func _ready() -> void:
 		return
 	player.has_ball = true
 	match_node._update_camera_attack_side()
-	# Keep away frozen while we force scores / kickoffs.
+	# Keep away frozen + AI off while we force scores / kickoffs so a post-kickoff
+	# carry doesn't auto-release before assertions (Phase 2 traveling pressure).
 	for p in match_node._away_players:
 		p.match_frozen = true
+		p.ai_enabled = false
 
 	# Aim at away goal (+Z) and shoot
 	var ok := player.try_shoot(Vector3(0, 0.25, 1).normalized(), 22.0, ball)
@@ -243,7 +248,12 @@ func _ready() -> void:
 		return
 
 	# Wait for goal pause + kickoff (conceding = away owns that goal → away kickoff)
-	await get_tree().create_timer(MatchController.GOAL_PAUSE_DELAY + MatchController.KICKOFF_FREEZE + 0.4).timeout
+	await get_tree().create_timer(MatchController.GOAL_PAUSE_DELAY + MatchController.KICKOFF_FREEZE + 0.25).timeout
+	# Kickoff unfreezes roster — pin Away again before they can move/shoot.
+	for p in match_node._away_players:
+		p.match_frozen = true
+		p.ai_enabled = false
+	await get_tree().process_frame
 	print(
 		"Smoke after home-goal kickoff: state=", match_node.match_state,
 		" carrier_team=", ball.carrier.team_id if ball.carrier else -1
@@ -277,7 +287,11 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 
-	await get_tree().create_timer(MatchController.GOAL_PAUSE_DELAY + MatchController.KICKOFF_FREEZE + 0.4).timeout
+	await get_tree().create_timer(MatchController.GOAL_PAUSE_DELAY + MatchController.KICKOFF_FREEZE + 0.25).timeout
+	for p in match_node._away_players:
+		p.match_frozen = true
+		p.ai_enabled = false
+	await get_tree().process_frame
 	print(
 		"Smoke after away-goal kickoff: carrier_team=",
 		ball.carrier.team_id if ball.carrier else -1
@@ -298,8 +312,220 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 
+	# --- Phase 2 rules ---
+	match_node.rules.enabled = true
+	match_node.rules.begin_lockout()
+	match_node.rules.end_lockout()
+	for p in match_node._away_players:
+		p.match_frozen = true
+	for p in match_node._home_players:
+		if p != match_node.controlled_player:
+			p.match_frozen = true
+
+	# Geometry helpers
+	if not Court.in_goal_area(Vector3(0, 0, -17.0), 0):
+		push_error("Smoke: expected (0,-17) in home goal area")
+		get_tree().quit(1)
+		return
+	if Court.in_goal_area(Vector3(0, 0, 0), 0):
+		push_error("Smoke: midfield should not be in goal area")
+		get_tree().quit(1)
+		return
+	print("Smoke goal-area geometry OK")
+
+	# Traveling: hold ball and synthesize step distance beyond MAX_STEPS
+	_smoke_clear_ball(ball)
+	player = match_node.controlled_player
+	player.global_position = Vector3(0.0, player.start_position.y, 0.0)
+	player.velocity = Vector3.ZERO
+	if not ball.try_pickup(player):
+		push_error("Smoke: traveling setup pickup failed")
+		get_tree().quit(1)
+		return
+	player.has_ball = true
+	match_node.rules.on_pickup(player)
+	match_node.rules.end_lockout()
+	match_node.match_state = MatchController.MatchState.LIVE
+	match_node._set_players_frozen(false)
+	for p in match_node._away_players:
+		p.match_frozen = true
+		p.ai_enabled = false
+	# Teleport in chunks larger than one step so one tick can cross the limit.
+	var stride := HandballRules.STEP_LENGTH_M * 1.5
+	var hit_travel := false
+	for i in range(8):
+		player.global_position = Vector3(0.0, player.start_position.y, float(i) * stride)
+		player.velocity = Vector3.ZERO
+		hit_travel = match_node.rules.tick(0.016, ball, match_node._all_players())
+		print(
+			"Smoke traveling tick i=", i,
+			" z=", player.global_position.z,
+			" steps=", match_node.rules.get_steps(),
+			" air=", match_node.rules._is_airborne(player),
+			" hit=", hit_travel
+		)
+		if hit_travel:
+			break
+	if not hit_travel:
+		push_error("Smoke: traveling violation did not fire")
+		get_tree().quit(1)
+		return
+	await get_tree().create_timer(MatchController.RESTART_FREEZE + 0.35).timeout
+	print(
+		"Smoke after traveling: state=", match_node.match_state,
+		" carrier_team=", ball.carrier.team_id if ball.carrier else -1
+	)
+	if ball.carrier == null or ball.carrier.team_id != 1:
+		push_error("Smoke: traveling should award Away free throw")
+		get_tree().quit(1)
+		return
+	if match_node.match_state != MatchController.MatchState.LIVE:
+		push_error("Smoke: expected LIVE after traveling restart")
+		get_tree().quit(1)
+		return
+
+	# Sideline throw-in: place free ball OOB on +X
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	match_node.rules.last_touch_team_id = 0
+	match_node.rules._oob_cooldown = 0.0
+	ball.global_position = Vector3(Court.OOB_HALF_WIDTH + 0.05, 0.3, 2.0)
+	var oob_hit := match_node.rules.tick(0.016, ball, match_node._all_players())
+	print("Smoke sideline OOB hit=", oob_hit, " x=", ball.global_position.x)
+	if not oob_hit:
+		push_error("Smoke: sideline OOB did not fire")
+		get_tree().quit(1)
+		return
+	await get_tree().create_timer(MatchController.RESTART_FREEZE + 0.35).timeout
+	print(
+		"Smoke after throw-in: carrier_team=",
+		ball.carrier.team_id if ball.carrier else -1,
+		" x=", ball.carrier.global_position.x if ball.carrier else 0.0
+	)
+	if ball.carrier == null or ball.carrier.team_id != 1:
+		push_error("Smoke: throw-in should go to Away")
+		get_tree().quit(1)
+		return
+
+	# Goal throw: free ball over away end line outside posts (attack last touch)
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	match_node.rules.last_touch_team_id = 0
+	match_node.rules._oob_cooldown = 0.0
+	ball.global_position = Vector3(5.0, 0.4, Court.OOB_HALF_LENGTH + 0.05)
+	var gt_hit := match_node.rules.tick(0.016, ball, match_node._all_players())
+	print("Smoke endline goal-throw hit=", gt_hit)
+	if not gt_hit:
+		push_error("Smoke: endline OOB did not fire")
+		get_tree().quit(1)
+		return
+	await get_tree().create_timer(MatchController.RESTART_FREEZE + 0.35).timeout
+	print(
+		"Smoke after goal throw: carrier=",
+		ball.carrier.name if ball.carrier else "null",
+		" gk=", ball.carrier.is_goalkeeper if ball.carrier else false
+	)
+	if ball.carrier == null or ball.carrier.team_id != 1 or not ball.carrier.is_goalkeeper:
+		push_error("Smoke: goal throw should go to Away GK")
+		get_tree().quit(1)
+		return
+
+	# Goal-area violation: grounded home attacker inside away crease with ball
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	player = match_node.controlled_player
+	player.global_position = Vector3(0.0, player.start_position.y, 17.0)
+	player.velocity = Vector3.ZERO
+	if not ball.try_pickup(player):
+		push_error("Smoke: goal-area pickup failed")
+		get_tree().quit(1)
+		return
+	player.has_ball = true
+	match_node.rules.on_pickup(player)
+	match_node.rules._oob_cooldown = 0.0
+	# Accrue grace then violate.
+	var area_hit := false
+	for _i in range(20):
+		area_hit = match_node.rules.tick(0.05, ball, match_node._all_players())
+		if area_hit:
+			break
+	print("Smoke goal-area hit=", area_hit)
+	if not area_hit:
+		push_error("Smoke: goal-area violation did not fire")
+		get_tree().quit(1)
+		return
+	await get_tree().create_timer(MatchController.RESTART_FREEZE + 0.35).timeout
+	if ball.carrier == null or ball.carrier.team_id != 1:
+		push_error("Smoke: goal-area foul should award Away")
+		get_tree().quit(1)
+		return
+
+	# Passive play: hold still near midfield until turnover
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	player = match_node.controlled_player
+	player.global_position = Vector3(0.0, player.start_position.y, 0.0)
+	player.velocity = Vector3.ZERO
+	if not ball.try_pickup(player):
+		push_error("Smoke: passive pickup failed")
+		get_tree().quit(1)
+		return
+	player.has_ball = true
+	match_node.rules.on_pickup(player)
+	match_node.rules._oob_cooldown = 0.0
+	var passive_hit := false
+	var warned := false
+	for _i in range(int(HandballRules.PASSIVE_TURNOVER_S / 0.25) + 4):
+		passive_hit = match_node.rules.tick(0.25, ball, match_node._all_players())
+		if match_node.rules.is_passive_warned():
+			warned = true
+		if passive_hit:
+			break
+	print("Smoke passive warned=", warned, " hit=", passive_hit, " t=", match_node.rules.get_passive_timer())
+	if not warned:
+		push_error("Smoke: passive warning never fired")
+		get_tree().quit(1)
+		return
+	if not passive_hit:
+		push_error("Smoke: passive turnover did not fire")
+		get_tree().quit(1)
+		return
+	await get_tree().create_timer(MatchController.RESTART_FREEZE + 0.35).timeout
+	if ball.carrier == null or ball.carrier.team_id != 1:
+		push_error("Smoke: passive should award Away")
+		get_tree().quit(1)
+		return
+
 	print("SMOKE_OK")
 	get_tree().quit(0)
+
+
+func _smoke_prepare_live(match_node: MatchController, _ball: Ball) -> void:
+	match_node.match_state = MatchController.MatchState.LIVE
+	match_node.rules.begin_lockout()
+	match_node.rules.end_lockout()
+	# end_lockout arms an OOB grace — clear it so scripted rule checks can fire.
+	match_node.rules._oob_cooldown = 0.0
+	match_node.rules._area_timers.clear()
+	match_node._set_players_frozen(false)
+	for p in match_node._all_players():
+		if p.is_goalkeeper:
+			p.global_position = p.start_position
+		else:
+			# Park outfield away from both creases between scripted rule checks.
+			p.global_position = Vector3(
+				clampf(p.start_position.x, -6.0, 6.0),
+				p.start_position.y,
+				clampf(p.start_position.z, -8.0, 8.0)
+			)
+		p.velocity = Vector3.ZERO
+		p.match_frozen = true
+		if p.team_id == 1:
+			p.ai_enabled = false
+	match_node._set_players_frozen(false)
+	for p in match_node._away_players:
+		p.match_frozen = true
+		p.ai_enabled = false
 
 
 func _smoke_clear_ball(ball: Ball) -> void:

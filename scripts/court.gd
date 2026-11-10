@@ -9,6 +9,59 @@ const FLOOR_Y := 0.0
 const GOAL_WIDTH := 3.0
 const GOAL_HEIGHT := 2.0
 const GOAL_DEPTH := 1.0
+const GOAL_AREA_RADIUS := 6.0
+## Soft out-of-bounds just inside the wall colliders (capsule/ball centers).
+const OOB_HALF_WIDTH := 9.55
+const OOB_HALF_LENGTH := 19.6
+
+
+## True if `pos` is inside the defending team's 6 m goal area (semicircle approx).
+static func in_goal_area(pos: Vector3, defending_team_id: int) -> bool:
+	var end_z := -HALF_LENGTH if defending_team_id == 0 else HALF_LENGTH
+	var nearest_x := clampf(pos.x, -GOAL_WIDTH * 0.5, GOAL_WIDTH * 0.5)
+	var dx := pos.x - nearest_x
+	var dz := pos.z - end_z
+	return dx * dx + dz * dz <= GOAL_AREA_RADIUS * GOAL_AREA_RADIUS
+
+
+## Push a court position just outside the 6 m arc (for AI / soft eject).
+static func eject_from_goal_area(pos: Vector3, defending_team_id: int, margin: float = 0.35) -> Vector3:
+	if not in_goal_area(pos, defending_team_id):
+		return pos
+	var end_z := -HALF_LENGTH if defending_team_id == 0 else HALF_LENGTH
+	var nearest_x := clampf(pos.x, -GOAL_WIDTH * 0.5, GOAL_WIDTH * 0.5)
+	var from := Vector3(pos.x - nearest_x, 0.0, pos.z - end_z)
+	if from.length_squared() < 0.0001:
+		# Dead center of goal line — push toward midfield.
+		var toward_mid := 1.0 if defending_team_id == 0 else -1.0
+		return Vector3(pos.x, pos.y, end_z + toward_mid * (GOAL_AREA_RADIUS + margin))
+	var pushed := Vector3(nearest_x, 0.0, end_z) + from.normalized() * (GOAL_AREA_RADIUS + margin)
+	pushed.y = pos.y
+	pushed.x = clampf(pushed.x, -HALF_WIDTH + 0.5, HALF_WIDTH - 0.5)
+	pushed.z = clampf(pushed.z, -HALF_LENGTH + 0.5, HALF_LENGTH - 0.5)
+	return pushed
+
+
+static func is_sideline_oob(pos: Vector3) -> bool:
+	return absf(pos.x) >= OOB_HALF_WIDTH
+
+
+## End-line OOB for a free ball (excludes the goal mouth so GoalArea can score).
+static func is_endline_oob(pos: Vector3) -> bool:
+	if absf(pos.z) < OOB_HALF_LENGTH:
+		return false
+	# Inside the posts + a little height → leave for the goal trigger.
+	if absf(pos.x) <= GOAL_WIDTH * 0.55 and pos.y <= GOAL_HEIGHT + 0.35:
+		return false
+	return true
+
+
+static func clamp_to_court_xz(pos: Vector3, inset: float = 0.6) -> Vector3:
+	return Vector3(
+		clampf(pos.x, -HALF_WIDTH + inset, HALF_WIDTH - inset),
+		pos.y,
+		clampf(pos.z, -HALF_LENGTH + inset, HALF_LENGTH - inset)
+	)
 
 
 func _ready() -> void:

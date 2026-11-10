@@ -39,6 +39,10 @@ var match_frozen: bool = false
 var _bob_phase: float = 0.0
 var _pickup_block: float = 0.0
 var _ai_shoot_cd: float = 0.0
+## AI carry distance — shoot before Phase 2 traveling (~3×1.15 m) fires.
+var _ai_carry_dist: float = 0.0
+var _ai_carry_last_xz: Vector3 = Vector3.ZERO
+var _ai_carry_sampling: bool = false
 var _mesh: MeshInstance3D
 var _mesh_base_y: float = 0.9
 
@@ -111,6 +115,8 @@ func reset_to_start() -> void:
 	has_ball = false
 	_pickup_block = 0.0
 	_ai_shoot_cd = 0.0
+	_ai_carry_dist = 0.0
+	_ai_carry_sampling = false
 	_bob_phase = 0.0
 	if _mesh:
 		_mesh.position.y = _mesh_base_y
@@ -208,6 +214,8 @@ func _ai_gk_wish() -> Vector3:
 func _ai_chase_free_ball() -> Vector3:
 	var target := match_ball.global_position
 	target.y = 0.0
+	# Don't chase into either crease as an outfield player.
+	target = _keep_outfield_legal(target)
 	return _steer_toward(target)
 
 
@@ -225,6 +233,7 @@ func _ai_defend_block(carrier: Player) -> Vector3:
 	# Spread defenders slightly by index so they don't stack.
 	slot.x += (float(player_index) - 2.0) * 1.6
 	slot.x = clampf(slot.x, -8.5, 8.5)
+	slot = _keep_outfield_legal(slot)
 	return _steer_toward(slot) * AI_BLOCK_SPEED_SCALE
 
 
@@ -242,24 +251,48 @@ func _ai_support_attack(carrier: Player) -> Vector3:
 	var slot := carrier_pos + ahead * 3.5 + side * lane
 	slot.x = clampf(slot.x, -8.5, 8.5)
 	slot.z = clampf(slot.z, -16.0, 16.0)
+	slot = _keep_outfield_legal(slot)
 	return _steer_toward(slot) * AI_ATTACK_SPEED_SCALE
 
 
 func _ai_attack_with_ball(_delta: float) -> Vector3:
 	var goal := opponent_goal_point()
 	var me := global_position
+	var xz := Vector3(me.x, 0.0, me.z)
+	if not _ai_carry_sampling:
+		_ai_carry_last_xz = xz
+		_ai_carry_dist = 0.0
+		_ai_carry_sampling = true
+	else:
+		_ai_carry_dist += xz.distance_to(_ai_carry_last_xz)
+		_ai_carry_last_xz = xz
 	var flat := Vector3(goal.x - me.x, 0.0, goal.z - me.z)
 	var dist := flat.length()
-	# Shoot when inside range and roughly facing the goal.
-	if dist <= AI_SHOOT_RANGE and _ai_shoot_cd <= 0.0 and match_ball != null:
+	# Shoot inside range, or early to avoid traveling (3 steps ≈ 3.45 m).
+	var must_release := _ai_carry_dist >= 2.6
+	if (dist <= AI_SHOOT_RANGE or must_release) and _ai_shoot_cd <= 0.0 and match_ball != null:
 		var aim := (goal - (me + Vector3(0, 1.2, 0))).normalized()
 		if try_shoot(aim, 15.0, match_ball):
 			_ai_shoot_cd = AI_SHOOT_COOLDOWN
+			_ai_carry_sampling = false
+			_ai_carry_dist = 0.0
 			return Vector3.ZERO
-	# Approach goal with a slight lateral weave by index.
+	# Approach goal with a slight lateral weave by index — stay outside 6 m.
 	var approach := Vector3(goal.x + (float(player_index) - 2.0) * 1.2, 0.0, goal.z)
+	approach = _keep_outfield_legal(approach)
 	return _steer_toward(approach) * AI_ATTACK_SPEED_SCALE
 
+
+## Soft clamp so AI outfield targets stay outside both goal areas.
+func _keep_outfield_legal(target: Vector3) -> Vector3:
+	if is_goalkeeper:
+		return target
+	var out := target
+	if Court.in_goal_area(out, team_id):
+		out = Court.eject_from_goal_area(out, team_id, 0.6)
+	if Court.in_goal_area(out, 1 - team_id):
+		out = Court.eject_from_goal_area(out, 1 - team_id, 0.6)
+	return out
 
 
 func _steer_toward(world_target: Vector3) -> Vector3:
@@ -279,6 +312,8 @@ func _on_pickup_body_entered(body: Node3D) -> void:
 		var ball := body as Ball
 		if ball.try_pickup(self):
 			has_ball = true
+			_ai_carry_dist = 0.0
+			_ai_carry_sampling = false
 			possession_changed.emit(true)
 
 

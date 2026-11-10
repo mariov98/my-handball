@@ -1,6 +1,6 @@
 # MyHandball
 
-Desktop handball prototype built with **Godot 4.3** (GDScript). **Phase 1** is a mini match on top of the Phase 0 sandbox: both goals score, match clock + periods, kickoff/restart, and basic opponent chase/block AI — still capsules/boxes/spheres only.
+Desktop handball prototype built with **Godot 4.3** (GDScript). **Phase 2** adds sport-logic approximations (steps, passive play, out of bounds, 6 m goal area, throw-in / goal throw) on top of the Phase 1 mini match — still capsules/boxes/spheres only.
 
 ## Requirements (Windows)
 
@@ -39,7 +39,29 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 - **Face** — shot goes where the capsule is facing (default).
 - **Mouse** — shot aims toward the mouse cursor projected onto the court plane.
 
-## Phase 1 — mini match
+## Phase 2 — handball rules core
+
+These are **handball-informed approximations** for a playable prototype — recognizable feel over perfect IHF fidelity. When a rule fires, the HUD shows a banner and a short freeze restart.
+
+| Rule | How it feels in play |
+|------|----------------------|
+| **Steps / traveling** | While holding the ball on the floor, planar movement accumulates into steps (~1.15 m each). **More than 3** → traveling → free-throw restart for the other team near the spot. Pivot / stand still freely; **jump-shot** (airborne) does not add steps. |
+| **Passive play (lite)** | If the carrier stops making progress toward the opponent goal for ~**6 s**, HUD warns **Passive play**. At ~**10 s** → turnover free throw. Meaningful progress (~1.75 m closer to goal) resets the timer. GK holding does not burn passive. |
+| **Out of bounds** | Soft sideline / end-line bounds inside the walls. Sideline → **throw-in** for the other team. End line outside the goal mouth: attack last touch → **goal throw** (defending GK); defense last touch → corner-style **throw-in**. |
+| **Goal area (6 m)** | Semicircle approx from the goal posts. Outfield players may not stand in either crease; **airborne attackers** can enter for a jump shot. Grounded illegal presence (brief grace) → free throw. Away AI steers outside both arcs. |
+| **Restarts** | Throw-in / goal throw / free throw (traveling, passive, 6 m) with short freeze + banner. **Kickoff after goals** (and period starts) from Phase 1 is unchanged. |
+
+HUD also shows a live **Steps n/3** readout (and Passive countdown / PASSIVE) while you hold the ball.
+
+### Intentional simplifications
+
+- No 7 m throws as set pieces, no 2-minute exclusions, no formal 9 m free-throw wall.
+- Steps are distance-based, not animated foot plants; no separate dribble / bounce reset.
+- Passive is progress-to-goal only (no referee “warning gesture” state machine).
+- Goal area is a semicircle distance check, not the full IHF D construction drawings.
+- OOB uses soft bounds because walls keep the rigid ball from leaving the arena.
+
+## Phase 1 — mini match (still in)
 
 You control **Home** (blue). **Away** (red) runs basic AI. Both ends of the court are live scoring goals.
 
@@ -47,11 +69,9 @@ You control **Home** (blue). **Away** (red) runs basic AI. Both ends of the cour
 |---------|----------|
 | **Clock** | Counts down per period (default **2:00** × **2** halves). Tunable via `period_length_seconds` / `periods_total` on `MatchController`. |
 | **Kickoff / restart** | Opening kickoff to Home. After a goal, the **conceding** team restarts from center with possession. Period 2 kickoff goes to Away. Short freeze + banner, then live play. |
-| **Opponent AI** | Away outfield: chase free ball, block lanes when defending, support when a teammate carries, drive + shoot near the goal. Away GK tracks the ball laterally on the line. |
+| **Opponent AI** | Away outfield: chase free ball, block lanes when defending, support when a teammate carries, drive + shoot near the goal (outside 6 m). Away GK tracks the ball laterally on the line. |
 | **Camera** | Elevated 3/4 behind the team with (or last with) the ball; smooth flip on possession change. |
-| **UI** | Score, clock, period, GOAL / kickoff / period / full-time banners. |
-
-Human teammates (non-controlled Home capsules) stay idle in Phase 1. Full handball rules (steps, passive, 7m), career, and custom art remain out of scope.
+| **UI** | Score, clock, period, rules status, GOAL / kickoff / rule / period / full-time banners. |
 
 ### Sandbox period length
 
@@ -74,7 +94,8 @@ scenes/court/     court.tscn
 scenes/actors/    player.tscn, ball.tscn
 scenes/match/     match.tscn (main), camera_rig.tscn
 scenes/ui/        hud.tscn
-scripts/          player, ball, court, camera_rig, goal_area, match_controller, hud
+scripts/          player, ball, court, camera_rig, goal_area, match_controller,
+                  handball_rules, hud
 resources/        materials / physics (reserved)
 ```
 
@@ -96,13 +117,21 @@ resources/        materials / physics (reserved)
 - [ ] Away AI can possess and shoot toward home
 - [ ] Period ends at 0:00 → next period or FULL TIME
 
+### Phase 2 rules
+- [ ] Hold ball and run without shooting → Steps HUD climbs → traveling banner → opponent free throw
+- [ ] Hold still / weave without approaching goal → Passive warning → turnover free throw
+- [ ] Carry or push ball into sideline → throw-in banner for other side
+- [ ] Miss end line outside posts → goal throw to defending GK
+- [ ] Walk grounded into opponent 6 m with/without ball → goal-area free throw; jump into crease and shoot still works
+- [ ] After any rule restart, play returns LIVE and clock still ticks
+
 ### Optional automated smoke (dev)
 
 ```bash
 godot --path . -- --smoke
 ```
 
-Expect `SMOKE_OK` after cam-relative checks, possess, camera flip, AI chase wish, **both** goals + kickoff sides, and switch.
+Expect `SMOKE_OK` after Phase 1 checks plus traveling, sideline throw-in, goal throw, goal-area foul, and passive turnover.
 
 ## License
 
