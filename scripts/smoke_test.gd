@@ -42,6 +42,53 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 
+	# --- Yaw pivot must be the ball, not court-center / far goal ---
+	var lateral_ball := Vector3(6.0, 0.9, -2.0)
+	ball.global_position = lateral_ball
+	player.global_position = lateral_ball + Vector3(0.2, 0.0, 0.2)
+	match_node._update_camera_attack_side()
+	# Snap desired pose so we can measure geometry without waiting on lerps.
+	cam.global_position = cam._desired_position(lateral_ball)
+	var look_pt: Vector3 = cam._look_target(lateral_ball)
+	var pivot: Vector3 = cam.pivot_point(lateral_ball)
+	var cam_flat := Vector3(cam.global_position.x, 0.0, cam.global_position.z)
+	var pivot_to_cam := cam_flat - pivot
+	var expected_len := Vector2(cam.side_bias, cam.follow_distance).length()
+	var look_flat_dist := Vector2(look_pt.x - pivot.x, look_pt.z - pivot.z).length()
+	print(
+		"Smoke pivot: pivot=", pivot,
+		" cam_flat=", cam_flat,
+		" |offset|=", pivot_to_cam.length(),
+		" expected≈", expected_len,
+		" look_lead=", look_flat_dist
+	)
+	if pivot.distance_to(Vector3(lateral_ball.x, 0.0, lateral_ball.z)) > 0.01:
+		push_error("Smoke: pivot is not at the ball")
+		get_tree().quit(1)
+		return
+	if absf(pivot_to_cam.length() - expected_len) > 0.15:
+		push_error("Smoke: camera offset length not orbiting ball")
+		get_tree().quit(1)
+		return
+	# Look lead stays near the ball (<< distance to far goal ~20m).
+	if look_flat_dist > cam.look_ahead + 0.5:
+		push_error("Smoke: look target too far from ball (goal-anchored?)")
+		get_tree().quit(1)
+		return
+	# With positive ball X yaw, camera should sit left of a pure +X side bias orbit
+	# relative to the ball — i.e. offset is rotated around the ball, not world origin.
+	var yaw := cam.ball_yaw(lateral_ball)
+	var unyawed := pivot_to_cam.rotated(Vector3.UP, -yaw)
+	print("Smoke pivot unyawed offset=", unyawed, " yaw=", yaw)
+	if absf(unyawed.x - cam.side_bias * cam.attack_sign) > 0.2:
+		push_error("Smoke: yaw is not rotating around ball pivot")
+		get_tree().quit(1)
+		return
+	if absf(unyawed.z - (-cam.attack_sign * cam.follow_distance)) > 0.2:
+		push_error("Smoke: yaw orbit Z not ball-centered")
+		get_tree().quit(1)
+		return
+
 	# Teleport player onto ball and wait for pickup
 	player.global_position = ball.global_position + Vector3(0.2, 0, 0.2)
 	await get_tree().create_timer(0.3).timeout

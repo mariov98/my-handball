@@ -1,21 +1,21 @@
 extends Node3D
 class_name CameraRig
 
-## Elevated 3/4 view behind the attacking team; subtle yaw follows ball left/right.
+## Elevated 3/4 view behind the attacking team.
+## Yaw/orbit pivots around the ball (attack focus), not the far goal.
 
 @export var follow_height: float = 14.0
 @export var follow_distance: float = 18.0
 @export var side_bias: float = 7.0
-@export var look_ahead: float = 4.0
+## Small lead past the ball along the attack so the goal stays in frame.
+@export var look_ahead: float = 2.5
 @export var position_lerp: float = 3.5
 @export var rotation_lerp: float = 2.8
 ## How quickly the rig eases to the opposite end when possession flips.
 @export var attack_flip_lerp: float = 2.4
-## Radians of extra yaw per metre of ball X (clamped by max_ball_yaw).
+## Radians of orbit yaw per metre of ball X (clamped by max_ball_yaw).
 @export var ball_yaw_per_meter: float = 0.035
 @export var max_ball_yaw: float = 0.35
-## How much the pivot tracks the ball along X (0–1).
-@export var ball_lateral_follow: float = 0.28
 
 var ball: Node3D
 ## Smoothed attack facing: +1 home attacks +Z; -1 away attacks -Z.
@@ -46,6 +46,15 @@ func get_target_attack_sign() -> float:
 	return _target_attack_sign
 
 
+## Attack focus used as the orbit / look pivot (ball on the court plane).
+func pivot_point(ball_pos: Vector3) -> Vector3:
+	return Vector3(ball_pos.x, 0.0, ball_pos.z)
+
+
+func ball_yaw(ball_pos: Vector3) -> float:
+	return clampf(ball_pos.x * ball_yaw_per_meter, -max_ball_yaw, max_ball_yaw)
+
+
 func _physics_process(delta: float) -> void:
 	if ball == null:
 		return
@@ -70,18 +79,19 @@ func _physics_process(delta: float) -> void:
 
 
 func _desired_position(ball_pos: Vector3) -> Vector3:
-	# Pivot near the ball; sit behind the attack along Z, with a fixed 3/4 side offset.
-	# Ball X adds a small yaw so the view turns when the ball drifts left/right.
-	var pivot := Vector3(ball_pos.x * ball_lateral_follow, 0.0, ball_pos.z)
-	var yaw := clampf(ball_pos.x * ball_yaw_per_meter, -max_ball_yaw, max_ball_yaw)
-	# Keep the 3/4 bias on the camera's right as attack direction flips.
+	# Orbit around the ball: base offset is behind the attack with a 3/4 side bias,
+	# then yawed about the ball when it drifts left/right.
+	var pivot := pivot_point(ball_pos)
+	var yaw := ball_yaw(ball_pos)
 	var lateral := side_bias * attack_sign
 	var offset := Vector3(lateral, follow_height, -attack_sign * follow_distance)
-	offset = offset.rotated(Vector3.UP, yaw)
-	return pivot + offset
+	return pivot + offset.rotated(Vector3.UP, yaw)
 
 
 func _look_target(ball_pos: Vector3) -> Vector3:
-	var yaw := clampf(ball_pos.x * ball_yaw_per_meter, -max_ball_yaw, max_ball_yaw)
-	var ahead := Vector3(0.0, 0.6, attack_sign * look_ahead).rotated(Vector3.UP, yaw)
-	return Vector3(ball_pos.x * 0.65, 0.6, ball_pos.z) + Vector3(ahead.x, 0.0, ahead.z)
+	# Look at the ball with a short attack-direction lead (same yaw as the orbit),
+	# so framing stays ball-centered — the far goal is not the rotation center.
+	var yaw := ball_yaw(ball_pos)
+	var lead := Vector3(0.0, 0.0, attack_sign * look_ahead).rotated(Vector3.UP, yaw)
+	var pivot := pivot_point(ball_pos)
+	return Vector3(pivot.x, 0.6, pivot.z) + lead
