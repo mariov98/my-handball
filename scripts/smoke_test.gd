@@ -350,17 +350,20 @@ func _ready() -> void:
 	for p in match_node._away_players:
 		p.match_frozen = true
 		p.ai_enabled = false
-	# Teleport in chunks larger than one step so one tick can cross the limit.
+	# Teleport in chunks larger than one plant. Reception zero eats the first
+	# plant, then 3 counted steps, then the 4th counted plant → traveling.
 	var stride := HandballRules.STEP_LENGTH_M * 1.5
 	var hit_travel := false
-	for i in range(8):
+	for i in range(10):
 		player.global_position = Vector3(0.0, player.start_position.y, float(i) * stride)
-		player.velocity = Vector3.ZERO
+		# Give planar speed so pivot detection doesn't treat the sample as stopped.
+		player.velocity = Vector3(0.0, 0.0, HandballRules.MOVE_SPEED_MPS + 1.0)
 		hit_travel = match_node.rules.tick(0.016, ball, match_node._all_players())
 		print(
 			"Smoke traveling tick i=", i,
 			" z=", player.global_position.z,
 			" steps=", match_node.rules.get_steps(),
+			" zero=", match_node.rules._reception_zero_pending,
 			" air=", match_node.rules._is_airborne(player),
 			" hit=", hit_travel
 		)

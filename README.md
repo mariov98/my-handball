@@ -45,18 +45,18 @@ These are **handball-informed approximations** for a playable prototype — reco
 
 | Rule | How it feels in play |
 |------|----------------------|
-| **Steps / traveling** | While holding the ball on the floor, planar movement accumulates into steps (~1.15 m each). **More than 3** → traveling → free-throw restart for the other team near the spot. Pivot / stand still freely; **jump-shot** (airborne) does not add steps. |
+| **Steps / traveling** | Discrete foot-plants while moving with the ball (~1.65 m gait). Catch gets a **reception zero** (first plant free). Stop / slow = **pivot** (gait pauses; taken steps stay). HUD ticks **Steps n/3** each plant; at 3 a **Last step** warning; a 4th plant → **TRAVELING** free throw. **Jump-shot** (airborne) does not add steps. |
 | **Passive play (lite)** | If the carrier stops making progress toward the opponent goal for ~**6 s**, HUD warns **Passive play**. At ~**10 s** → turnover free throw. Meaningful progress (~1.75 m closer to goal) resets the timer. GK holding does not burn passive. |
 | **Out of bounds** | Soft sideline / end-line bounds inside the walls. Sideline → **throw-in** for the other team. End line outside the goal mouth: attack last touch → **goal throw** (defending GK); defense last touch → corner-style **throw-in**. |
 | **Goal area (6 m)** | Semicircle approx from the goal posts. Outfield players may not stand in either crease; **airborne attackers** can enter for a jump shot. Grounded illegal presence (brief grace) → free throw. Away AI steers outside both arcs. |
 | **Restarts** | Throw-in / goal throw / free throw (traveling, passive, 6 m) with short freeze + banner. **Kickoff after goals** (and period starts) from Phase 1 is unchanged. |
 
-HUD also shows a live **Steps n/3** readout (and Passive countdown / PASSIVE) while you hold the ball.
+HUD shows a large glanceable **Steps n/3** (color + pulse per plant) and a separate Passive / PASSIVE line. Traveling uses a red **TRAVELING** banner.
 
 ### Intentional simplifications
 
 - No 7 m throws as set pieces, no 2-minute exclusions, no formal 9 m free-throw wall.
-- Steps are distance-based, not animated foot plants; no separate dribble / bounce reset.
+- Steps are gait-distance plants (not animated feet); no separate dribble / bounce reset; pivot pauses gait but does not wipe taken steps; resume may still use remaining plants.
 - Passive is progress-to-goal only (no referee “warning gesture” state machine).
 - Goal area is a semicircle distance check, not the full IHF D construction drawings.
 - OOB uses soft bounds because walls keep the rigid ball from leaving the arena.
@@ -118,7 +118,8 @@ resources/        materials / physics (reserved)
 - [ ] Period ends at 0:00 → next period or FULL TIME
 
 ### Phase 2 rules
-- [ ] Hold ball and run without shooting → Steps HUD climbs → traveling banner → opponent free throw
+- [ ] Hold ball and run without shooting → Steps HUD pulses 1/3 → 2/3 → 3/3 (warn) → TRAVELING banner → opponent free throw
+- [ ] Catch, take 1–2 steps, stop/pivot, resume → steps stay; no sudden silent traveling
 - [ ] Hold still / weave without approaching goal → Passive warning → turnover free throw
 - [ ] Carry or push ball into sideline → throw-in banner for other side
 - [ ] Miss end line outside posts → goal throw to defending GK

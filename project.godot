@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="MyHandball"
-config/description="Phase 2 handball rules — steps, passive, OOB, 6m area, throw-in/goal throw on Phase 1 mini match."
+config/description="Phase 2 handball — tuned steps feel + HUD feedback on rules core (passive, OOB, 6m, restarts)."
 run/main_scene="res://scenes/match/match.tscn"
 config/features=PackedStringArray("4.3", "Forward Plus")
 config/icon="res://icon.svg"

@@ -39,7 +39,7 @@ var match_frozen: bool = false
 var _bob_phase: float = 0.0
 var _pickup_block: float = 0.0
 var _ai_shoot_cd: float = 0.0
-## AI carry distance — shoot before Phase 2 traveling (~3×1.15 m) fires.
+## AI carry distance — shoot before Phase 2 traveling (~3 plants + reception zero).
 var _ai_carry_dist: float = 0.0
 var _ai_carry_last_xz: Vector3 = Vector3.ZERO
 var _ai_carry_sampling: bool = false
@@ -268,8 +268,8 @@ func _ai_attack_with_ball(_delta: float) -> Vector3:
 		_ai_carry_last_xz = xz
 	var flat := Vector3(goal.x - me.x, 0.0, goal.z - me.z)
 	var dist := flat.length()
-	# Shoot inside range, or early to avoid traveling (3 steps ≈ 3.45 m).
-	var must_release := _ai_carry_dist >= 2.6
+	# Shoot inside range, or early to avoid traveling (~reception zero + 3 plants @ 1.65 m).
+	var must_release := _ai_carry_dist >= 5.2
 	if (dist <= AI_SHOOT_RANGE or must_release) and _ai_shoot_cd <= 0.0 and match_ball != null:
 		var aim := (goal - (me + Vector3(0, 1.2, 0))).normalized()
 		if try_shoot(aim, 15.0, match_ball):
