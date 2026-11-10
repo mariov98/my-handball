@@ -1,9 +1,19 @@
 extends CanvasLayer
 class_name MatchHUD
 
+const COLOR_STEPS_IDLE := Color(0.85, 0.9, 0.95, 0.85)
+const COLOR_STEPS_ACTIVE := Color(1.0, 0.98, 0.88, 1.0)
+const COLOR_STEPS_WARN := Color(1.0, 0.78, 0.25, 1.0)
+const COLOR_STEPS_TRAVEL := Color(1.0, 0.35, 0.28, 1.0)
+const COLOR_BANNER_DEFAULT := Color(0.95, 0.98, 1.0, 1.0)
+const COLOR_BANNER_WARN := Color(1.0, 0.86, 0.35, 1.0)
+const COLOR_BANNER_TRAVEL := Color(1.0, 0.42, 0.32, 1.0)
+const COLOR_PASSIVE := Color(1.0, 0.72, 0.45, 1.0)
+
 @onready var score_label: Label = $Root/ScoreLabel
 @onready var clock_label: Label = $Root/ClockLabel
 @onready var period_label: Label = $Root/PeriodLabel
+@onready var steps_label: Label = $Root/StepsLabel
 @onready var rules_label: Label = $Root/RulesLabel
 @onready var goal_label: Label = $Root/GoalLabel
 @onready var banner_label: Label = $Root/BannerLabel
@@ -11,10 +21,13 @@ class_name MatchHUD
 @onready var aim_label: Label = $Root/AimLabel
 @onready var help_label: Label = $Root/HelpLabel
 
+var _steps_pulse: Tween
+
 
 func _ready() -> void:
 	goal_label.visible = false
 	banner_label.visible = false
+	steps_label.visible = false
 	rules_label.text = ""
 	help_label.text = "WASD/stick camera-relative · Space/A jump · LMB/RT/E shoot · Q/Tab/bumpers switch · T/Y aim mode"
 
@@ -42,55 +55,110 @@ func set_aim_mode(text: String) -> void:
 	aim_label.text = text
 
 
+## Glanceable steps readout. `pulse` bumps scale when a new plant lands.
+func set_steps_status(steps: int, max_steps: int, warned: bool, visible_now: bool, pulse: bool = false) -> void:
+	if not visible_now:
+		steps_label.visible = false
+		return
+	var shown := mini(steps, max_steps)
+	steps_label.visible = true
+	steps_label.text = "Steps %d/%d" % [shown, max_steps]
+	if warned or steps >= max_steps:
+		steps_label.add_theme_color_override("font_color", COLOR_STEPS_WARN)
+	elif steps > 0:
+		steps_label.add_theme_color_override("font_color", COLOR_STEPS_ACTIVE)
+	else:
+		steps_label.add_theme_color_override("font_color", COLOR_STEPS_IDLE)
+	if pulse:
+		_pulse_steps()
+
+
+## Secondary rules line (passive only) — keep steps out of this to avoid clutter.
 func set_rules_status(text: String) -> void:
 	rules_label.text = text
 	rules_label.visible = not text.is_empty()
+	if text.contains("PASSIVE"):
+		rules_label.add_theme_color_override("font_color", COLOR_PASSIVE)
+	else:
+		rules_label.add_theme_color_override("font_color", Color(1.0, 0.92, 0.55, 1.0))
 
 
 func flash_goal() -> void:
-	_flash_center(goal_label, "GOAL!", 1.0, 0.5)
+	_flash_center(goal_label, "GOAL!", 1.0, 0.5, COLOR_BANNER_DEFAULT)
 
 
 func flash_kickoff(reason: String, team_id: int) -> void:
 	var team := "Home" if team_id == 0 else "Away"
-	_flash_center(banner_label, "%s — %s ball" % [reason, team], 0.7, 0.4)
+	_flash_center(banner_label, "%s — %s ball" % [reason, team], 0.7, 0.4, COLOR_BANNER_DEFAULT)
 
 
 func flash_restart(code: String, team_id: int) -> void:
 	var team := "Home" if team_id == 0 else "Away"
 	var title := "Restart"
+	var color := COLOR_BANNER_DEFAULT
 	match code:
 		"throw_in":
 			title = "Throw-in"
 		"goal_throw":
 			title = "Goal throw"
 		"traveling":
-			title = "Free throw (traveling)"
+			title = "TRAVELING"
+			color = COLOR_BANNER_TRAVEL
+			_flash_center(banner_label, "%s — free throw %s" % [title, team], 1.05, 0.4, color)
+			steps_label.add_theme_color_override("font_color", COLOR_STEPS_TRAVEL)
+			return
 		"passive":
-			title = "Free throw (passive)"
+			title = "Passive — free throw"
+			color = COLOR_BANNER_WARN
 		"goal_area":
 			title = "Free throw (6m)"
 		_:
 			title = code.capitalize()
-	_flash_center(banner_label, "%s — %s" % [title, team], 0.75, 0.35)
+	_flash_center(banner_label, "%s — %s" % [title, team], 0.75, 0.35, color)
 
 
-func flash_rule(message: String) -> void:
-	_flash_center(banner_label, message, 0.85, 0.35)
+func flash_rule(message: String, code: String = "") -> void:
+	var color := COLOR_BANNER_DEFAULT
+	var hold := 0.85
+	match code:
+		"steps":
+			color = COLOR_BANNER_WARN
+			hold = 0.7
+		"traveling":
+			color = COLOR_BANNER_TRAVEL
+			hold = 1.0
+			message = "TRAVELING — steps"
+		"passive":
+			color = COLOR_BANNER_WARN
+		_:
+			if message.to_lower().begins_with("traveling"):
+				color = COLOR_BANNER_TRAVEL
+				hold = 1.0
+	_flash_center(banner_label, message, hold, 0.35, color)
 
 
 func flash_period_end(period: int) -> void:
-	_flash_center(banner_label, "End of period %d" % period, 1.2, 0.5)
+	_flash_center(banner_label, "End of period %d" % period, 1.2, 0.5, COLOR_BANNER_DEFAULT)
 
 
 func flash_match_over(home: int, away: int) -> void:
-	_flash_center(banner_label, "FULL TIME  %d — %d" % [home, away], 2.5, 0.8)
+	_flash_center(banner_label, "FULL TIME  %d — %d" % [home, away], 2.5, 0.8, COLOR_BANNER_DEFAULT)
 
 
-func _flash_center(label: Label, text: String, hold: float, fade: float) -> void:
+func _pulse_steps() -> void:
+	if _steps_pulse and _steps_pulse.is_valid():
+		_steps_pulse.kill()
+	steps_label.scale = Vector2.ONE
+	_steps_pulse = create_tween()
+	_steps_pulse.tween_property(steps_label, "scale", Vector2(1.12, 1.12), 0.07)
+	_steps_pulse.tween_property(steps_label, "scale", Vector2.ONE, 0.12)
+
+
+func _flash_center(label: Label, text: String, hold: float, fade: float, color: Color = COLOR_BANNER_DEFAULT) -> void:
 	label.text = text
 	label.visible = true
-	label.modulate.a = 1.0
+	label.modulate = Color(color.r, color.g, color.b, 1.0)
+	label.add_theme_color_override("font_color", color)
 	var tw := create_tween()
 	tw.tween_interval(hold)
 	tw.tween_property(label, "modulate:a", 0.0, fade)

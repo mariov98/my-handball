@@ -6,9 +6,17 @@ class_name HandballRules
 
 signal rule_warning(code: String, message: String)
 signal rule_violation(code: String, message: String, awarding_team_id: int, spot: Vector3)
+## Fired when a counted floor step is taken (HUD pulse / glanceable counter).
+signal step_taken(steps: int)
 
 const MAX_STEPS := 3
-const STEP_LENGTH_M := 1.15
+## Planar distance per counted foot-plant while carrying. Tuned so a full drive
+## (~3 plants) feels like a handball approach, not a silent ~0.4 s burn.
+const STEP_LENGTH_M := 1.65
+## Below this planar speed the carrier is pivoting / stopped — no new steps.
+const MOVE_SPEED_MPS := 0.7
+## Must stay slow this long before pivot locks (filters stick noise).
+const STOP_SETTLE_S := 0.12
 ## Soft passive: warn then turnover if offense stalls without progress to goal.
 const PASSIVE_WARN_S := 6.0
 const PASSIVE_TURNOVER_S := 10.0
@@ -24,6 +32,11 @@ var _steps: int = 0
 var _step_accum: float = 0.0
 var _carrier_last_xz: Vector3 = Vector3.ZERO
 var _have_carrier_sample: bool = false
+## IHF-ish reception zero: first plant after catch does not count.
+var _reception_zero_pending: bool = false
+var _pivoting: bool = false
+var _stop_timer: float = 0.0
+var _steps_warned: bool = false
 
 var _passive_timer: float = 0.0
 var _passive_warned: bool = false
@@ -39,6 +52,10 @@ func reset_possession_tracking() -> void:
 	_steps = 0
 	_step_accum = 0.0
 	_have_carrier_sample = false
+	_reception_zero_pending = false
+	_pivoting = false
+	_stop_timer = 0.0
+	_steps_warned = false
 	_passive_timer = 0.0
 	_passive_warned = false
 	_passive_best_dist = INF
@@ -63,6 +80,10 @@ func on_pickup(player: Player) -> void:
 	_steps = 0
 	_step_accum = 0.0
 	_have_carrier_sample = false
+	_reception_zero_pending = true
+	_pivoting = false
+	_stop_timer = 0.0
+	_steps_warned = false
 	_passive_timer = 0.0
 	_passive_warned = false
 	_passive_best_dist = INF
@@ -76,6 +97,10 @@ func on_release(player: Player) -> void:
 	_steps = 0
 	_step_accum = 0.0
 	_have_carrier_sample = false
+	_reception_zero_pending = false
+	_pivoting = false
+	_stop_timer = 0.0
+	_steps_warned = false
 	# Passive keeps ticking lightly on free ball only while same team last touched —
 	# Phase 2: pause passive until someone possesses again.
 	_passive_timer = 0.0
@@ -86,6 +111,14 @@ func on_release(player: Player) -> void:
 
 func get_steps() -> int:
 	return _steps
+
+
+func is_pivoting() -> bool:
+	return _pivoting
+
+
+func is_steps_warned() -> bool:
+	return _steps_warned
 
 
 func get_passive_timer() -> float:
@@ -113,6 +146,10 @@ func tick(delta: float, ball: Ball, players: Array[Player]) -> bool:
 		_have_carrier_sample = false
 		_steps = 0
 		_step_accum = 0.0
+		_reception_zero_pending = false
+		_pivoting = false
+		_stop_timer = 0.0
+		_steps_warned = false
 
 	if _tick_oob(ball, carrier):
 		return true
@@ -129,21 +166,53 @@ func _is_airborne(player: Player) -> bool:
 	return player.global_position.y > 0.35 or player.velocity.y > 1.0
 
 
-func _tick_steps(_delta: float, carrier: Player) -> bool:
+func _tick_steps(delta: float, carrier: Player) -> bool:
 	var xz := Vector3(carrier.global_position.x, 0.0, carrier.global_position.z)
 	if not _have_carrier_sample:
 		_carrier_last_xz = xz
 		_have_carrier_sample = true
 		return false
+
 	var moved := xz.distance_to(_carrier_last_xz)
 	_carrier_last_xz = xz
-	# Approximate steps on the floor only — airborne jump-shot is allowed.
-	if _is_airborne(carrier) or moved < 0.0001:
+
+	# Jump-shot: airborne carries do not plant steps (release before landing).
+	if _is_airborne(carrier):
+		_stop_timer = 0.0
 		return false
+
+	var planar_speed := Vector3(carrier.velocity.x, 0.0, carrier.velocity.z).length()
+	# Teleports / smoke synthesize position without velocity — treat meaningful
+	# planar displacement as movement so tests and edge frames still plant.
+	if moved > 0.02:
+		planar_speed = maxf(planar_speed, moved / maxf(delta, 0.001))
+
+	if planar_speed < MOVE_SPEED_MPS:
+		_stop_timer += delta
+		if _stop_timer >= STOP_SETTLE_S:
+			# Pivot / stand: fair reset of the gait accumulator only — taken
+			# steps stay (IHF: you don't get fresh steps from stopping).
+			_pivoting = true
+			_step_accum = 0.0
+		return false
+
+	_stop_timer = 0.0
+	_pivoting = false
+	if moved < 0.0001:
+		return false
+
 	_step_accum += moved
 	while _step_accum >= STEP_LENGTH_M:
 		_step_accum -= STEP_LENGTH_M
+		# Reception zero: first plant after catch is free (catch / land pattern).
+		if _reception_zero_pending:
+			_reception_zero_pending = false
+			continue
 		_steps += 1
+		step_taken.emit(_steps)
+		if _steps == MAX_STEPS and not _steps_warned:
+			_steps_warned = true
+			rule_warning.emit("steps", "Last step — pass or shoot")
 		if _steps > MAX_STEPS:
 			var spot := Court.clamp_to_court_xz(carrier.global_position, 1.0)
 			# Free-throw style: keep restart outside the 6 m if near goal.

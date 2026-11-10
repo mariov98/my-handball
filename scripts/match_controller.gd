@@ -36,6 +36,8 @@ var _away_players: Array[Player] = []
 var _attack_team_id: int = 0
 var _pending_kickoff_team: int = 0
 var rules: HandballRules = HandballRules.new()
+## Set when rules emit step_taken so the HUD can pulse once.
+var _steps_hud_pulse: bool = false
 
 @onready var _home_root: Node = get_node(home_team_path)
 @onready var _away_root: Node = get_node(away_team_path)
@@ -69,6 +71,14 @@ func _ready() -> void:
 		var dn := Node.new()
 		dn.set_script(demo)
 		add_child(dn)
+		return
+	if "--screenshot-steps" in user_args:
+		# Kickoff first so roster / controlled player exist, then capture Steps HUD.
+		await _run_kickoff(0, "Kickoff")
+		var steps_shot := load("res://scripts/screenshot_steps_hud.gd") as GDScript
+		var sn_steps := Node.new()
+		sn_steps.set_script(steps_shot)
+		add_child(sn_steps)
 		return
 	if "--screenshot" in user_args:
 		# Kickoff first so the HUD clock/score are on screen, then capture.
@@ -139,6 +149,7 @@ func _wire_rules() -> void:
 	ball.released.connect(_on_ball_released)
 	rules.rule_warning.connect(_on_rule_warning)
 	rules.rule_violation.connect(_on_rule_violation)
+	rules.step_taken.connect(_on_step_taken)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -288,10 +299,15 @@ func _on_ball_released(player: Player) -> void:
 	_update_rules_hud()
 
 
+func _on_step_taken(_steps: int) -> void:
+	_steps_hud_pulse = true
+	_update_rules_hud()
+
+
 func _on_rule_warning(code: String, message: String) -> void:
 	print("RULE WARN [%s]: %s" % [code, message])
 	if hud and hud.has_method("flash_rule"):
-		hud.flash_rule(message)
+		hud.flash_rule(message, code)
 	_update_rules_hud()
 
 
@@ -300,7 +316,7 @@ func _on_rule_violation(code: String, message: String, awarding_team_id: int, sp
 		return
 	print("RULE [%s]: %s → team %d @ %s" % [code, message, awarding_team_id, str(spot)])
 	if hud and hud.has_method("flash_rule"):
-		hud.flash_rule(message)
+		hud.flash_rule(message, code)
 	# Fire-and-forget async restart (same pattern as goal kickoff).
 	_run_rule_restart(code, message, awarding_team_id, spot)
 
@@ -403,18 +419,29 @@ func _nearest_outfield(team_id: int, spot: Vector3) -> Player:
 
 
 func _update_rules_hud() -> void:
-	if hud == null or not hud.has_method("set_rules_status"):
+	if hud == null:
 		return
-	if match_state != MatchState.LIVE:
+	var carrying := match_state == MatchState.LIVE and ball.carrier != null and not ball.carrier.is_goalkeeper
+	if hud.has_method("set_steps_status"):
+		var pulse := _steps_hud_pulse
+		_steps_hud_pulse = false
+		hud.set_steps_status(
+			rules.get_steps(),
+			HandballRules.MAX_STEPS,
+			rules.is_steps_warned(),
+			carrying,
+			pulse
+		)
+	if not hud.has_method("set_rules_status"):
+		return
+	if not carrying:
 		hud.set_rules_status("")
 		return
 	var parts: PackedStringArray = []
-	if ball.carrier and not ball.carrier.is_goalkeeper:
-		parts.append("Steps %d/%d" % [mini(rules.get_steps(), HandballRules.MAX_STEPS), HandballRules.MAX_STEPS])
-		if rules.is_passive_warned():
-			parts.append("PASSIVE")
-		elif rules.get_passive_timer() > 3.0:
-			parts.append("Passive %.0fs" % rules.get_passive_timer())
+	if rules.is_passive_warned():
+		parts.append("PASSIVE")
+	elif rules.get_passive_timer() > 3.0:
+		parts.append("Passive %.0fs" % rules.get_passive_timer())
 	hud.set_rules_status(" · ".join(parts))
 
 
