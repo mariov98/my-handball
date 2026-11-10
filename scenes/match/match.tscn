@@ -1,0 +1,31 @@
+[gd_scene load_steps=7 format=3 uid="uid://bqmatch001mh"]
+
+[ext_resource type="Script" path="res://scripts/match_controller.gd" id="1_match"]
+[ext_resource type="PackedScene" path="res://scenes/court/court.tscn" id="2_court"]
+[ext_resource type="PackedScene" path="res://scenes/actors/ball.tscn" id="3_ball"]
+[ext_resource type="PackedScene" path="res://scenes/actors/player.tscn" id="4_player"]
+[ext_resource type="PackedScene" path="res://scenes/match/camera_rig.tscn" id="5_cam"]
+[ext_resource type="PackedScene" path="res://scenes/ui/hud.tscn" id="6_hud"]
+
+[node name="Match" type="Node3D"]
+script = ExtResource("1_match")
+home_team_path = NodePath("TeamHome")
+away_team_path = NodePath("TeamAway")
+ball_path = NodePath("Ball")
+camera_rig_path = NodePath("CameraRig")
+hud_path = NodePath("HUD")
+player_scene = ExtResource("4_player")
+
+[node name="Court" parent="." instance=ExtResource("2_court")]
+
+[node name="Ball" parent="." instance=ExtResource("3_ball")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.2, 0)
+
+[node name="TeamHome" type="Node3D" parent="."]
+
+[node name="TeamAway" type="Node3D" parent="."]
+
+[node name="CameraRig" parent="." instance=ExtResource("5_cam")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 7, 14, -18)
+
+[node name="HUD" parent="." instance=ExtResource("6_hud")]
