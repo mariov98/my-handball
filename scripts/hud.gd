@@ -4,6 +4,7 @@ class_name MatchHUD
 @onready var score_label: Label = $Root/ScoreLabel
 @onready var clock_label: Label = $Root/ClockLabel
 @onready var period_label: Label = $Root/PeriodLabel
+@onready var rules_label: Label = $Root/RulesLabel
 @onready var goal_label: Label = $Root/GoalLabel
 @onready var banner_label: Label = $Root/BannerLabel
 @onready var info_label: Label = $Root/InfoLabel
@@ -14,6 +15,7 @@ class_name MatchHUD
 func _ready() -> void:
 	goal_label.visible = false
 	banner_label.visible = false
+	rules_label.text = ""
 	help_label.text = "WASD/stick camera-relative · Space/A jump · LMB/RT/E shoot · Q/Tab/bumpers switch · T/Y aim mode"
 
 
@@ -40,6 +42,11 @@ func set_aim_mode(text: String) -> void:
 	aim_label.text = text
 
 
+func set_rules_status(text: String) -> void:
+	rules_label.text = text
+	rules_label.visible = not text.is_empty()
+
+
 func flash_goal() -> void:
 	_flash_center(goal_label, "GOAL!", 1.0, 0.5)
 
@@ -47,6 +54,29 @@ func flash_goal() -> void:
 func flash_kickoff(reason: String, team_id: int) -> void:
 	var team := "Home" if team_id == 0 else "Away"
 	_flash_center(banner_label, "%s — %s ball" % [reason, team], 0.7, 0.4)
+
+
+func flash_restart(code: String, team_id: int) -> void:
+	var team := "Home" if team_id == 0 else "Away"
+	var title := "Restart"
+	match code:
+		"throw_in":
+			title = "Throw-in"
+		"goal_throw":
+			title = "Goal throw"
+		"traveling":
+			title = "Free throw (traveling)"
+		"passive":
+			title = "Free throw (passive)"
+		"goal_area":
+			title = "Free throw (6m)"
+		_:
+			title = code.capitalize()
+	_flash_center(banner_label, "%s — %s" % [title, team], 0.75, 0.35)
+
+
+func flash_rule(message: String) -> void:
+	_flash_center(banner_label, message, 0.85, 0.35)
 
 
 func flash_period_end(period: int) -> void:

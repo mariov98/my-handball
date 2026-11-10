@@ -1,14 +1,15 @@
 extends Node3D
 class_name MatchController
 
-## Routes input, possession, team switch, scoring, clock, kickoff, and AI for Phase 1.
+## Routes input, possession, team switch, scoring, clock, kickoff, AI, and Phase 2 rules.
 
 enum AimMode { FACE, MOUSE_COURT }
-enum MatchState { PRE_KICKOFF, LIVE, GOAL_PAUSE, PERIOD_BREAK, MATCH_OVER }
+enum MatchState { PRE_KICKOFF, LIVE, GOAL_PAUSE, PERIOD_BREAK, MATCH_OVER, RULE_RESTART }
 
 const SHOOT_IMPULSE := 16.0
 const GOAL_PAUSE_DELAY := 1.6
 const KICKOFF_FREEZE := 0.85
+const RESTART_FREEZE := 0.75
 const PERIOD_BREAK_DELAY := 2.2
 
 @export var home_team_path: NodePath
@@ -34,6 +35,7 @@ var _away_players: Array[Player] = []
 ## Last team that possessed the ball — camera stays behind them while the ball is free.
 var _attack_team_id: int = 0
 var _pending_kickoff_team: int = 0
+var rules: HandballRules = HandballRules.new()
 
 @onready var _home_root: Node = get_node(home_team_path)
 @onready var _away_root: Node = get_node(away_team_path)
@@ -47,11 +49,12 @@ func _ready() -> void:
 	_spawn_roster()
 	_collect_players()
 	_wire_goals()
+	_wire_rules()
 	_configure_ai()
 	camera_rig.setup(ball, true)
 	_refresh_hud()
 	print(
-		"MyHandball Phase 1 mini match ready. Period=%ds x%d. Controls: WASD/stick camera-relative, Space/A jump, LMB/RT/E shoot, Q/Tab/bumpers switch, T/Y aim."
+		"MyHandball Phase 2 rules ready. Period=%ds x%d. Steps/passive/OOB/6m + throw-in/goal throw."
 		% [int(period_length_seconds), periods_total]
 	)
 	var user_args := OS.get_cmdline_user_args()
@@ -131,6 +134,13 @@ func _configure_ai() -> void:
 		p.ai_enabled = true
 
 
+func _wire_rules() -> void:
+	ball.picked_up.connect(_on_ball_picked_up)
+	ball.released.connect(_on_ball_released)
+	rules.rule_warning.connect(_on_rule_warning)
+	rules.rule_violation.connect(_on_rule_violation)
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	if match_state == MatchState.MATCH_OVER:
 		return
@@ -157,8 +167,18 @@ func _physics_process(delta: float) -> void:
 	clock_remaining = maxf(0.0, clock_remaining - delta)
 	if hud and hud.has_method("set_clock"):
 		hud.set_clock(clock_remaining)
+	_update_rules_hud()
+	if rules.tick(delta, ball, _all_players()):
+		return
 	if clock_remaining <= 0.0:
 		_on_period_expired()
+
+
+func _all_players() -> Array[Player]:
+	var out: Array[Player] = []
+	out.append_array(_home_players)
+	out.append_array(_away_players)
+	return out
 
 
 func _collect_players() -> void:
@@ -257,10 +277,152 @@ func _update_camera_attack_side() -> void:
 	camera_rig.set_attack_direction(_attack_team_id == 0)
 
 
+func _on_ball_picked_up(player: Player) -> void:
+	rules.on_pickup(player)
+	_attack_team_id = player.team_id
+	_update_rules_hud()
+
+
+func _on_ball_released(player: Player) -> void:
+	rules.on_release(player)
+	_update_rules_hud()
+
+
+func _on_rule_warning(code: String, message: String) -> void:
+	print("RULE WARN [%s]: %s" % [code, message])
+	if hud and hud.has_method("flash_rule"):
+		hud.flash_rule(message)
+	_update_rules_hud()
+
+
+func _on_rule_violation(code: String, message: String, awarding_team_id: int, spot: Vector3) -> void:
+	if match_state != MatchState.LIVE:
+		return
+	print("RULE [%s]: %s → team %d @ %s" % [code, message, awarding_team_id, str(spot)])
+	if hud and hud.has_method("flash_rule"):
+		hud.flash_rule(message)
+	# Fire-and-forget async restart (same pattern as goal kickoff).
+	_run_rule_restart(code, message, awarding_team_id, spot)
+
+
+func _run_rule_restart(code: String, _message: String, awarding_team_id: int, spot: Vector3) -> void:
+	match_state = MatchState.RULE_RESTART
+	rules.begin_lockout()
+	_set_players_frozen(true)
+	_clear_possession()
+
+	var use_gk := code == "goal_throw"
+	var taker: Player = null
+	if use_gk:
+		taker = _goalkeeper_for(awarding_team_id)
+	if taker == null:
+		taker = _nearest_outfield(awarding_team_id, spot)
+	if taker == null:
+		var roster := _home_players if awarding_team_id == 0 else _away_players
+		taker = _first_outfield(roster)
+		if taker == null and not roster.is_empty():
+			taker = roster[0]
+
+	if taker:
+		var place := spot
+		place.y = 0.0
+		if use_gk:
+			place = taker.start_position
+			place.z = clampf(place.z, -17.5, 17.5)
+		taker.global_position = place
+		# Face midfield / attack.
+		var face_yaw := 0.0 if awarding_team_id == 0 else PI
+		if code == "throw_in":
+			# Face inward from the sideline.
+			face_yaw = -PI * 0.5 if spot.x > 0.0 else PI * 0.5
+		taker.rotation.y = face_yaw
+		taker.velocity = Vector3.ZERO
+		ball.global_position = taker.ball_attach.global_position
+		if ball.try_pickup(taker):
+			taker.has_ball = true
+		_attack_team_id = awarding_team_id
+		camera_rig.set_attack_direction(awarding_team_id == 0)
+		rules.on_pickup(taker)
+
+	# Human always controls home.
+	var home_starter := _first_outfield(_home_players)
+	if home_starter:
+		_set_controlled(home_starter)
+	elif not _home_players.is_empty():
+		_set_controlled(_home_players[0])
+
+	_refresh_hud()
+	_update_rules_hud()
+	if hud and hud.has_method("flash_restart"):
+		hud.flash_restart(code, awarding_team_id)
+
+	await get_tree().create_timer(RESTART_FREEZE).timeout
+	if match_state == MatchState.MATCH_OVER:
+		return
+	rules.end_lockout()
+	_set_players_frozen(false)
+	match_state = MatchState.LIVE
+	_update_rules_hud()
+
+
+func _clear_possession() -> void:
+	if ball.carrier:
+		ball.carrier.has_ball = false
+	ball.carrier = null
+	ball._last_carrier = null
+	ball._ignore_carrier_until = 0.0
+	ball.freeze = false
+	ball.linear_velocity = Vector3.ZERO
+	ball.angular_velocity = Vector3.ZERO
+	ball.collision_layer = 4
+	ball.collision_mask = 1 | 2
+	for p in _all_players():
+		p.has_ball = false
+
+
+func _goalkeeper_for(team_id: int) -> Player:
+	var roster := _home_players if team_id == 0 else _away_players
+	for p in roster:
+		if p.is_goalkeeper:
+			return p
+	return null
+
+
+func _nearest_outfield(team_id: int, spot: Vector3) -> Player:
+	var roster := _home_players if team_id == 0 else _away_players
+	var best: Player = null
+	var best_d := INF
+	for p in roster:
+		if p.is_goalkeeper:
+			continue
+		var d := p.global_position.distance_squared_to(spot)
+		if d < best_d:
+			best_d = d
+			best = p
+	return best
+
+
+func _update_rules_hud() -> void:
+	if hud == null or not hud.has_method("set_rules_status"):
+		return
+	if match_state != MatchState.LIVE:
+		hud.set_rules_status("")
+		return
+	var parts: PackedStringArray = []
+	if ball.carrier and not ball.carrier.is_goalkeeper:
+		parts.append("Steps %d/%d" % [mini(rules.get_steps(), HandballRules.MAX_STEPS), HandballRules.MAX_STEPS])
+		if rules.is_passive_warned():
+			parts.append("PASSIVE")
+		elif rules.get_passive_timer() > 3.0:
+			parts.append("Passive %.0fs" % rules.get_passive_timer())
+	hud.set_rules_status(" · ".join(parts))
+
+
 func _on_goal_scored(scoring_team_id: int, goal_owner_team_id: int) -> void:
 	if match_state != MatchState.LIVE:
 		return
 	match_state = MatchState.GOAL_PAUSE
+	rules.begin_lockout()
 	_set_players_frozen(true)
 	if scoring_team_id == 0:
 		score_home += 1
@@ -283,6 +445,7 @@ func _on_period_expired() -> void:
 	if match_state != MatchState.LIVE:
 		return
 	match_state = MatchState.PERIOD_BREAK
+	rules.begin_lockout()
 	_set_players_frozen(true)
 	print("Period %d ended. Score Home %d — Away %d" % [current_period, score_home, score_away])
 	if current_period >= periods_total:
@@ -304,6 +467,7 @@ func _on_period_expired() -> void:
 
 func _run_kickoff(kickoff_team_id: int, reason: String = "Kickoff") -> void:
 	match_state = MatchState.PRE_KICKOFF
+	rules.begin_lockout()
 	_set_players_frozen(true)
 	_reset_players_and_ball()
 	var roster := _home_players if kickoff_team_id == 0 else _away_players
@@ -321,6 +485,7 @@ func _run_kickoff(kickoff_team_id: int, reason: String = "Kickoff") -> void:
 			taker.has_ball = true
 		_attack_team_id = kickoff_team_id
 		camera_rig.set_attack_direction(kickoff_team_id == 0)
+		rules.on_pickup(taker)
 	# Human always controls home (Phase 1); keep control on a home outfield.
 	var home_starter := _first_outfield(_home_players)
 	if home_starter:
@@ -328,14 +493,17 @@ func _run_kickoff(kickoff_team_id: int, reason: String = "Kickoff") -> void:
 	elif not _home_players.is_empty():
 		_set_controlled(_home_players[0])
 	_refresh_hud()
+	_update_rules_hud()
 	if hud and hud.has_method("flash_kickoff"):
 		hud.flash_kickoff(reason, kickoff_team_id)
 	print("%s — team %d has the ball" % [reason, kickoff_team_id])
 	await get_tree().create_timer(KICKOFF_FREEZE).timeout
 	if match_state == MatchState.MATCH_OVER:
 		return
+	rules.end_lockout()
 	_set_players_frozen(false)
 	match_state = MatchState.LIVE
+	_update_rules_hud()
 
 
 func _reset_players_and_ball() -> void:
@@ -344,6 +512,7 @@ func _reset_players_and_ball() -> void:
 	for p in _away_players:
 		p.reset_to_start()
 	ball.reset_to_start()
+	rules.reset_possession_tracking()
 
 
 func _set_players_frozen(frozen: bool) -> void:
