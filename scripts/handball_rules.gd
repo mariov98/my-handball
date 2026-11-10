@@ -10,20 +10,20 @@ signal rule_violation(code: String, message: String, awarding_team_id: int, spot
 signal step_taken(steps: int)
 
 const MAX_STEPS := 3
-## Planar distance per counted foot-plant while carrying. Tuned so a full drive
-## (~3 plants) feels like a handball approach, not a silent ~0.4 s burn.
-const STEP_LENGTH_M := 1.65
+## Planar distance per counted foot-plant while carrying. Slightly longer gait so
+## a full drive (~3 plants) feels fair before the pass/shoot decision.
+const STEP_LENGTH_M := 1.8
 ## Below this planar speed the carrier is pivoting / stopped — no new steps.
-const MOVE_SPEED_MPS := 0.7
+const MOVE_SPEED_MPS := 0.75
 ## Must stay slow this long before pivot locks (filters stick noise).
-const STOP_SETTLE_S := 0.12
+const STOP_SETTLE_S := 0.1
 ## Soft passive: warn then turnover if offense stalls without progress to goal.
-const PASSIVE_WARN_S := 6.0
-const PASSIVE_TURNOVER_S := 10.0
-const PASSIVE_PROGRESS_M := 1.75
+const PASSIVE_WARN_S := 7.0
+const PASSIVE_TURNOVER_S := 11.0
+const PASSIVE_PROGRESS_M := 1.5
 ## Brief grace so jump-shot landings / brush of the arc don't spam fouls.
-const GOAL_AREA_GRACE_S := 0.18
-const OOB_COOLDOWN_S := 0.35
+const GOAL_AREA_GRACE_S := 0.22
+const OOB_COOLDOWN_S := 0.4
 
 var enabled: bool = true
 var last_touch_team_id: int = 0

@@ -40,7 +40,7 @@ func _ready() -> void:
 	if power_bar:
 		power_bar.visible = false
 		power_bar.value = 0.0
-	help_label.text = "WASD move · Space jump · hold LMB/E/RT power · F/LT lob · C/Ctrl/B dive (GK) · Q cycle · R best · T aim"
+	help_label.text = "WASD move · Space jump · hold LMB/E/RT power · RMB/G/RB pass · F/LT lob · C/Ctrl/B dive (GK) · Q cycle · R best · T aim"
 	_ensure_flash_overlay()
 
 

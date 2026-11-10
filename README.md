@@ -1,6 +1,6 @@
 # MyHandball
 
-Desktop handball prototype built with **Godot 4.3** (GDScript). **Phase 5** is a presentation pass — clearer materials, ball trails, and punchier goal juice — on top of Phase 4 tactics, Phase 3 craft, Phase 2 rules, and the Phase 1 mini match. Still engine primitives (polished capsules, no Mixamo).
+Desktop handball prototype built with **Godot 4.3** (GDScript). Phases **0–5** are in: sandbox → mini match → rules → GK/shot craft → tactics → presentation. This build adds a **goal-centered camera** (subtle side yaw) and a **gameplay feel** pass (snappier move/possess, soft pass, shorter freezes, beatable Away pressure). Still engine primitives (polished capsules, no Mixamo).
 
 ## Requirements (Windows)
 
@@ -29,13 +29,16 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 | Move (camera-relative) | WASD | Left stick |
 | Jump | Space | A / South |
 | **Shoot (hold for power)** | Hold Left mouse / **E** | Hold RT / R2 |
+| **Pass** | Right mouse / **G** | RB (right bumper) |
 | **Lob** (while charging) | Hold **F** | Hold LT / L2 |
 | **Dive** (GK only) | **C** or Ctrl | B / East |
-| **Cycle** teammate | **Q** or Tab | LB / RB (bumpers) |
+| **Cycle** teammate | **Q** or Tab | LB (left bumper) |
 | **Switch-to-best** | **R** | X / West |
 | Toggle aim mode | **T** | Y / North |
 
 **Movement** is relative to the **current camera**: W / stick-up walks into the screen along the camera forward projected onto the court. When possession flips and the camera yaws behind the new attack, the same stick direction keeps matching what you see.
+
+**Camera:** behind the team with (or last with) the ball. In the **center corridor** the frame is square with the goal (goal in the middle). When the ball drifts wide the rig adds only a **subtle yaw** about the ball — it does **not** recenter the ball on screen; the goal stays the visual anchor.
 
 **Team control:** **Q** cycles the Home roster in order. **R** jumps to the most useful teammate (nearest to a free ball, open receiver when attacking, best defender when covering).
 
@@ -106,8 +109,8 @@ These are **handball-informed approximations** for a playable prototype — reco
 
 | Rule | How it feels in play |
 |------|----------------------|
-| **Steps / traveling** | Discrete foot-plants while moving with the ball (~1.65 m gait). Catch gets a **reception zero** (first plant free). Stop / slow = **pivot** (gait pauses; taken steps stay). HUD ticks **Steps n/3** each plant; at 3 a **Last step** warning; a 4th plant → **TRAVELING** free throw. **Jump-shot** (airborne) does not add steps. |
-| **Passive play (lite)** | If the carrier stops making progress toward the opponent goal for ~**6 s**, HUD warns **Passive play**. At ~**10 s** → turnover free throw. Meaningful progress (~1.75 m closer to goal) resets the timer. GK holding does not burn passive. |
+| **Steps / traveling** | Discrete foot-plants while moving with the ball (~1.8 m gait). Catch gets a **reception zero** (first plant free). Stop / slow = **pivot** (gait pauses; taken steps stay). HUD ticks **Steps n/3** each plant; at 3 a **Last step** warning; a 4th plant → **TRAVELING** free throw. **Jump-shot** (airborne) does not add steps. |
+| **Passive play (lite)** | If the carrier stops making progress toward the opponent goal for ~**7 s**, HUD warns **Passive play**. At ~**11 s** → turnover free throw. Meaningful progress (~1.5 m closer to goal) resets the timer. GK holding does not burn passive. |
 | **Out of bounds** | Soft sideline / end-line bounds inside the walls. Sideline → **throw-in** for the other team. End line outside the goal mouth: attack last touch → **goal throw** (defending GK); defense last touch → corner-style **throw-in**. |
 | **Goal area (6 m)** | Semicircle approx from the goal posts. Outfield players may not stand in either crease; **airborne attackers** can enter for a jump shot. Grounded illegal presence (brief grace) → free throw. Away AI steers outside both arcs. |
 | **Restarts** | Throw-in / goal throw / free throw (traveling, passive, 6 m) with short freeze + banner + set-piece placement. **Kickoff after goals** (and period starts) from Phase 1 is unchanged in timing. |
@@ -122,8 +125,8 @@ You control **Home** (blue). **Away** (red) runs formation-aware AI. Both ends o
 |---------|----------|
 | **Clock** | Counts down per period (default **2:00** × **2** halves). Tunable via `period_length_seconds` / `periods_total` on `MatchController`. |
 | **Kickoff / restart** | Opening kickoff to Home. After a goal, the **conceding** team restarts from center with possession. Period 2 kickoff goes to Away. Short freeze + banner, then live play. |
-| **Opponent AI** | Away outfield: chase free ball, hold defense/attack formation slots, drive + shoot near the goal (outside 6 m). Away GK tracks + dives on shots. |
-| **Camera** | Elevated 3/4 behind the team with (or last with) the ball; smooth flip on possession change. |
+| **Opponent AI** | Away outfield: chase free ball, hold defense/attack formation slots, pass under pressure, drive + shoot near the goal (outside 6 m). Tuned to create pressure but stay beatable. Away GK tracks + dives on shots (less omniscient). |
+| **Camera** | Behind the attack; **goal-centered** in the middle corridor; subtle side yaw about the ball; smooth flip on possession change. |
 | **UI** | Score, clock, period, steps/rules, shot power, GOAL / kickoff / rule / period / full-time banners. |
 
 ### Sandbox period length

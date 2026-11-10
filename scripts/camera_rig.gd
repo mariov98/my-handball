@@ -1,21 +1,31 @@
 extends Node3D
 class_name CameraRig
 
-## Elevated 3/4 view behind the attacking team.
-## Yaw/orbit pivots around the ball (attack focus), not the far goal.
+## Elevated attack view behind the team with possession.
+## Center corridor = square goal-centered frame (goal in the middle, not skewed).
+## Side ball = subtle yaw about the ball — does NOT recenter the ball on screen;
+## the far goal stays the visual anchor.
 
 @export var follow_height: float = 14.0
-@export var follow_distance: float = 18.0
-@export var side_bias: float = 7.0
-## Small lead past the ball along the attack so the goal stays in frame.
-@export var look_ahead: float = 2.5
-@export var position_lerp: float = 3.5
-@export var rotation_lerp: float = 2.8
+@export var follow_distance: float = 17.5
+## Soft 3/4 bias that only grows as the ball leaves the center corridor.
+@export var side_bias: float = 2.4
+## |ball.x| half-width treated as "center" (square attack view).
+@export var center_corridor_half: float = 2.0
+## How far look X tracks the ball (low = goal stays framed; ball drifts off-center).
+@export var look_ball_x_blend: float = 0.16
+## Blend look Z from a short lead past the ball toward the far goal (goal anchor).
+@export var look_goal_blend: float = 0.58
+@export var goal_depth: float = 19.5
+@export var position_lerp: float = 4.2
+@export var rotation_lerp: float = 3.4
 ## How quickly the rig eases to the opposite end when possession flips.
 @export var attack_flip_lerp: float = 2.4
-## Radians of orbit yaw per metre of ball X (clamped by max_ball_yaw).
-@export var ball_yaw_per_meter: float = 0.035
-@export var max_ball_yaw: float = 0.35
+## Radians of orbit yaw per metre of ball X past the yaw deadzone.
+@export var ball_yaw_per_meter: float = 0.016
+@export var max_ball_yaw: float = 0.13
+## Metres of |ball.x| before any yaw starts (keeps center square).
+@export var yaw_deadzone: float = 1.6
 
 var ball: Node3D
 ## Smoothed attack facing: +1 home attacks +Z; -1 away attacks -Z.
@@ -51,8 +61,18 @@ func pivot_point(ball_pos: Vector3) -> Vector3:
 	return Vector3(ball_pos.x, 0.0, ball_pos.z)
 
 
+## 0 in the center corridor → 1 well outside (drives side bias / look soften).
+func corridor_factor(ball_x: float) -> float:
+	return clampf((absf(ball_x) - center_corridor_half) / 4.5, 0.0, 1.0)
+
+
 func ball_yaw(ball_pos: Vector3) -> float:
-	return clampf(ball_pos.x * ball_yaw_per_meter, -max_ball_yaw, max_ball_yaw)
+	var ax := absf(ball_pos.x)
+	if ax <= yaw_deadzone:
+		return 0.0
+	var excess := ax - yaw_deadzone
+	var signed := signf(ball_pos.x) * excess
+	return clampf(signed * ball_yaw_per_meter, -max_ball_yaw, max_ball_yaw)
 
 
 func _physics_process(delta: float) -> void:
@@ -79,19 +99,21 @@ func _physics_process(delta: float) -> void:
 
 
 func _desired_position(ball_pos: Vector3) -> Vector3:
-	# Orbit around the ball: base offset is behind the attack with a 3/4 side bias,
-	# then yawed about the ball when it drifts left/right.
+	# Orbit around the ball: square behind the attack in the center corridor;
+	# subtle yaw + soft side bias only as the ball drifts wide.
 	var pivot := pivot_point(ball_pos)
 	var yaw := ball_yaw(ball_pos)
-	var lateral := side_bias * attack_sign
+	var lateral := side_bias * attack_sign * corridor_factor(ball_pos.x)
 	var offset := Vector3(lateral, follow_height, -attack_sign * follow_distance)
 	return pivot + offset.rotated(Vector3.UP, yaw)
 
 
 func _look_target(ball_pos: Vector3) -> Vector3:
-	# Look at the ball with a short attack-direction lead (same yaw as the orbit),
-	# so framing stays ball-centered — the far goal is not the rotation center.
-	var yaw := ball_yaw(ball_pos)
-	var lead := Vector3(0.0, 0.0, attack_sign * look_ahead).rotated(Vector3.UP, yaw)
-	var pivot := pivot_point(ball_pos)
-	return Vector3(pivot.x, 0.6, pivot.z) + lead
+	# Goal-anchored framing: look X barely tracks the ball so the goal stays
+	# near screen center; look Z blends toward the far goal mouth.
+	var cf := corridor_factor(ball_pos.x)
+	var look_x := ball_pos.x * look_ball_x_blend * lerpf(0.25, 1.0, cf)
+	var goal_z := attack_sign * goal_depth
+	var near_lead_z := ball_pos.z + attack_sign * 2.2
+	var look_z := lerpf(near_lead_z, goal_z, look_goal_blend)
+	return Vector3(look_x, 0.85, look_z)

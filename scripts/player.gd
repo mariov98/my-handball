@@ -9,32 +9,33 @@ signal possession_changed(has_ball: bool)
 signal dive_started
 signal block_attempted(blocker: Player, ball: Ball, success: bool)
 
-const SPEED := 8.5
-const AIR_CONTROL := 0.45
-const JUMP_VELOCITY := 7.5
-const FACE_THRESHOLD := 0.15
+const SPEED := 9.6
+const AIR_CONTROL := 0.58
+const JUMP_VELOCITY := 7.8
+const FACE_THRESHOLD := 0.12
 const BOB_AMOUNT := 0.04
-const BOB_SPEED := 12.0
-const PICKUP_COOLDOWN := 0.35
+const BOB_SPEED := 13.0
+const PICKUP_COOLDOWN := 0.22
 
-# AI tuning
-const AI_CHASE_SPEED_SCALE := 0.92
-const AI_BLOCK_SPEED_SCALE := 0.85
-const AI_ATTACK_SPEED_SCALE := 0.88
-const AI_GK_SPEED_SCALE := 0.78
-const AI_GK_TRACK_SPEED_SCALE := 1.05
-const AI_SHOOT_RANGE := 11.0
-const AI_SHOOT_COOLDOWN := 1.4
+# AI tuning — pressure on defense, beatable on the break.
+const AI_CHASE_SPEED_SCALE := 0.88
+const AI_BLOCK_SPEED_SCALE := 0.92
+const AI_ATTACK_SPEED_SCALE := 0.84
+const AI_GK_SPEED_SCALE := 0.76
+const AI_GK_TRACK_SPEED_SCALE := 1.0
+const AI_SHOOT_RANGE := 10.0
+const AI_SHOOT_COOLDOWN := 1.55
+const AI_PASS_COOLDOWN := 0.85
 const AI_BLOCK_DEPTH := 4.5
 
 # Phase 3 GK dive
-const DIVE_DURATION := 0.58
-const DIVE_COOLDOWN := 0.85
-const DIVE_SPEED := 13.5
-const DIVE_UP := 3.2
-const GK_LATERAL_BOOST := 1.22
-const AI_DIVE_REACT_DIST := 14.0
-const AI_DIVE_MIN_BALL_SPEED := 6.0
+const DIVE_DURATION := 0.55
+const DIVE_COOLDOWN := 0.95
+const DIVE_SPEED := 13.0
+const DIVE_UP := 3.0
+const GK_LATERAL_BOOST := 1.18
+const AI_DIVE_REACT_DIST := 11.5
+const AI_DIVE_MIN_BALL_SPEED := 7.0
 
 @export var team_id: int = 0 ## 0 = home (blue), 1 = away (red)
 @export var is_goalkeeper: bool = false
@@ -57,7 +58,8 @@ var block_ready: bool = false
 var _bob_phase: float = 0.0
 var _pickup_block: float = 0.0
 var _ai_shoot_cd: float = 0.0
-## AI carry distance — shoot before Phase 2 traveling fires.
+var _ai_pass_cd: float = 0.0
+## AI carry distance — pass/shoot before Phase 2 traveling fires.
 var _ai_carry_dist: float = 0.0
 var _ai_carry_last_xz: Vector3 = Vector3.ZERO
 var _ai_carry_sampling: bool = false
@@ -96,6 +98,8 @@ func _physics_process(delta: float) -> void:
 		_pickup_block = maxf(0.0, _pickup_block - delta)
 	if _ai_shoot_cd > 0.0:
 		_ai_shoot_cd = maxf(0.0, _ai_shoot_cd - delta)
+	if _ai_pass_cd > 0.0:
+		_ai_pass_cd = maxf(0.0, _ai_pass_cd - delta)
 	if _dive_cd > 0.0:
 		_dive_cd = maxf(0.0, _dive_cd - delta)
 	if _block_timer > 0.0:
@@ -141,11 +145,13 @@ func _physics_process(delta: float) -> void:
 			target_speed *= AI_GK_SPEED_SCALE * AI_GK_TRACK_SPEED_SCALE
 		else:
 			target_speed *= AI_CHASE_SPEED_SCALE
-	var control := 1.0 if is_on_floor() else AIR_CONTROL
+	# Snappy ground response; softer air control for jump-shot steering.
 	if not diving:
 		var desired := wish * target_speed
-		velocity.x = lerpf(velocity.x, desired.x, control)
-		velocity.z = lerpf(velocity.z, desired.z, control)
+		var rate := 18.0 if is_on_floor() else (18.0 * AIR_CONTROL)
+		var blend := 1.0 - exp(-rate * delta)
+		velocity.x = lerpf(velocity.x, desired.x, blend)
+		velocity.z = lerpf(velocity.z, desired.z, blend)
 
 	if controlled and not match_frozen and not diving and Input.is_action_just_pressed("jump") and is_on_floor():
 		velocity.y = JUMP_VELOCITY
@@ -221,6 +227,7 @@ func reset_to_start() -> void:
 	has_ball = false
 	_pickup_block = 0.0
 	_ai_shoot_cd = 0.0
+	_ai_pass_cd = 0.0
 	_ai_carry_dist = 0.0
 	_ai_carry_sampling = false
 	_bob_phase = 0.0
@@ -429,23 +436,104 @@ func _ai_attack_with_ball(_delta: float) -> Vector3:
 		_ai_carry_last_xz = xz
 	var flat := Vector3(goal.x - me.x, 0.0, goal.z - me.z)
 	var dist := flat.length()
-	# Shoot inside range, or early to avoid traveling (3 steps ≈ 3.45 m).
-	var must_release := _ai_carry_dist >= 2.6
-	if (dist <= AI_SHOOT_RANGE or must_release) and _ai_shoot_cd <= 0.0 and match_ball != null:
-		var aim := (goal - (me + Vector3(0, 1.2, 0))).normalized()
-		var lob := dist < 7.0 and (player_index % 2) == 0
-		var impulse := ShotCraft.impulse_for_charge(0.7, lob)
-		var up := ShotCraft.up_bias(lob)
-		var meta := {"lob": lob, "ai": true, "charge": 0.7}
-		if try_shoot(aim, impulse, match_ball, up, meta):
-			_ai_shoot_cd = AI_SHOOT_COOLDOWN
-			_ai_carry_sampling = false
-			_ai_carry_dist = 0.0
-			return Vector3.ZERO
+	# Pass or shoot before traveling (3 steps ≈ ~5.4 m with tuned gait).
+	var must_release := _ai_carry_dist >= 3.2
+	if match_ball != null and (dist <= AI_SHOOT_RANGE or must_release):
+		# Prefer a simple teammate pass when deep and must release, or when far.
+		var pass_target := _ai_pass_target()
+		var prefer_pass := pass_target != null and (
+			must_release
+			or dist > 8.5
+			or ((int(Time.get_ticks_msec() / 700) + player_index) % 3) == 0
+		)
+		if prefer_pass and _ai_pass_cd <= 0.0:
+			if _ai_try_pass(pass_target):
+				return Vector3.ZERO
+		if _ai_shoot_cd <= 0.0 and (dist <= AI_SHOOT_RANGE or must_release):
+			var aim := (goal - (me + Vector3(0, 1.2, 0))).normalized()
+			# Slight aim noise so Away isn't laser-perfect.
+			aim += Vector3(randf_range(-0.06, 0.06), randf_range(-0.02, 0.03), randf_range(-0.04, 0.04))
+			aim = aim.normalized()
+			var lob := dist < 7.0 and (player_index % 2) == 0
+			var impulse := ShotCraft.impulse_for_charge(0.55, lob)
+			var up := ShotCraft.up_bias(lob)
+			var meta := {"lob": lob, "ai": true, "charge": 0.55}
+			if try_shoot(aim, impulse, match_ball, up, meta):
+				_ai_shoot_cd = AI_SHOOT_COOLDOWN
+				_ai_carry_sampling = false
+				_ai_carry_dist = 0.0
+				return Vector3.ZERO
 	# Approach goal with a slight lateral weave by index — stay outside 6 m.
 	var approach := Vector3(goal.x + (float(player_index) - 2.0) * 1.2, 0.0, goal.z)
 	approach = _keep_outfield_legal(approach)
 	return _steer_toward(approach) * AI_ATTACK_SPEED_SCALE
+
+
+## Soft pass to a teammate (used by MatchController + Away AI).
+func try_pass_to(target: Player, ball: Ball, impulse: float = 10.0) -> bool:
+	if target == null or not has_ball or ball == null or ball.carrier != self:
+		return false
+	var from := global_position + Vector3(0, 1.2, 0)
+	var to := target.global_position + Vector3(0, 1.15, 0)
+	var aim := to - from
+	if aim.length_squared() < 0.01:
+		return false
+	aim = aim.normalized()
+	# Lead the receiver a touch along their velocity so the pass feels catchable.
+	var lead := Vector3(target.velocity.x, 0.0, target.velocity.z) * 0.12
+	aim = (aim + lead * 0.08).normalized()
+	var loft := clampf(0.08 + from.distance_to(to) * 0.008, 0.08, 0.22)
+	return try_shoot(aim, impulse, ball, loft, {"pass": true, "charge": 0.3, "ai": ai_enabled and not controlled})
+
+
+func _ai_pass_target() -> Player:
+	var parent_n := get_parent()
+	if parent_n == null:
+		return null
+	var best: Player = null
+	var best_score := -INF
+	var face := face_direction()
+	face.y = 0.0
+	if face.length_squared() < 0.01:
+		face = Vector3(0.0, 0.0, 1.0 if team_id == 0 else -1.0)
+	else:
+		face = face.normalized()
+	for sibling in parent_n.get_children():
+		if sibling == self or not (sibling is Player):
+			continue
+		var mate := sibling as Player
+		if mate.is_goalkeeper or mate.match_frozen:
+			continue
+		var to_m := mate.global_position - global_position
+		to_m.y = 0.0
+		var d := to_m.length()
+		if d < 2.4 or d > 14.0:
+			continue
+		var dir := to_m / d
+		var forward := dir.dot(face)
+		if forward < 0.05:
+			continue
+		# Prefer open-ish receivers farther toward the goal.
+		var toward_goal := dir.z * (1.0 if team_id == 0 else -1.0)
+		var score := forward * 2.0 + toward_goal * 1.4 + d * 0.05
+		if score > best_score:
+			best_score = score
+			best = mate
+	return best
+
+
+func _ai_try_pass(target: Player) -> bool:
+	if match_ball == null or target == null:
+		return false
+	var dist := global_position.distance_to(target.global_position)
+	var impulse := clampf(lerpf(8.0, 12.0, dist / 12.0), 8.0, 12.0)
+	if try_pass_to(target, match_ball, impulse):
+		_ai_pass_cd = AI_PASS_COOLDOWN
+		_ai_shoot_cd = 0.35
+		_ai_carry_sampling = false
+		_ai_carry_dist = 0.0
+		return true
+	return false
 
 
 ## Soft clamp so AI outfield targets stay outside both goal areas.
@@ -539,8 +627,9 @@ func _contest_ball(ball: Ball, is_save: bool) -> void:
 		away = face_direction()
 		away.y = 0.0
 	away = away.normalized()
-	var deflect_speed := clampf(speed * (0.35 if is_save else 0.48), 3.5, 11.0)
-	var up := 2.2 if is_save else 1.4
+	# Saves kill more pace than outfield tips — leave rebounds playable.
+	var deflect_speed := clampf(speed * (0.42 if is_save else 0.55), 4.0, 12.0)
+	var up := 2.4 if is_save else 1.6
 	ball.linear_velocity = away * deflect_speed + Vector3(0.0, up, 0.0)
 	ball.angular_velocity = Vector3(randf_range(-8.0, 8.0), randf_range(-4.0, 4.0), randf_range(-8.0, 8.0))
 	block_attempted.emit(self, ball, success)
