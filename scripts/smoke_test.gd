@@ -913,6 +913,38 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 
+	# Player–player solid collision (layer 2 / mask court+player).
+	var sample_body: Player = lw
+	print(
+		"Smoke player collision_layer=", sample_body.collision_layer,
+		" mask=", sample_body.collision_mask
+	)
+	if sample_body.collision_layer != Player.COLLISION_LAYER_PLAYER:
+		push_error("Smoke: player should live on physics layer 2")
+		get_tree().quit(1)
+		return
+	if (sample_body.collision_mask & Player.COLLISION_LAYER_PLAYER) == 0:
+		push_error("Smoke: player mask must include other players (was court-only overlap bug)")
+		get_tree().quit(1)
+		return
+
+	# Forced stack → placement resolver must nudge capsules apart.
+	lw.global_position = Vector3(0.0, 0.0, 0.0)
+	rw.global_position = Vector3(0.05, 0.0, 0.02)
+	cb.global_position = Vector3(-0.02, 0.0, -0.04)
+	match_node._resolve_player_overlaps(lw)
+	var stack_min := INF
+	var stacked: Array[Player] = [lw, rw, cb]
+	for i in stacked.size():
+		for j in range(i + 1, stacked.size()):
+			var sep := stacked[i].global_position.distance_to(stacked[j].global_position)
+			stack_min = minf(stack_min, sep)
+	print("Smoke overlap resolve min_sep=", stack_min)
+	if stack_min < Player.BODY_RADIUS * 2.0:
+		push_error("Smoke: stacked players should be nudged apart after resolve")
+		get_tree().quit(1)
+		return
+
 	# Set piece: free-throw wall places defenders ~3m+ from taker, award team around spot
 	var foul_spot := Vector3(1.5, 0.0, 12.0)
 	var away_taker := match_node._nearest_outfield(1, foul_spot)
@@ -930,9 +962,18 @@ func _ready() -> void:
 		min_wall_d = minf(min_wall_d, d)
 		if d >= Formations.WALL_GAP_M * 0.85:
 			wall_ok = true
+	var set_piece_min := INF
+	var roster_all: Array[Player] = []
+	roster_all.append_array(match_node._home_players)
+	roster_all.append_array(match_node._away_players)
+	for i in roster_all.size():
+		for j in range(i + 1, roster_all.size()):
+			var d2 := roster_all[i].global_position.distance_to(roster_all[j].global_position)
+			set_piece_min = minf(set_piece_min, d2)
 	print(
 		"Smoke set piece: taker=", away_taker.global_position,
-		" min_wall_d=", min_wall_d, " wall_ok=", wall_ok
+		" min_wall_d=", min_wall_d, " wall_ok=", wall_ok,
+		" roster_min_sep=", set_piece_min
 	)
 	if away_taker.global_position.distance_to(foul_spot) > 1.25:
 		push_error("Smoke: free-throw taker not placed at foul spot")
@@ -940,6 +981,10 @@ func _ready() -> void:
 		return
 	if not wall_ok or min_wall_d < 2.0:
 		push_error("Smoke: 9m wall should keep defenders off the taker")
+		get_tree().quit(1)
+		return
+	if set_piece_min < Player.BODY_RADIUS * 2.0:
+		push_error("Smoke: set-piece placement stacked two players")
 		get_tree().quit(1)
 		return
 

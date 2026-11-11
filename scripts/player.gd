@@ -16,6 +16,13 @@ const FACE_THRESHOLD := 0.12
 const BOB_AMOUNT := 0.04
 const BOB_SPEED := 13.0
 const PICKUP_COOLDOWN := 0.22
+## Matches CapsuleShape3D radius in player.tscn — used for soft depenetration.
+const BODY_RADIUS := 0.35
+## Soft push when capsules nest (teleport residue / AI stack). Not a hard lock.
+const SEPARATION_PUSH := 16.0
+## Physics layers: 1=court, 2=player (see project.godot layer_names).
+const COLLISION_LAYER_PLAYER := 2
+const COLLISION_MASK_COURT_AND_PLAYERS := 1 | 2
 
 # AI tuning — pressure on defense, beatable on the break.
 const AI_CHASE_SPEED_SCALE := 0.88
@@ -87,6 +94,10 @@ var _kit_nodes_ready: bool = false
 func _ready() -> void:
 	start_position = global_position
 	start_yaw = rotation.y
+	# Solid body vs court + other players (mask used to be court-only → free overlap).
+	collision_layer = COLLISION_LAYER_PLAYER
+	collision_mask = COLLISION_MASK_COURT_AND_PLAYERS
+	add_to_group("players")
 	_ensure_craft_nodes()
 	_ensure_kit_nodes()
 	_apply_team_material()
@@ -160,6 +171,8 @@ func _physics_process(delta: float) -> void:
 	if controlled and not match_frozen and not diving and Input.is_action_just_pressed("jump") and is_on_floor():
 		velocity.y = JUMP_VELOCITY
 
+	# Soft velocity push clears nested capsules without freezing wish/slide motion.
+	_apply_soft_player_separation()
 	move_and_slide()
 
 	var planar := Vector3(velocity.x, 0.0, velocity.z)
@@ -244,6 +257,33 @@ func reset_to_start() -> void:
 	_set_dive_pose(false)
 	if _mesh:
 		_mesh.position.y = _mesh_base_y
+
+
+## Light XZ velocity bias when another player capsule overlaps this one.
+func _apply_soft_player_separation() -> void:
+	var min_sep := BODY_RADIUS * 2.0
+	for node in get_tree().get_nodes_in_group("players"):
+		if node == self or not (node is Player):
+			continue
+		var other := node as Player
+		var offset := Vector3(
+			global_position.x - other.global_position.x,
+			0.0,
+			global_position.z - other.global_position.z
+		)
+		var dist := offset.length()
+		if dist >= min_sep:
+			continue
+		var dir := offset
+		if dist < 0.001:
+			# Identical spots — pick a stable horizontal axis from instance ids.
+			dir = Vector3(1.0 if get_instance_id() > other.get_instance_id() else -1.0, 0.0, 0.0)
+			dist = 0.001
+		else:
+			dir /= dist
+		var penetration := min_sep - dist
+		velocity.x += dir.x * penetration * SEPARATION_PUSH
+		velocity.z += dir.z * penetration * SEPARATION_PUSH
 
 
 func face_direction() -> Vector3:
