@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="MyHandball"
-config/description="MyHandball — goal-centered camera + snappier gameplay feel on Phase 0–5."
+config/description="MyHandball — Phase A pass & catch deepen (light lead, show-for-pass, pressure AI)."
 run/main_scene="res://scenes/match/match.tscn"
 config/features=PackedStringArray("4.3", "Forward Plus")
 config/icon="res://icon.svg"

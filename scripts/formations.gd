@@ -40,6 +40,35 @@ static func role_label(role: Role) -> String:
 			return "CB"
 
 
+## Off-ball "show for pass": attack slot nudged into an open lane toward the ball.
+## Keeps width/depth readable for wing↔CB↔wing circulation without stacking.
+static func show_for_pass_slot(player: Player, ball_pos: Vector3) -> Vector3:
+	var slot := attack_slot(player, ball_pos)
+	if player == null or player.is_goalkeeper:
+		return slot
+	var role := role_for(player)
+	var attack_sign := 1.0 if player.team_id == 0 else -1.0
+	var ball_xz := Vector3(ball_pos.x, 0.0, ball_pos.z)
+	# Step slightly toward the ball on depth so the passing lane is live.
+	slot.z = lerpf(slot.z, ball_xz.z + attack_sign * 1.2, 0.28)
+	match role:
+		Role.LEFT_WING:
+			# Hold width, cut a touch inside for a flat angle.
+			slot.x = lerpf(slot.x, minf(slot.x + 1.1, -3.6), 0.35)
+			slot.x = clampf(slot.x, -8.6, -3.2)
+		Role.RIGHT_WING:
+			slot.x = lerpf(slot.x, maxf(slot.x - 1.1, 3.6), 0.35)
+			slot.x = clampf(slot.x, 3.2, 8.6)
+		Role.CENTER_BACK:
+			# Present between the wings, slightly ahead of the ball for a give-and-go feel.
+			slot.x = lerpf(slot.x, ball_xz.x * 0.45, 0.4)
+			slot.x = clampf(slot.x, -3.2, 3.2)
+			slot.z = lerpf(slot.z, ball_xz.z + attack_sign * 2.4, 0.22)
+		_:
+			pass
+	return _legalize_outfield(slot, player.team_id)
+
+
 ## Attack spacing relative to opponent goal. Ball bias shifts the shape slightly.
 static func attack_slot(player: Player, ball_pos: Vector3) -> Vector3:
 	if player == null:

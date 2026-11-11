@@ -1,6 +1,6 @@
 # MyHandball
 
-Desktop handball prototype built with **Godot 4.3** (GDScript). Phases **0–5** are in: sandbox → mini match → rules → GK/shot craft → tactics → presentation. This build adds a **goal-centered camera** (subtle side yaw) and a **gameplay feel** pass (snappier move/possess, soft pass, shorter freezes, beatable Away pressure). Still engine primitives (polished capsules, no Mixamo).
+Desktop handball prototype built with **Godot 4.3** (GDScript). Phases **0–5** are in: sandbox → mini match → rules → GK/shot craft → tactics → presentation. **Phase A** deepens the soft pass from the camera/feel build: reliable **PASS** (RMB/G/RB) vs shoot-charge, light lead / cone assist, show-for-pass off-ball, Away pressure passes, and wing↔CB↔wing catch circulation. Still engine primitives (polished capsules, no Mixamo).
 
 ## Requirements (Windows)
 
@@ -29,8 +29,8 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 | Move (camera-relative) | WASD | Left stick |
 | Jump | Space | A / South |
 | **Shoot (hold for power)** | Hold Left mouse / **E** | Hold RT / R2 |
-| **Pass** | Right mouse / **G** | RB (right bumper) |
-| **Lob** (while charging) | Hold **F** | Hold LT / L2 |
+| **PASS** (instant; cancels charge) | Right mouse / **G** | RB (right bumper) |
+| **Lob** (while charging shoot) | Hold **F** | Hold LT / L2 |
 | **Dive** (GK only) | **C** or Ctrl | B / East |
 | **Cycle** teammate | **Q** or Tab | LB (left bumper) |
 | **Switch-to-best** | **R** | X / West |
@@ -44,8 +44,21 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 
 **Aim modes**
 
-- **Face** — shot goes where the capsule is facing (default).
-- **Mouse** — shot aims toward the mouse cursor projected onto the court plane (lob lifts the aim point).
+- **Face** — shot / pass aim follows where the capsule is facing (default).
+- **Mouse** — aim toward the mouse cursor projected onto the court plane (lob lifts the shot aim point).
+
+**Pass vs shoot:** Hold **LMB/E/RT** to charge a shot (HUD shows `SHOOT · FLAT/LOB`). Tap **RMB/G/RB** for an instant **PASS** — it cancels any charge and never fires the shot. Passes use a light lead in your aim cone (not a heavy magnet). HUD shows `PASS · RMB / G / RB` while you have the ball and are not charging.
+
+## Phase A — pass & catch deepen
+
+Builds on the first-cut soft pass. Feel over features; no dribble / 3 s / passive rewrite / 7 m in this slice.
+
+| Feature | How it feels in play |
+|---------|----------------------|
+| **Pass harden** | RMB/G/RB always passes; steal/cancel shoot-charge without releasing a powered shot. |
+| **Light lead assist** | Aim cone + slight lead on the receiver; soft in-flight steer + sticky teammate catch. |
+| **Show for pass** | Uncontrolled Home teammates step into open wing/CB lanes when a mate has the ball. |
+| **Away pressure pass** | Away prefers a teammate pass under pressure or near the step warning before forcing a shot. |
 
 ## Phase 5 — presentation pass
 
@@ -125,7 +138,7 @@ You control **Home** (blue). **Away** (red) runs formation-aware AI. Both ends o
 |---------|----------|
 | **Clock** | Counts down per period (default **2:00** × **2** halves). Tunable via `period_length_seconds` / `periods_total` on `MatchController`. |
 | **Kickoff / restart** | Opening kickoff to Home. After a goal, the **conceding** team restarts from center with possession. Period 2 kickoff goes to Away. Short freeze + banner, then live play. |
-| **Opponent AI** | Away outfield: chase free ball, hold defense/attack formation slots, pass under pressure, drive + shoot near the goal (outside 6 m). Tuned to create pressure but stay beatable. Away GK tracks + dives on shots (less omniscient). |
+| **Opponent AI** | Away outfield: chase free ball, hold defense/attack formation slots, **pass under pressure / at step warning**, drive + shoot near the goal (outside 6 m). Tuned to create pressure but stay beatable. Away GK tracks + dives on shots (less omniscient). |
 | **Camera** | Behind the attack; **goal-centered** in the middle corridor; subtle side yaw about the ball; smooth flip on possession change. |
 | **UI** | Score, clock, period, steps/rules, shot power, GOAL / kickoff / rule / period / full-time banners. |
 
@@ -151,7 +164,7 @@ scenes/actors/    player.tscn, ball.tscn
 scenes/match/     match.tscn (main), camera_rig.tscn
 scenes/ui/        hud.tscn
 scripts/          player, ball, ball_trail, court, camera_rig, goal_area, match_controller,
-                  handball_rules, shot_craft, block_trace, formations, hud
+                  handball_rules, shot_craft, pass_craft, block_trace, formations, hud
 resources/        materials / physics (reserved)
 ```
 
@@ -202,13 +215,19 @@ resources/        materials / physics (reserved)
 - [ ] Shoot → orange ball trail follows the shot
 - [ ] Score → slow-mo + flash + punchy GOAL banner, then normal-speed kickoff
 
+### Phase A pass deepen
+- [ ] With ball, HUD shows **PASS · RMB / G / RB**; hold shoot → **SHOOT** power instead
+- [ ] Tap pass while charging → charge cancels; soft pass flies (no powered shot)
+- [ ] Circulate wing → CB → wing without needing a shot; steps reset on catch
+- [ ] Uncontrolled Home teammates show into open lanes; Away passes when pressed
+
 ### Optional automated smoke (dev)
 
 ```bash
 godot --path . -- --smoke
 ```
 
-Expect `SMOKE_OK` after Phase 1–5 checks (rules, craft, tactics, trail/kits, goal juice time_scale restore).
+Expect `SMOKE_OK` after Phase 1–5 + Phase A pass circulation (wing↔CB↔wing) checks.
 
 ## License
 

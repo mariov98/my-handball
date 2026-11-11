@@ -25,8 +25,12 @@ const AI_GK_SPEED_SCALE := 0.76
 const AI_GK_TRACK_SPEED_SCALE := 1.0
 const AI_SHOOT_RANGE := 10.0
 const AI_SHOOT_COOLDOWN := 1.55
-const AI_PASS_COOLDOWN := 0.85
+const AI_PASS_COOLDOWN := 0.7
 const AI_BLOCK_DEPTH := 4.5
+## Defender inside this range → prefer pass over forcing a shot.
+const AI_PRESSURE_RANGE := 2.9
+## Carry distance that reads as "last step" before traveling (~3 plants).
+const AI_STEP_WARN_DIST := 2.5
 
 # Phase 3 GK dive
 const DIVE_DURATION := 0.55
@@ -165,6 +169,7 @@ func _physics_process(delta: float) -> void:
 
 	_update_bob(delta, planar.length())
 	_update_arm_pose(delta)
+	_try_sticky_pass_catch()
 
 
 func try_shoot(
@@ -408,19 +413,21 @@ func _ai_defend_block(carrier: Player) -> Vector3:
 
 
 func _ai_support_attack(carrier: Player) -> Vector3:
-	# Formation attack slots (LW / CB-pivot / RW) with a soft orbit away from the carrier.
+	# Show for pass: hold a formation lane but step into an open angle when a
+	# teammate (esp. the human) has the ball — readable wing↔CB circulation.
 	var ball_pos := carrier.global_position
-	var slot := Formations.attack_slot(self, ball_pos)
+	var slot := Formations.show_for_pass_slot(self, ball_pos)
 	var to_carrier := slot.distance_to(Vector3(ball_pos.x, 0.0, ball_pos.z))
-	if to_carrier < 2.2:
+	if to_carrier < 2.4:
 		# Don't stack on the ball carrier — slide wider.
 		var side := 1.0 if Formations.role_for(self) == Formations.Role.RIGHT_WING else -1.0
 		if Formations.role_for(self) == Formations.Role.CENTER_BACK:
 			side = 0.0
 			slot.z += (-1.0 if team_id == 0 else 1.0) * 1.5
-		slot.x += side * 2.0
+		slot.x += side * 2.2
 	slot = _keep_outfield_legal(slot)
-	return _steer_toward(slot) * AI_ATTACK_SPEED_SCALE
+	# Slightly sharper close-out when showing so the lane arrives in time.
+	return _steer_toward(slot) * minf(AI_ATTACK_SPEED_SCALE * 1.08, 1.0)
 
 
 func _ai_attack_with_ball(_delta: float) -> Vector3:
@@ -438,17 +445,26 @@ func _ai_attack_with_ball(_delta: float) -> Vector3:
 	var dist := flat.length()
 	# Pass or shoot before traveling (3 steps ≈ ~5.4 m with tuned gait).
 	var must_release := _ai_carry_dist >= 3.2
+	var step_warn := _ai_carry_dist >= AI_STEP_WARN_DIST
+	var under_pressure := _ai_under_pressure()
+	var pass_target := _ai_pass_target()
+	# Prefer pass under pressure / at step warning before forcing a contested shot.
+	var prefer_pass := pass_target != null and (
+		must_release
+		or under_pressure
+		or step_warn
+		or dist > 8.5
+		or ((int(Time.get_ticks_msec() / 700) + player_index) % 3) == 0
+	)
+	if match_ball != null and prefer_pass and _ai_pass_cd <= 0.0:
+		if _ai_try_pass(pass_target):
+			return Vector3.ZERO
 	if match_ball != null and (dist <= AI_SHOOT_RANGE or must_release):
-		# Prefer a simple teammate pass when deep and must release, or when far.
-		var pass_target := _ai_pass_target()
-		var prefer_pass := pass_target != null and (
-			must_release
-			or dist > 8.5
-			or ((int(Time.get_ticks_msec() / 700) + player_index) % 3) == 0
-		)
-		if prefer_pass and _ai_pass_cd <= 0.0:
-			if _ai_try_pass(pass_target):
-				return Vector3.ZERO
+		# Don't force a shot while pressed if a teammate is available.
+		if under_pressure and pass_target != null and not must_release:
+			return _steer_toward(_keep_outfield_legal(
+				Vector3(goal.x + (float(player_index) - 2.0) * 1.2, 0.0, goal.z)
+			)) * AI_ATTACK_SPEED_SCALE
 		if _ai_shoot_cd <= 0.0 and (dist <= AI_SHOOT_RANGE or must_release):
 			var aim := (goal - (me + Vector3(0, 1.2, 0))).normalized()
 			# Slight aim noise so Away isn't laser-perfect.
@@ -470,70 +486,120 @@ func _ai_attack_with_ball(_delta: float) -> Vector3:
 
 
 ## Soft pass to a teammate (used by MatchController + Away AI).
-func try_pass_to(target: Player, ball: Ball, impulse: float = 10.0) -> bool:
+## Optional `aim_hint` = face / mouse direction; light cone assist blends toward target.
+func try_pass_to(
+	target: Player,
+	ball: Ball,
+	impulse: float = -1.0,
+	aim_hint: Vector3 = Vector3.ZERO
+) -> bool:
 	if target == null or not has_ball or ball == null or ball.carrier != self:
 		return false
-	var from := global_position + Vector3(0, 1.2, 0)
-	var to := target.global_position + Vector3(0, 1.15, 0)
-	var aim := to - from
-	if aim.length_squared() < 0.01:
+	var hint := aim_hint
+	if hint.length_squared() < 0.01:
+		hint = (target.global_position - global_position)
+		hint.y = 0.0
+		if hint.length_squared() < 0.01:
+			hint = face_direction()
+	var built := PassCraft.build_pass(self, target, hint, impulse)
+	if built.is_empty():
 		return false
-	aim = aim.normalized()
-	# Lead the receiver a touch along their velocity so the pass feels catchable.
-	var lead := Vector3(target.velocity.x, 0.0, target.velocity.z) * 0.12
-	aim = (aim + lead * 0.08).normalized()
-	var loft := clampf(0.08 + from.distance_to(to) * 0.008, 0.08, 0.22)
-	return try_shoot(aim, impulse, ball, loft, {"pass": true, "charge": 0.3, "ai": ai_enabled and not controlled})
+	var meta := {
+		"pass": true,
+		"charge": 0.3,
+		"ai": ai_enabled and not controlled,
+		"pass_target": target,
+	}
+	return try_shoot(built["aim"], built["impulse"], ball, built["loft"], meta)
+
+
+func _ai_under_pressure() -> bool:
+	# Opponents live under the sibling team root (Home/Away).
+	var parent_n := get_parent()
+	if parent_n == null:
+		return false
+	var match_root := parent_n.get_parent()
+	if match_root == null:
+		match_root = parent_n
+	for team_root in match_root.get_children():
+		if not (team_root is Node):
+			continue
+		for sibling in team_root.get_children():
+			if sibling == self or not (sibling is Player):
+				continue
+			var other := sibling as Player
+			if other.team_id == team_id or other.is_goalkeeper or other.match_frozen:
+				continue
+			if global_position.distance_to(other.global_position) <= AI_PRESSURE_RANGE:
+				return true
+	return false
 
 
 func _ai_pass_target() -> Player:
 	var parent_n := get_parent()
 	if parent_n == null:
 		return null
-	var best: Player = null
-	var best_score := -INF
+	var roster: Array = []
+	for sibling in parent_n.get_children():
+		if sibling is Player:
+			roster.append(sibling)
 	var face := face_direction()
 	face.y = 0.0
 	if face.length_squared() < 0.01:
 		face = Vector3(0.0, 0.0, 1.0 if team_id == 0 else -1.0)
 	else:
 		face = face.normalized()
-	for sibling in parent_n.get_children():
-		if sibling == self or not (sibling is Player):
-			continue
-		var mate := sibling as Player
-		if mate.is_goalkeeper or mate.match_frozen:
-			continue
-		var to_m := mate.global_position - global_position
-		to_m.y = 0.0
-		var d := to_m.length()
-		if d < 2.4 or d > 14.0:
-			continue
-		var dir := to_m / d
-		var forward := dir.dot(face)
-		if forward < 0.05:
-			continue
-		# Prefer open-ish receivers farther toward the goal.
-		var toward_goal := dir.z * (1.0 if team_id == 0 else -1.0)
-		var score := forward * 2.0 + toward_goal * 1.4 + d * 0.05
-		if score > best_score:
-			best_score = score
-			best = mate
-	return best
+	var best := PassCraft.best_in_cone(self, roster, face, team_id)
+	return best as Player
 
 
 func _ai_try_pass(target: Player) -> bool:
 	if match_ball == null or target == null:
 		return false
-	var dist := global_position.distance_to(target.global_position)
-	var impulse := clampf(lerpf(8.0, 12.0, dist / 12.0), 8.0, 12.0)
-	if try_pass_to(target, match_ball, impulse):
+	var face := face_direction()
+	if try_pass_to(target, match_ball, -1.0, face):
 		_ai_pass_cd = AI_PASS_COOLDOWN
-		_ai_shoot_cd = 0.35
+		_ai_shoot_cd = 0.45
 		_ai_carry_sampling = false
 		_ai_carry_dist = 0.0
 		return true
 	return false
+
+
+## Reliable catch when a teammate pass is arriving nearby (Area enter can miss at speed).
+func _try_sticky_pass_catch() -> void:
+	if has_ball or match_frozen or _pickup_block > 0.0 or match_ball == null:
+		return
+	if match_ball.carrier != null or not match_ball.is_pass_in_flight():
+		return
+	var intended := match_ball.pass_intended_receiver()
+	# Intended receiver gets sticky catch; other teammates still get a slightly tighter window.
+	var sticky := PassCraft.CATCH_STICKY_RADIUS
+	if intended != null and intended != self:
+		sticky *= 0.85
+	elif intended == self:
+		sticky *= 1.12
+	# Measure from chest height — feet-origin distance alone is already ~1.1 m vertically.
+	var catch_at := global_position + Vector3(0.0, 1.05, 0.0)
+	var to_ball := match_ball.global_position - catch_at
+	var planar := Vector3(to_ball.x, 0.0, to_ball.z)
+	if planar.length() > sticky or absf(to_ball.y) > 1.35:
+		return
+	# Prefer balls still approaching the catcher (planar).
+	if match_ball.linear_velocity.length() > 1.0 and planar.length_squared() > 0.01:
+		var approach := match_ball.linear_velocity.normalized().dot(planar.normalized())
+		if approach < PassCraft.CATCH_APPROACH_DOT:
+			return
+	# Teammate passes only — don't sticky-steal opponent shots labeled as pass.
+	var shooter: Variant = match_ball.last_shot_meta.get("shooter", null)
+	if shooter != null and is_instance_valid(shooter) and shooter is Player:
+		if (shooter as Player).team_id != team_id:
+			return
+	if match_ball.try_pickup(self):
+		has_ball = true
+		_ai_carry_dist = 0.0
+		_ai_carry_sampling = false
+		possession_changed.emit(true)
 
 
 ## Soft clamp so AI outfield targets stay outside both goal areas.
