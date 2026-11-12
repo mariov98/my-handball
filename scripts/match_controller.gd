@@ -690,6 +690,8 @@ func _place_set_piece(code: String, awarding_team_id: int, spot: Vector3, taker:
 				if to_spot.length_squared() > 0.01:
 					face = atan2(to_spot.x, to_spot.z)
 		p.rotation.y = face
+	# Teleports skip physics — nudge any stacked capsules apart.
+	_resolve_player_overlaps(taker)
 
 
 func _clear_possession() -> void:
@@ -823,6 +825,7 @@ func _run_kickoff(kickoff_team_id: int, reason: String = "Kickoff") -> void:
 		taker.global_position = Vector3(0.0, 0.0, -1.2 if kickoff_team_id == 0 else 1.2)
 		taker.rotation.y = face_yaw
 		taker.velocity = Vector3.ZERO
+		_resolve_player_overlaps(taker)
 		ball.global_position = taker.ball_attach.global_position
 		if ball.try_pickup(taker):
 			taker.has_ball = true
@@ -855,6 +858,55 @@ func _place_kickoff_shape(kickoff_team_id: int) -> void:
 		p.global_position = slot
 		p.rotation.y = 0.0 if p.team_id == 0 else PI
 		p.velocity = Vector3.ZERO
+	_resolve_player_overlaps()
+
+
+## Nudge CharacterBody capsules apart after teleport placement (set piece / kickoff).
+## Prefer keeping `anchor` (taker) near their intended spot when possible.
+func _resolve_player_overlaps(anchor: Player = null) -> void:
+	var players := _all_players()
+	# Slightly above 2 * capsule radius so shapes clear without sticky lock.
+	var min_sep := Player.BODY_RADIUS * 2.0 + 0.08
+	for _pass in range(5):
+		var moved := false
+		for i in players.size():
+			for j in range(i + 1, players.size()):
+				var a: Player = players[i]
+				var b: Player = players[j]
+				if a == null or b == null:
+					continue
+				var delta := Vector3(
+					b.global_position.x - a.global_position.x,
+					0.0,
+					b.global_position.z - a.global_position.z
+				)
+				var dist := delta.length()
+				if dist >= min_sep:
+					continue
+				var dir := delta
+				if dist < 0.001:
+					dir = Vector3(1.0, 0.0, 0.0)
+					dist = 0.001
+				else:
+					dir /= dist
+				var push := (min_sep - dist) * 0.5
+				var shift := dir * push
+				if a == anchor:
+					b.global_position += shift * 2.0
+				elif b == anchor:
+					a.global_position -= shift * 2.0
+				else:
+					a.global_position -= shift
+					b.global_position += shift
+				a.global_position.y = 0.0
+				b.global_position.y = 0.0
+				a.global_position = Court.clamp_to_court_xz(a.global_position, 0.9)
+				b.global_position = Court.clamp_to_court_xz(b.global_position, 0.9)
+				a.velocity = Vector3.ZERO
+				b.velocity = Vector3.ZERO
+				moved = true
+		if not moved:
+			break
 
 
 func _reset_players_and_ball() -> void:
