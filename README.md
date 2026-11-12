@@ -1,6 +1,6 @@
 # MyHandball
 
-Desktop handball prototype built with **Godot 4.3** (GDScript). Phases **0–5** are in: sandbox → mini match → rules → GK/shot craft → tactics → presentation. **Phase A** deepens soft pass circulation; **Phase B** adds **dribble** (hold V / R3) with procedural bounce, a **3-second hold** clock, step reset on dribble catch, and double-dribble lite; **Phase C** remounts **passive play** as an IHF-inspired hybrid (progress warn → pass-count). Still engine primitives (polished capsules, no Mixamo).
+Desktop handball prototype built with **Godot 4.3** (GDScript). Phases **0–5** are in: sandbox → mini match → rules → GK/shot craft → tactics → presentation. **Phase A** deepens soft pass circulation; **Phase B** adds **dribble** (hold V / R3) with procedural bounce, a **3-second hold** clock, step reset on dribble catch, and double-dribble lite; **Phase C** remounts **passive play** as an IHF-inspired hybrid (progress warn → pass-count); **Phase D** adds **contact lite** (bump → free throw, clear-chance heuristic → **7 m**, optional **2-min exclusion**). Still engine primitives (polished capsules, no Mixamo).
 
 ## Requirements (Windows)
 
@@ -86,6 +86,25 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 - Post-warn enforcement is **receive-count**, not the old ~11 s wall-clock turnover.
 - No fouls / 7 m / formation / camera changes in this slice.
 
+## Phase D — contact lite → 7 m + exclusion lite
+
+Arcade bump → free throw first; clear-chance heuristic → **7 m**; light **2-min exclusion** on 7 m fouls.
+
+| Feature | How it feels in play |
+|---------|----------------------|
+| **Reach-in / body check** | While you **charge a shot** (or tap pass) near the **6–9 m** arc, a defender inside ~1 m contact volume draws a foul. |
+| **Free throw (default)** | Most contact → **FOUL** free throw at the spot + existing 9 m-style wall. |
+| **7 m (heuristic)** | **Airborne shooter** inside ~**8 m** + contact from **behind/side** → **7 m** from the mark. Only the defending **GK** may stay on the line; outfield clear outside ~9 m. |
+| **Exclusion lite** | Clear-chance **7 m** also benches the fouler (`ai_enabled=false` at sideline marker) for **`exclusion_seconds`** (default 120 s of match clock). Tunable on `MatchController`. |
+| **Court** | Visible **7 m** cross marks at both ends. |
+
+### Intentional simplifications (Phase D)
+
+- **Clear-chance detection is heuristic** (airborne + distance + behind/side) — not full IHF referee judgment or progressive personal-foul ladder (warning → 2′ → DQ).
+- No animated check / reach-in; proximity volume during windup only.
+- Exclusion is a roster hole on the 3-outfield line (huge tactical swing) — keep `exclusion_on_seven_m` / `exclusion_seconds` exports to tune.
+- Does not rewrite passive, dribble, formations shapes (beyond 7 m slots), or camera.
+
 ## Phase A — pass & catch deepen
 
 Builds on the first-cut soft pass. Feel over features; Phase B owns dribble / 3 s.
@@ -130,7 +149,7 @@ Team-play primitives for **3 outfield + GK**. Spacing is handball-recognizable (
 
 - Roles are fixed by roster index (not editable playbooks or custom formations).
 - Pivot is a soft CB tuck near the crease, not a dedicated line player + exclusions.
-- 9 m wall is a ~3 m gap + free-throw-line bias, not a formal referee-measured wall or 7 m.
+- 9 m wall is a ~3 m gap + free-throw-line bias, not a formal referee-measured wall (7 m is a separate Phase D set piece).
 - Off-ball AI steers to slots (no screens, crosses, or scripted combinations).
 - Still no career, stamina disciplines, or deep coaching tools.
 
@@ -164,9 +183,10 @@ These are **handball-informed approximations** for a playable prototype — reco
 | **Passive play (lite)** | **IHF-inspired hybrid (Phase C):** stall without progress ~**7 s** → **Passive (lite)** warn. After warn, same-team receives count; **5th receive** without a shot → free throw. Meaningful progress (~1.5 m closer) resets/delays the *warn* only. Shot attempt clears; GK possession exempt. |
 | **Out of bounds** | Soft sideline / end-line bounds inside the walls. Sideline → **throw-in** for the other team. End line outside the goal mouth: attack last touch → **goal throw** (defending GK); defense last touch → corner-style **throw-in**. |
 | **Goal area (6 m)** | Semicircle approx from the goal posts. Outfield players may not stand in either crease; **airborne attackers** can enter for a jump shot. Grounded illegal presence (brief grace) → free throw. Away AI steers outside both arcs. |
-| **Restarts** | Throw-in / goal throw / free throw (traveling, passive, 6 m) with short freeze + banner + set-piece placement. **Kickoff after goals** (and period starts) from Phase 1 is unchanged in timing. |
+| **Restarts** | Throw-in / goal throw / free throw (traveling, passive, 6 m, foul) / **7 m** with short freeze + banner + set-piece placement. **Kickoff after goals** (and period starts) from Phase 1 is unchanged in timing. |
+| **Contact / 7 m (Phase D)** | Defender reach-in during shoot/pass windup near 6–9 m → foul FT; clear-chance heuristic → 7 m (+ optional 2-min exclusion). |
 
-HUD shows a large glanceable **Steps n/3** (color + pulse per plant), a **Hold** pip/timer beside it, and a **Passive (lite)** line (timer pre-warn, receive count after). Traveling / 3 s / double dribble use red free-throw banners.
+HUD shows a large glanceable **Steps n/3** (color + pulse per plant), a **Hold** pip/timer beside it, and a **Passive (lite)** line (timer pre-warn, receive count after). Traveling / 3 s / double dribble / foul / 7 m use red free-throw banners.
 
 ## Phase 1 — mini match (still in)
 
@@ -272,6 +292,13 @@ resources/        materials / physics (reserved)
 - [ ] After warn, shoot → warn clears; further passes do not whistle until a new warn
 - [ ] Drive closer to goal before the warn → timer resets / warn delayed
 - [ ] GK holding does not show Passive (lite)
+
+### Phase D contact / 7 m
+- [ ] Charge a shot near the 6–9 m arc with a defender glued to you → **FOUL** free throw
+- [ ] Jump-shot windup inside ~8 m with contact from behind/side → **7 m** banner; taker on the mark
+- [ ] On 7 m, only defending GK stays near goal; outfield defenders clear outside ~9 m
+- [ ] Clear-chance 7 m → fouler sits on sideline bench briefly (`ai_enabled` off), then returns
+- [ ] Court shows 7 m cross marks at both ends
 
 ### Optional automated smoke (dev)
 

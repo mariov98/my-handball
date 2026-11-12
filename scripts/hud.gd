@@ -269,6 +269,14 @@ func flash_restart(code: String, team_id: int) -> void:
 			color = COLOR_BANNER_WARN
 		"goal_area":
 			title = "Free throw (9m wall)"
+		"foul":
+			title = "FOUL — 9m free throw"
+			color = COLOR_BANNER_TRAVEL
+		"seven_m":
+			title = "7 m PENALTY"
+			color = COLOR_BANNER_TRAVEL
+			_flash_center(banner_label, "%s — %s" % [title, team], 1.1, 0.45, color)
+			return
 		_:
 			title = code.capitalize()
 	_flash_center(banner_label, "%s — %s" % [title, team], 0.75, 0.35, color)

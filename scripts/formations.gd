@@ -163,7 +163,11 @@ static func kickoff_slot(player: Player, kickoff_team_id: int) -> Vector3:
 ## Set-piece placement for Phase 2 restart codes.
 ## Returns { "taker": Vector3, "yaw": float } extras live on the caller's placement pass.
 static func is_free_throw_code(code: String) -> bool:
-	return code in ["traveling", "passive", "goal_area", "free_throw", "hold", "double_dribble"]
+	return code in ["traveling", "passive", "goal_area", "free_throw", "hold", "double_dribble", "foul"]
+
+
+static func is_seven_meter_code(code: String) -> bool:
+	return code == "seven_m"
 
 
 ## Place one player for a restart. `taker` is the player who receives the ball.
@@ -176,8 +180,15 @@ static func set_piece_slot(
 ) -> Vector3:
 	if player == null:
 		return Vector3.ZERO
+	# Excluded players stay on the bench marker (MatchController may override).
+	if player.excluded:
+		return Court.bench_marker(player.team_id, maxi(0, player.player_index - 1))
+
 	if player.is_goalkeeper:
 		if code == "goal_throw" and player.team_id == awarding_team_id:
+			return player.start_position
+		if is_seven_meter_code(code) and player.team_id != awarding_team_id:
+			# Only the defending GK may stay on the line for a 7 m.
 			return player.start_position
 		# Non-taker GK stays home.
 		return player.start_position
@@ -191,7 +202,10 @@ static func set_piece_slot(
 	if code == "throw_in":
 		return _throw_in_slot(player, spot, awarding_team_id, role, is_award, taker)
 
-	# Free-throw family (traveling / passive / goal_area) — 9 m wall feel.
+	if is_seven_meter_code(code):
+		return _seven_meter_slot(player, awarding_team_id, spot, taker, role, is_award)
+
+	# Free-throw family (traveling / passive / goal_area / foul) — 9 m wall feel.
 	if player == taker:
 		var place := spot
 		place.y = 0.0
@@ -219,6 +233,8 @@ static func switch_score(
 	attack_team_id: int
 ) -> float:
 	if candidate == null or candidate == controlled:
+		return -INF
+	if candidate.excluded:
 		return -INF
 	var ball_pos := ball.global_position if ball else Vector3.ZERO
 	var d_ball := candidate.global_position.distance_to(ball_pos)
@@ -408,4 +424,44 @@ static func _free_throw_wall_slot(
 
 	var side := Vector3(-dir.z, 0.0, dir.x)
 	var slot := wall_anchor + side * lateral
+	return _legalize_outfield(slot, player.team_id)
+
+
+## 7 m: taker on the mark; only defending GK may stay near goal; outfield clear outside 9 m.
+static func _seven_meter_slot(
+	player: Player,
+	awarding_team_id: int,
+	spot: Vector3,
+	taker: Player,
+	role: Role,
+	is_award: bool
+) -> Vector3:
+	if player == taker:
+		var place := spot
+		place.y = 0.0
+		return place
+
+	var defend_team := 1 - awarding_team_id
+	var own_goal_z := -20.0 if defend_team == 0 else 20.0
+	var attack_sign := 1.0 if awarding_team_id == 0 else -1.0
+	# Outside the free-throw line toward midfield / sideline — never between taker and goal.
+	var clear_z := own_goal_z - signf(own_goal_z) * (FREE_THROW_LINE_M + 1.8)
+	var slot := Vector3.ZERO
+	if is_award:
+		match role:
+			Role.LEFT_WING:
+				slot = Vector3(-7.5, 0.0, clear_z - attack_sign * 1.5)
+			Role.RIGHT_WING:
+				slot = Vector3(7.5, 0.0, clear_z - attack_sign * 1.5)
+			_:
+				slot = Vector3(0.0, 0.0, clear_z - attack_sign * 3.5)
+	else:
+		# Defending outfield must leave the 7 m — park wide outside 9 m.
+		match role:
+			Role.LEFT_WING:
+				slot = Vector3(-8.0, 0.0, clear_z)
+			Role.RIGHT_WING:
+				slot = Vector3(8.0, 0.0, clear_z)
+			_:
+				slot = Vector3(0.0, 0.0, clear_z - signf(own_goal_z) * 2.0)
 	return _legalize_outfield(slot, player.team_id)
