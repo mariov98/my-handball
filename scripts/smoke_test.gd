@@ -686,8 +686,8 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 
-	# Passive play: hold still near midfield until turnover.
-	# Phase B: keep a dribble stream so the 3 s hold clock does not fire first.
+	# --- Phase C: passive v2 (progress warn → N receives → FT; shot clears) ---
+	# Stall without progress → warn. Phase B dribble so 3 s hold does not fire first.
 	_smoke_prepare_live(match_node, ball)
 	_smoke_clear_ball(ball)
 	player = match_node.controlled_player
@@ -705,28 +705,153 @@ func _ready() -> void:
 		return
 	player.dribbling = true
 	match_node.rules._oob_cooldown = 0.0
-	var passive_hit := false
 	var warned := false
-	for _i in range(int(HandballRules.PASSIVE_TURNOVER_S / 0.25) + 4):
-		passive_hit = match_node.rules.tick(0.25, ball, match_node._all_players())
+	for _i in range(int(HandballRules.PASSIVE_WARN_S / 0.25) + 6):
+		match_node.rules.tick(0.25, ball, match_node._all_players())
 		if match_node.rules.is_passive_warned():
 			warned = true
-		if passive_hit:
 			break
-	print("Smoke passive warned=", warned, " hit=", passive_hit, " t=", match_node.rules.get_passive_timer())
+	print(
+		"Smoke passive warned=", warned,
+		" t=", match_node.rules.get_passive_timer(),
+		" recv=", match_node.rules.get_passive_receives()
+	)
 	if not warned:
 		push_error("Smoke: passive warning never fired")
 		get_tree().quit(1)
 		return
-	if not passive_hit:
-		push_error("Smoke: passive turnover did not fire")
+
+	# Progress toward goal resets / delays the warn while still pre-signal.
+	# (Re-arm a mid-timer, then walk closer than PASSIVE_PROGRESS_M.)
+	match_node.rules._passive_warned = false
+	match_node.rules._passive_receives = 0
+	match_node.rules._passive_timer = HandballRules.PASSIVE_WARN_S * 0.7
+	match_node.rules._passive_best_dist = 20.0
+	player.global_position = Vector3(0.0, player.start_position.y, 0.0)
+	match_node.rules.tick(0.25, ball, match_node._all_players())
+	var t_before_prog := match_node.rules.get_passive_timer()
+	# Move ~2 m closer to Away goal (+Z for Home).
+	player.global_position = Vector3(0.0, player.start_position.y, 2.2)
+	match_node.rules.tick(0.25, ball, match_node._all_players())
+	print(
+		"Smoke passive progress reset: before=", t_before_prog,
+		" after=", match_node.rules.get_passive_timer(),
+		" warned=", match_node.rules.is_passive_warned()
+	)
+	if match_node.rules.get_passive_timer() >= t_before_prog:
+		push_error("Smoke: progress toward goal should reset passive warn timer")
+		get_tree().quit(1)
+		return
+	if match_node.rules.is_passive_warned():
+		push_error("Smoke: progress should not leave passive warned")
+		get_tree().quit(1)
+		return
+
+	# Re-stall to warn, then N same-team receives without shot → FT.
+	player.global_position = Vector3(0.0, player.start_position.y, 0.0)
+	match_node.rules._passive_best_dist = INF
+	match_node.rules._passive_timer = 0.0
+	warned = false
+	for _i in range(int(HandballRules.PASSIVE_WARN_S / 0.25) + 6):
+		match_node.rules.tick(0.25, ball, match_node._all_players())
+		if match_node.rules.is_passive_warned():
+			warned = true
+			break
+	if not warned:
+		push_error("Smoke: passive re-warn failed before pass-count")
+		get_tree().quit(1)
+		return
+
+	var home_outfield: Array[Player] = []
+	for p in match_node._home_players:
+		if not p.is_goalkeeper:
+			home_outfield.append(p)
+	if home_outfield.size() < 2:
+		push_error("Smoke: need ≥2 home outfield for passive receives")
+		get_tree().quit(1)
+		return
+	var passive_ft := false
+	var carrier_idx := 0
+	for _i in range(HandballRules.PASSIVE_MAX_RECEIVES):
+		var passer: Player = home_outfield[carrier_idx]
+		carrier_idx = (carrier_idx + 1) % home_outfield.size()
+		var receiver: Player = home_outfield[carrier_idx]
+		var recv_before := match_node.rules.get_passive_receives()
+		match_node.rules.on_release(passer)
+		# Synthesize pass meta so shot-clear path is not accidentally taken.
+		ball.last_shot_meta = {"pass": true, "shooter": passer}
+		match_node.rules.on_pickup(receiver)
+		# Nth receive emits violation → begin_lockout clears the counter synchronously.
+		if match_node.match_state == MatchController.MatchState.RULE_RESTART:
+			print(
+				"Smoke passive receive=", recv_before + 1,
+				"/", HandballRules.PASSIVE_MAX_RECEIVES, " → FT"
+			)
+			passive_ft = true
+			break
+		var recv_n := match_node.rules.get_passive_receives()
+		print("Smoke passive receive=", recv_n, "/", HandballRules.PASSIVE_MAX_RECEIVES)
+		# Keep ball ownership coherent for the next synthetic pass.
+		if ball.carrier:
+			ball.carrier.has_ball = false
+		ball.carrier = receiver
+		receiver.has_ball = true
+	if not passive_ft:
+		push_error("Smoke: passive pass-limit FT did not fire on Nth receive")
 		get_tree().quit(1)
 		return
 	await get_tree().create_timer(MatchController.RESTART_FREEZE + 0.35).timeout
 	if ball.carrier == null or ball.carrier.team_id != 1:
-		push_error("Smoke: passive should award Away")
+		push_error("Smoke: passive pass-limit should award Away")
 		get_tree().quit(1)
 		return
+
+	# Shot attempt clears passive — further receives must not whistle without a new warn.
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	player = match_node.controlled_player
+	player.global_position = Vector3(0.0, player.start_position.y, 0.0)
+	player.velocity = Vector3.ZERO
+	player.dribbling = false
+	if not ball.try_pickup(player):
+		push_error("Smoke: passive shot-clear pickup failed")
+		get_tree().quit(1)
+		return
+	player.has_ball = true
+	match_node.rules.on_pickup(player)
+	if not match_node.rules.try_begin_dribble(player):
+		push_error("Smoke: passive shot-clear dribble begin failed")
+		get_tree().quit(1)
+		return
+	player.dribbling = true
+	for _i in range(int(HandballRules.PASSIVE_WARN_S / 0.25) + 6):
+		match_node.rules.tick(0.25, ball, match_node._all_players())
+		if match_node.rules.is_passive_warned():
+			break
+	if not match_node.rules.is_passive_warned():
+		push_error("Smoke: passive shot-clear setup never warned")
+		get_tree().quit(1)
+		return
+	match_node.rules.on_release(player)
+	ball.last_shot_meta = {"pass": false, "shooter": player}
+	match_node.rules.on_shot_attempt(player)
+	print(
+		"Smoke passive after shot: warned=", match_node.rules.is_passive_warned(),
+		" recv=", match_node.rules.get_passive_receives()
+	)
+	if match_node.rules.is_passive_warned() or match_node.rules.get_passive_receives() != 0:
+		push_error("Smoke: shot attempt should clear passive warn + receive count")
+		get_tree().quit(1)
+		return
+	# Synthetic receives after clear must not FT (no warn armed).
+	for p in home_outfield:
+		match_node.rules.on_pickup(p)
+		match_node.rules.on_release(p)
+	if match_node.rules.is_passive_warned():
+		push_error("Smoke: receives after shot clear should not re-arm passive")
+		get_tree().quit(1)
+		return
+	print("Smoke Phase C passive v2 OK (N=", HandballRules.PASSIVE_MAX_RECEIVES, ")")
 
 	# --- Phase B: dribble + 3 s hold + step reset + double-dribble ---
 	_smoke_prepare_live(match_node, ball)
@@ -926,6 +1051,10 @@ func _ready() -> void:
 	# --- Phase 3: shot craft / GK dive / block ---
 	_smoke_prepare_live(match_node, ball)
 	_smoke_clear_ball(ball)
+	# Park free ball midcourt so a leftover Phase B shot position can't trip end-line OOB
+	# before the charged-shot assert (longer Phase C section makes that race likelier).
+	ball.global_position = Vector3(0.0, 0.3, 0.0)
+	match_node.rules._oob_cooldown = 0.5
 
 	# Charge → impulse mapping
 	var imp_lo := ShotCraft.impulse_for_charge(0.0, false)

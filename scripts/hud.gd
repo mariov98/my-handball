@@ -184,10 +184,11 @@ func set_hold_status(
 
 
 ## Secondary rules line (passive only) — keep steps out of this to avoid clutter.
+## Phase C: "Passive (lite)" + receive count after warn so the hybrid model is readable.
 func set_rules_status(text: String) -> void:
 	rules_label.text = text
 	rules_label.visible = not text.is_empty()
-	if text.contains("PASSIVE"):
+	if text.contains("Passive (lite)") or text.contains("PASSIVE"):
 		rules_label.add_theme_color_override("font_color", COLOR_PASSIVE)
 	else:
 		rules_label.add_theme_color_override("font_color", Color(1.0, 0.92, 0.55, 1.0))
@@ -264,7 +265,7 @@ func flash_restart(code: String, team_id: int) -> void:
 			_flash_center(banner_label, "%s — 9m free throw %s" % [title, team], 1.05, 0.4, color)
 			return
 		"passive":
-			title = "Passive — 9m free throw"
+			title = "Passive (lite) — 9m free throw"
 			color = COLOR_BANNER_WARN
 		"goal_area":
 			title = "Free throw (9m wall)"
@@ -293,6 +294,7 @@ func flash_rule(message: String, code: String = "") -> void:
 			message = "DOUBLE DRIBBLE"
 		"passive":
 			color = COLOR_BANNER_WARN
+			hold = 0.9
 		_:
 			if message.to_lower().begins_with("traveling"):
 				color = COLOR_BANNER_TRAVEL

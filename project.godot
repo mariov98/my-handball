@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="MyHandball"
-config/description="MyHandball — Phase B dribble + 3-second hold + step reset."
+config/description="MyHandball — Phase C passive v2 (IHF-inspired hybrid: progress warn + pass-count)."
 run/main_scene="res://scenes/match/match.tscn"
 config/features=PackedStringArray("4.3", "Forward Plus")
 config/icon="res://icon.svg"

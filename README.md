@@ -1,6 +1,6 @@
 # MyHandball
 
-Desktop handball prototype built with **Godot 4.3** (GDScript). Phases **0–5** are in: sandbox → mini match → rules → GK/shot craft → tactics → presentation. **Phase A** deepens soft pass circulation; **Phase B** adds **dribble** (hold V / R3) with procedural bounce, a **3-second hold** clock, step reset on dribble catch, and double-dribble lite. Still engine primitives (polished capsules, no Mixamo).
+Desktop handball prototype built with **Godot 4.3** (GDScript). Phases **0–5** are in: sandbox → mini match → rules → GK/shot craft → tactics → presentation. **Phase A** deepens soft pass circulation; **Phase B** adds **dribble** (hold V / R3) with procedural bounce, a **3-second hold** clock, step reset on dribble catch, and double-dribble lite; **Phase C** remounts **passive play** as an IHF-inspired hybrid (progress warn → pass-count). Still engine primitives (polished capsules, no Mixamo).
 
 ## Requirements (Windows)
 
@@ -66,7 +66,25 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 
 - Continuous bounce without true palm contact (**approx**).
 - No AI auto-dribble yet (Away still passes / shoots under step pressure).
-- No passive rewrite / 7 m / foul ladder in this slice.
+- No 7 m / foul ladder in this slice (passive remount is Phase C).
+
+## Phase C — passive play v2 (pass-aware)
+
+**IHF-inspired hybrid** (not full referee AI). Progress/tempo still raises the forewarning; after the signal, a receive-count enforces the turnover.
+
+| Feature | How it feels in play |
+|---------|----------------------|
+| **Warn trigger** | Stall without meaningful progress toward the opponent goal (~**7 s**) → HUD **Passive (lite)**. Progress (~1.5 m closer) resets/delays the warn only. |
+| **Pass-count after warn** | Same-team receives after the warn are counted. Whistle on the **5th receive** without a shot (**N=5**, IHF-like: max 4 passes then whistle on 5th catch). |
+| **Shot clears** | A non-pass shot attempt clears the warn + receive count (clarification lite). |
+| **GK exempt** | Goalkeeper possession does not burn passive and clears a pending warn. |
+| **HUD** | Pre-warn: `Passive (lite) Ns`. After warn: `Passive (lite) r/5` receive counter (stays visible during pass flight). |
+
+### Intentional simplifications (Phase C)
+
+- No full IHF clarification set (e.g. no separate “clear scoring chance” referee judgment beyond shot attempt).
+- Post-warn enforcement is **receive-count**, not the old ~11 s wall-clock turnover.
+- No fouls / 7 m / formation / camera changes in this slice.
 
 ## Phase A — pass & catch deepen
 
@@ -143,12 +161,12 @@ These are **handball-informed approximations** for a playable prototype — reco
 |------|----------------------|
 | **Steps / traveling** | Discrete foot-plants while moving with the ball (~1.8 m gait). Catch gets a **reception zero** (first plant free). Stop / slow = **pivot** (gait pauses; taken steps stay). HUD ticks **Steps n/3** each plant; at 3 a **Last step** warning; a 4th plant → **TRAVELING** free throw. **Jump-shot** (airborne) and **dribbling** do not add steps. Gathering a dribble resets steps. |
 | **3-second hold / dribble** | Hold ≤ **3 s** without dribble / pass / shot → free throw. Hold **V** / **R3** to bounce (pauses the clock). Catch the dribble → new 3 s + steps; a second stream after gather → **double dribble**. |
-| **Passive play (lite)** | If the carrier stops making progress toward the opponent goal for ~**7 s**, HUD warns **Passive play**. At ~**11 s** → turnover free throw. Meaningful progress (~1.5 m closer to goal) resets the timer. GK holding does not burn passive. |
+| **Passive play (lite)** | **IHF-inspired hybrid (Phase C):** stall without progress ~**7 s** → **Passive (lite)** warn. After warn, same-team receives count; **5th receive** without a shot → free throw. Meaningful progress (~1.5 m closer) resets/delays the *warn* only. Shot attempt clears; GK possession exempt. |
 | **Out of bounds** | Soft sideline / end-line bounds inside the walls. Sideline → **throw-in** for the other team. End line outside the goal mouth: attack last touch → **goal throw** (defending GK); defense last touch → corner-style **throw-in**. |
 | **Goal area (6 m)** | Semicircle approx from the goal posts. Outfield players may not stand in either crease; **airborne attackers** can enter for a jump shot. Grounded illegal presence (brief grace) → free throw. Away AI steers outside both arcs. |
 | **Restarts** | Throw-in / goal throw / free throw (traveling, passive, 6 m) with short freeze + banner + set-piece placement. **Kickoff after goals** (and period starts) from Phase 1 is unchanged in timing. |
 
-HUD shows a large glanceable **Steps n/3** (color + pulse per plant), a **Hold** pip/timer beside it, and a separate Passive / PASSIVE line. Traveling / 3 s / double dribble use red free-throw banners.
+HUD shows a large glanceable **Steps n/3** (color + pulse per plant), a **Hold** pip/timer beside it, and a **Passive (lite)** line (timer pre-warn, receive count after). Traveling / 3 s / double dribble use red free-throw banners.
 
 ## Phase 1 — mini match (still in)
 
@@ -248,13 +266,20 @@ resources/        materials / physics (reserved)
 - [ ] Dribble → release → dribble again → DOUBLE DRIBBLE free throw
 - [ ] Pass or shoot clears the Hold pip / 3 s clock
 
+### Phase C passive v2
+- [ ] Hold / weave without approaching goal → **Passive (lite)** warn
+- [ ] After warn, complete 5 team receives without shooting → free throw; HUD shows `Passive (lite) r/5`
+- [ ] After warn, shoot → warn clears; further passes do not whistle until a new warn
+- [ ] Drive closer to goal before the warn → timer resets / warn delayed
+- [ ] GK holding does not show Passive (lite)
+
 ### Optional automated smoke (dev)
 
 ```bash
 godot --path . -- --smoke
 ```
 
-Expect `SMOKE_OK` after Phase 1–5 + Phase A pass circulation + Phase B dribble/hold checks.
+Expect `SMOKE_OK` after Phase 1–5 + Phase A–C checks (pass circulation, dribble/hold, passive pass-count).
 
 ## License
 
