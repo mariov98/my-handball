@@ -622,6 +622,10 @@ func _on_ball_released(player: Player) -> void:
 	if player == controlled_player:
 		_cancel_charge()
 	rules.on_release(player)
+	# Phase C: non-pass shot attempt clears passive (clarification lite).
+	var is_pass := bool(ball.last_shot_meta.get("pass", false))
+	if not is_pass:
+		rules.on_shot_attempt(player)
 	_update_rules_hud()
 
 
@@ -794,14 +798,18 @@ func _update_rules_hud() -> void:
 			hud.set_hold_status(0.0, HandballRules.HOLD_MAX_S, false, false, false)
 	if not hud.has_method("set_rules_status"):
 		return
-	if not carrying:
-		hud.set_rules_status("")
-		return
+	# Passive (lite) stays readable during a pass flight after the warn.
 	var parts: PackedStringArray = []
 	if rules.is_passive_warned():
-		parts.append("PASSIVE")
-	elif rules.get_passive_timer() > 3.0:
-		parts.append("Passive %.0fs" % rules.get_passive_timer())
+		parts.append(
+			"Passive (lite) %d/%d"
+			% [rules.get_passive_receives(), rules.get_passive_max_receives()]
+		)
+	elif carrying and rules.get_passive_timer() > 3.0:
+		parts.append("Passive (lite) %.0fs" % rules.get_passive_timer())
+	if parts.is_empty() and not carrying:
+		hud.set_rules_status("")
+		return
 	hud.set_rules_status(" · ".join(parts))
 
 
