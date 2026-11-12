@@ -28,6 +28,7 @@ const COLOR_GOAL_AWAY := Color(1.0, 0.72, 0.35, 1.0)
 @onready var help_label: Label = $Root/HelpLabel
 @onready var shot_label: Label = $Root/ShotLabel
 @onready var power_bar: ProgressBar = $Root/PowerBar
+var shapes_label: Label
 
 var _steps_pulse: Tween
 var _goal_tween: Tween
@@ -46,9 +47,10 @@ func _ready() -> void:
 	if power_bar:
 		power_bar.visible = false
 		power_bar.value = 0.0
-	help_label.text = "WASD move · Space jump · hold V/R3 dribble · hold LMB/E/RT shoot · RMB/G/RB PASS · F/LT lob · C/Ctrl/B dive (GK) · Q cycle · R best · T aim"
+	help_label.text = "WASD move · Space jump · hold V/R3 dribble · hold LMB/E/RT shoot · RMB/G/RB PASS · F/LT lob · C/Ctrl/B dive (GK) · Q cycle · R best · T aim · 1 atk shape · 2 def shape"
 	_ensure_flash_overlay()
 	_ensure_hold_label()
+	_ensure_shapes_label()
 
 
 func set_score(home: int, away: int) -> void:
@@ -72,6 +74,15 @@ func set_controlled(text: String) -> void:
 
 func set_aim_mode(text: String) -> void:
 	aim_label.text = text
+
+
+## Phase E: Home attack/defense shape presets (Wide/Crash · Flat/OneUp).
+func set_shapes_status(attack_label: String, defense_label: String) -> void:
+	_ensure_shapes_label()
+	if shapes_label == null:
+		return
+	shapes_label.visible = true
+	shapes_label.text = "Shape Atk %s · Def %s" % [attack_label, defense_label]
 
 
 ## Phase 3 power / lob / jump-shot readout. Hidden when idle to avoid clutter.
@@ -363,6 +374,27 @@ func _ensure_hold_label() -> void:
 	hold_label.add_theme_constant_override("shadow_offset_x", 1)
 	hold_label.add_theme_constant_override("shadow_offset_y", 1)
 	$Root.add_child(hold_label)
+
+
+func _ensure_shapes_label() -> void:
+	if shapes_label and is_instance_valid(shapes_label):
+		return
+	shapes_label = get_node_or_null("Root/ShapesLabel") as Label
+	if shapes_label:
+		return
+	shapes_label = Label.new()
+	shapes_label.name = "ShapesLabel"
+	shapes_label.visible = true
+	# Sit under the aim / info cluster on the right without fighting Steps/Hold.
+	shapes_label.position = Vector2(980, 52)
+	shapes_label.size = Vector2(280, 28)
+	shapes_label.add_theme_font_size_override("font_size", 16)
+	shapes_label.add_theme_color_override("font_color", Color(0.85, 0.92, 1.0, 0.9))
+	shapes_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.65))
+	shapes_label.add_theme_constant_override("shadow_offset_x", 1)
+	shapes_label.add_theme_constant_override("shadow_offset_y", 1)
+	shapes_label.text = "Shape Atk Wide · Def Flat"
+	$Root.add_child(shapes_label)
 
 
 func _flash_center(label: Label, text: String, hold: float, fade: float, color: Color = COLOR_BANNER_DEFAULT) -> void:

@@ -1,6 +1,6 @@
 # MyHandball
 
-Desktop handball prototype built with **Godot 4.3** (GDScript). Phases **0–5** are in: sandbox → mini match → rules → GK/shot craft → tactics → presentation. **Phase A** deepens soft pass circulation; **Phase B** adds **dribble** (hold V / R3) with procedural bounce, a **3-second hold** clock, step reset on dribble catch, and double-dribble lite; **Phase C** remounts **passive play** as an IHF-inspired hybrid (progress warn → pass-count); **Phase D** adds **contact lite** (bump → free throw, clear-chance heuristic → **7 m**, optional **2-min exclusion**). Still engine primitives (polished capsules, no Mixamo).
+Desktop handball prototype built with **Godot 4.3** (GDScript). Phases **0–5** are in: sandbox → mini match → rules → GK/shot craft → tactics → presentation. **Phase A** deepens soft pass circulation; **Phase B** adds **dribble** (hold V / R3) with procedural bounce, a **3-second hold** clock, step reset on dribble catch, and double-dribble lite; **Phase C** remounts **passive play** as an IHF-inspired hybrid (progress warn → pass-count); **Phase D** adds **contact lite** (bump → free throw, clear-chance heuristic → **7 m**, optional **2-min exclusion**); **Phase E** adds **attack/defense shape presets** on the 3+GK roster (Wide/Crash · Flat/OneUp). Still engine primitives (polished capsules, no Mixamo).
 
 ## Requirements (Windows)
 
@@ -36,12 +36,16 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 | **Cycle** teammate | **Q** or Tab | LB (left bumper) |
 | **Switch-to-best** | **R** | X / West |
 | Toggle aim mode | **T** | Y / North |
+| **Toggle attack shape** (Wide ↔ Crash) | **1** | D-pad Up |
+| **Toggle defense shape** (Flat ↔ OneUp) | **2** | D-pad Down |
 
 **Movement** is relative to the **current camera**: W / stick-up walks into the screen along the camera forward projected onto the court. When possession flips and the camera yaws behind the new attack, the same stick direction keeps matching what you see.
 
 **Camera:** behind the team with (or last with) the ball. In the **center corridor** the frame is square with the goal (goal in the middle). When the ball drifts wide the rig adds only a **subtle yaw** about the ball — it does **not** recenter the ball on screen; the goal stays the visual anchor.
 
 **Team control:** **Q** cycles the Home roster in order. **R** jumps to the most useful teammate (nearest to a free ball, open receiver when attacking, best defender when covering).
+
+**Shapes (Phase E):** **1** / D-pad↑ toggles Home **attack** Wide (3-3-ish) ↔ Crash (2-4-ish soft pivot). **2** / D-pad↓ toggles Home **defense** Flat (6-0-ish) ↔ OneUp (5-1-ish). Chosen so they do not fight Q/R/V/E/F/pass/shoot. Away AI picks shapes from score/time. HUD shows `Shape Atk … · Def …`; CB can read as LB/RB by ball side (cosmetic).
 
 **Aim modes**
 
@@ -104,6 +108,26 @@ Arcade bump → free throw first; clear-chance heuristic → **7 m**; light **2-
 - No animated check / reach-in; proximity volume during windup only.
 - Exclusion is a roster hole on the 3-outfield line (huge tactical swing) — keep `exclusion_on_seven_m` / `exclusion_seconds` exports to tune.
 - Does not rewrite passive, dribble, formations shapes (beyond 7 m slots), or camera.
+
+## Phase E — roles & shapes on 3+GK
+
+Explicit **shape presets** on the sandbox roster (still LW / CB / RW + GK — no roster expand).
+
+| Feature | How it feels in play |
+|---------|----------------------|
+| **Attack Wide** | 3-3-ish: wings wide near ~9 m; CB in backcourt with soft pivot only when the ball is deep. |
+| **Attack Crash** | 2-4-ish: CB takes a dedicated soft-pivot / line tuck past midfield; wings hold width; ball-side wing can seal a light **screen** between CB and a defender (**approx**). |
+| **Defense Flat** | 6-0-ish: 3-across wall outside own 6 m (existing default). |
+| **Defense OneUp** | 5-1-ish: wings stay flat; CB steps up toward ~9 m on the ball. |
+| **Home toggles** | **1** / D-pad↑ attack · **2** / D-pad↓ defense. Banner flash + HUD `Shape Atk … · Def …`. |
+| **Away AI** | Losing → Crash (and OneUp when late or down by 2+); winning → Wide/Flat; tied late → Crash/OneUp. |
+| **HUD labels** | Roles stay LW/CB/RW; CB may display as **LB/RB** by ball side (cosmetic teaching). |
+
+### Intentional simplifications (Phase E)
+
+- Still **3 outfield + GK** — no LB/RB/P as separate bodies; Crash pivot is a CB tuck, not a dedicated line player.
+- Screen is a slot bias (**approx**), not collision sealing or scripted combinations.
+- No Phase F movement craft / jump-shot state machine; no fouls/passive/dribble/camera rewrites.
 
 ## Phase A — pass & catch deepen
 
@@ -300,13 +324,20 @@ resources/        materials / physics (reserved)
 - [ ] Clear-chance 7 m → fouler sits on sideline bench briefly (`ai_enabled` off), then returns
 - [ ] Court shows 7 m cross marks at both ends
 
+### Phase E shapes
+- [ ] **1** toggles attack Wide ↔ Crash; HUD / banner update; Crash tucks CB toward the 6 m line
+- [ ] **2** toggles defense Flat ↔ OneUp; OneUp steps CB up toward ~9 m
+- [ ] Uncontrolled teammates / Away slots follow the active shape
+- [ ] Away losing late uses Crash / OneUp; winning uses Wide / Flat
+- [ ] Controlling CB with ball wide can show LB/RB in the HUD (cosmetic)
+
 ### Optional automated smoke (dev)
 
 ```bash
 godot --path . -- --smoke
 ```
 
-Expect `SMOKE_OK` after Phase 1–5 + Phase A–C checks (pass circulation, dribble/hold, passive pass-count).
+Expect `SMOKE_OK` after Phase 1–5 + Phase A–E checks (pass, dribble/hold, passive, fouls/7 m, shapes).
 
 ## License
 

@@ -1,8 +1,8 @@
 extends Node3D
 class_name MatchController
 
-## Routes input, possession, team switch, scoring, clock, kickoff, AI, Phase 2–4
-## rules/tactics, Phase 5 presentation, and Phase D contact / 7 m / exclusion lite.
+## Routes input, possession, team switch, scoring, clock, kickoff, AI, Phase 2–5
+## rules/tactics/presentation, Phase D contact / 7 m / exclusion, Phase E shapes.
 
 enum AimMode { FACE, MOUSE_COURT }
 enum MatchState { PRE_KICKOFF, LIVE, GOAL_PAUSE, PERIOD_BREAK, MATCH_OVER, RULE_RESTART }
@@ -46,6 +46,12 @@ var _away_players: Array[Player] = []
 var _attack_team_id: int = 0
 var _pending_kickoff_team: int = 0
 var rules: HandballRules = HandballRules.new()
+## Phase E: Home shape presets (player toggles). Away AI picks by score/time.
+## Int defaults match Formations.AttackShape.WIDE / DefenseShape.FLAT.
+var home_attack_shape: int = 0
+var home_defense_shape: int = 0
+var away_attack_shape: int = 0
+var away_defense_shape: int = 0
 ## Set when rules emit step_taken so the HUD can pulse once.
 var _steps_hud_pulse: bool = false
 ## Phase 3 charge-to-shoot.
@@ -72,8 +78,9 @@ func _ready() -> void:
 	_setup_block_trace()
 	camera_rig.setup(ball, true)
 	_refresh_hud()
+	_sync_team_shapes()
 	print(
-		"MyHandball Phase D contact/7m ready. Period=%ds x%d. Dribble V/R3; Pass RMB/G/RB."
+		"MyHandball Phase E shapes ready. Period=%ds x%d. Atk 1/D-pad↑ · Def 2/D-pad↓."
 		% [int(period_length_seconds), periods_total]
 	)
 	var user_args := OS.get_cmdline_user_args()
@@ -222,6 +229,15 @@ func _unhandled_input(event: InputEvent) -> void:
 			hud.set_aim_mode(_aim_mode_label())
 		get_viewport().set_input_as_handled()
 		return
+	# Phase E: Home shape toggles (1 / D-pad↑ attack, 2 / D-pad↓ defense).
+	if event.is_action_pressed("toggle_attack_shape"):
+		_toggle_home_attack_shape()
+		get_viewport().set_input_as_handled()
+		return
+	if event.is_action_pressed("toggle_defense_shape"):
+		_toggle_home_defense_shape()
+		get_viewport().set_input_as_handled()
+		return
 	if event.is_action_pressed("switch_best"):
 		if match_state == MatchState.LIVE:
 			_switch_to_best()
@@ -265,8 +281,10 @@ func _physics_process(delta: float) -> void:
 	if hud and hud.has_method("set_clock"):
 		hud.set_clock(clock_remaining)
 	_tick_exclusions(delta)
+	_update_away_shapes()
 	_update_rules_hud()
 	_update_shot_hud()
+	_update_shapes_hud()
 	# Phase D: shoot charge counts as windup for contact fouls near the arc.
 	rules.set_windup(_charging and controlled_player != null and controlled_player.has_ball, true)
 	if rules.tick(delta, ball, _all_players()):
@@ -363,13 +381,107 @@ func _set_controlled(player: Player) -> void:
 	if controlled_player.has_method("set_selection_highlight"):
 		controlled_player.set_selection_highlight(true)
 	_refresh_home_ai()
-	if hud and hud.has_method("set_controlled"):
-		var role := "GK" if player.is_goalkeeper else Formations.role_label(Formations.role_for(player))
-		hud.set_controlled("Team %s #%d (%s)" % [
-			"Home" if player.team_id == 0 else "Away",
-			player.player_index + 1,
-			role
-		])
+	_refresh_controlled_hud()
+
+
+func _refresh_controlled_hud() -> void:
+	if controlled_player == null or hud == null or not hud.has_method("set_controlled"):
+		return
+	var player := controlled_player
+	var role := "GK"
+	if not player.is_goalkeeper:
+		var ball_x := ball.global_position.x if ball else 0.0
+		role = Formations.role_label_hud(Formations.role_for(player), ball_x, true)
+	hud.set_controlled("Team %s #%d (%s)" % [
+		"Home" if player.team_id == 0 else "Away",
+		player.player_index + 1,
+		role
+	])
+
+
+func _toggle_home_attack_shape() -> void:
+	home_attack_shape = (
+		Formations.AttackShape.CRASH
+		if home_attack_shape == Formations.AttackShape.WIDE
+		else Formations.AttackShape.WIDE
+	)
+	_sync_team_shapes()
+	_update_shapes_hud()
+	if hud and hud.has_method("flash_rule"):
+		hud.flash_rule(
+			"Attack %s" % Formations.attack_shape_label(home_attack_shape as Formations.AttackShape),
+			"shape"
+		)
+	print("Home attack shape → %s" % Formations.attack_shape_label(home_attack_shape as Formations.AttackShape))
+
+
+func _toggle_home_defense_shape() -> void:
+	home_defense_shape = (
+		Formations.DefenseShape.ONE_UP
+		if home_defense_shape == Formations.DefenseShape.FLAT
+		else Formations.DefenseShape.FLAT
+	)
+	_sync_team_shapes()
+	_update_shapes_hud()
+	if hud and hud.has_method("flash_rule"):
+		hud.flash_rule(
+			"Defense %s" % Formations.defense_shape_label(home_defense_shape as Formations.DefenseShape),
+			"shape"
+		)
+	print("Home defense shape → %s" % Formations.defense_shape_label(home_defense_shape as Formations.DefenseShape))
+
+
+## Push team shape enums onto each player so Formations slot helpers can read them.
+func _sync_team_shapes() -> void:
+	for p in _home_players:
+		p.attack_shape = home_attack_shape
+		p.defense_shape = home_defense_shape
+	for p in _away_players:
+		p.attack_shape = away_attack_shape
+		p.defense_shape = away_defense_shape
+
+
+## Away AI: simple score/time shape picks (losing → Crash/OneUp; winning → Wide/Flat).
+func _update_away_shapes() -> void:
+	var score_diff := score_away - score_home
+	var time_frac := clock_remaining / maxf(period_length_seconds, 1.0)
+	var late := false
+	if current_period >= periods_total:
+		late = time_frac < 0.40
+	else:
+		late = time_frac < 0.20
+	var next_atk := Formations.AttackShape.WIDE
+	var next_def := Formations.DefenseShape.FLAT
+	if score_diff < 0:
+		# Losing: crash the line; press with OneUp when late or down by 2+.
+		next_atk = Formations.AttackShape.CRASH
+		next_def = (
+			Formations.DefenseShape.ONE_UP
+			if late or score_diff <= -2
+			else Formations.DefenseShape.FLAT
+		)
+	elif score_diff > 0:
+		next_atk = Formations.AttackShape.WIDE
+		next_def = Formations.DefenseShape.FLAT
+	else:
+		# Tied: Crash/OneUp only when the clock is late.
+		next_atk = Formations.AttackShape.CRASH if late else Formations.AttackShape.WIDE
+		next_def = Formations.DefenseShape.ONE_UP if late else Formations.DefenseShape.FLAT
+	if next_atk != away_attack_shape or next_def != away_defense_shape:
+		away_attack_shape = next_atk
+		away_defense_shape = next_def
+		_sync_team_shapes()
+
+
+func _update_shapes_hud() -> void:
+	if hud == null:
+		return
+	_refresh_controlled_hud()
+	if hud.has_method("set_shapes_status"):
+		hud.set_shapes_status(
+			Formations.attack_shape_label(home_attack_shape as Formations.AttackShape),
+			Formations.defense_shape_label(home_defense_shape as Formations.DefenseShape)
+		)
 
 
 func _cycle_teammate() -> void:
@@ -1095,6 +1207,7 @@ func _refresh_hud() -> void:
 		hud.set_period(current_period, periods_total)
 	if hud and hud.has_method("set_aim_mode"):
 		hud.set_aim_mode(_aim_mode_label())
+	_update_shapes_hud()
 
 
 func _first_outfield(roster: Array[Player]) -> Player:
