@@ -56,6 +56,8 @@ const AI_DIVE_MIN_BALL_SPEED := 7.0
 var controlled: bool = false
 var ai_enabled: bool = false
 var has_ball: bool = false
+## Phase B: continuous bounce stream while held (MatchController / rules drive this).
+var dribbling: bool = false
 var start_position: Vector3 = Vector3.ZERO
 var start_yaw: float = 0.0
 ## Set by MatchController so AI can chase / shoot.
@@ -195,6 +197,7 @@ func try_shoot(
 	if not has_ball or ball == null or ball.carrier != self:
 		return false
 	_pickup_block = PICKUP_COOLDOWN
+	dribbling = false
 	has_ball = false
 	possession_changed.emit(false)
 	ball.release_and_shoot(aim_dir, impulse_strength, up_bias, shot_meta)
@@ -243,6 +246,7 @@ func reset_to_start() -> void:
 	rotation.y = start_yaw
 	velocity = Vector3.ZERO
 	has_ball = false
+	dribbling = false
 	_pickup_block = 0.0
 	_ai_shoot_cd = 0.0
 	_ai_pass_cd = 0.0

@@ -1,6 +1,6 @@
 # MyHandball
 
-Desktop handball prototype built with **Godot 4.3** (GDScript). Phases **0–5** are in: sandbox → mini match → rules → GK/shot craft → tactics → presentation. **Phase A** deepens the soft pass from the camera/feel build: reliable **PASS** (RMB/G/RB) vs shoot-charge, light lead / cone assist, show-for-pass off-ball, Away pressure passes, and wing↔CB↔wing catch circulation. Still engine primitives (polished capsules, no Mixamo).
+Desktop handball prototype built with **Godot 4.3** (GDScript). Phases **0–5** are in: sandbox → mini match → rules → GK/shot craft → tactics → presentation. **Phase A** deepens soft pass circulation; **Phase B** adds **dribble** (hold V / R3) with procedural bounce, a **3-second hold** clock, step reset on dribble catch, and double-dribble lite. Still engine primitives (polished capsules, no Mixamo).
 
 ## Requirements (Windows)
 
@@ -28,6 +28,7 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 |--------|------------------|---------|
 | Move (camera-relative) | WASD | Left stick |
 | Jump | Space | A / South |
+| **Dribble (hold)** | Hold **V** | Hold **R3** (right stick click) |
 | **Shoot (hold for power)** | Hold Left mouse / **E** | Hold RT / R2 |
 | **PASS** (instant; cancels charge) | Right mouse / **G** | RB (right bumper) |
 | **Lob** (while charging shoot) | Hold **F** | Hold LT / L2 |
@@ -49,9 +50,27 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 
 **Pass vs shoot:** Hold **LMB/E/RT** to charge a shot (HUD shows `SHOOT · FLAT/LOB`). Tap **RMB/G/RB** for an instant **PASS** — it cancels any charge and never fires the shot. Passes use a light lead in your aim cone (not a heavy magnet). HUD shows `PASS · RMB / G / RB` while you have the ball and are not charging.
 
+**Dribble vs shoot/pass/jump:** Hold **V** (keyboard) or **R3** (gamepad) to bounce while moving. Chosen so it does not fight shoot (LMB/E/RT), pass (RMB/G/RB), jump (Space/A), or lob (F/LT). Release gathers the ball (new 3 steps + fresh 3 s). Starting a second bounce stream after gather = **double dribble**. Pass and shot clear the 3 s clock. Charging a shot ends an active dribble.
+
+## Phase B — dribble + 3-second hold
+
+| Feature | How it feels in play |
+|---------|----------------------|
+| **Hold dribble** | Hold **V** / **R3** while possessing → procedural Y bounce + floor probe at troughs (approx continuous stream). |
+| **3-second hold** | Without dribble / pass / shot, the Hold pip beside Steps drains; at 3 s → free throw. Warns near 2.4 s. |
+| **Dribble catch** | Release dribble → steps reset + 3 s reset (reception zero again). |
+| **Double-dribble lite** | After gathering a stream, starting another bounce stream → free throw. |
+| **HUD** | `Hold 2.1 ●●●●○○` beside Steps (or `Hold · DRIBBLE` while bouncing). |
+
+### Intentional simplifications (Phase B)
+
+- Continuous bounce without true palm contact (**approx**).
+- No AI auto-dribble yet (Away still passes / shoots under step pressure).
+- No passive rewrite / 7 m / foul ladder in this slice.
+
 ## Phase A — pass & catch deepen
 
-Builds on the first-cut soft pass. Feel over features; no dribble / 3 s / passive rewrite / 7 m in this slice.
+Builds on the first-cut soft pass. Feel over features; Phase B owns dribble / 3 s.
 
 | Feature | How it feels in play |
 |---------|----------------------|
@@ -122,13 +141,14 @@ These are **handball-informed approximations** for a playable prototype — reco
 
 | Rule | How it feels in play |
 |------|----------------------|
-| **Steps / traveling** | Discrete foot-plants while moving with the ball (~1.8 m gait). Catch gets a **reception zero** (first plant free). Stop / slow = **pivot** (gait pauses; taken steps stay). HUD ticks **Steps n/3** each plant; at 3 a **Last step** warning; a 4th plant → **TRAVELING** free throw. **Jump-shot** (airborne) does not add steps. |
+| **Steps / traveling** | Discrete foot-plants while moving with the ball (~1.8 m gait). Catch gets a **reception zero** (first plant free). Stop / slow = **pivot** (gait pauses; taken steps stay). HUD ticks **Steps n/3** each plant; at 3 a **Last step** warning; a 4th plant → **TRAVELING** free throw. **Jump-shot** (airborne) and **dribbling** do not add steps. Gathering a dribble resets steps. |
+| **3-second hold / dribble** | Hold ≤ **3 s** without dribble / pass / shot → free throw. Hold **V** / **R3** to bounce (pauses the clock). Catch the dribble → new 3 s + steps; a second stream after gather → **double dribble**. |
 | **Passive play (lite)** | If the carrier stops making progress toward the opponent goal for ~**7 s**, HUD warns **Passive play**. At ~**11 s** → turnover free throw. Meaningful progress (~1.5 m closer to goal) resets the timer. GK holding does not burn passive. |
 | **Out of bounds** | Soft sideline / end-line bounds inside the walls. Sideline → **throw-in** for the other team. End line outside the goal mouth: attack last touch → **goal throw** (defending GK); defense last touch → corner-style **throw-in**. |
 | **Goal area (6 m)** | Semicircle approx from the goal posts. Outfield players may not stand in either crease; **airborne attackers** can enter for a jump shot. Grounded illegal presence (brief grace) → free throw. Away AI steers outside both arcs. |
 | **Restarts** | Throw-in / goal throw / free throw (traveling, passive, 6 m) with short freeze + banner + set-piece placement. **Kickoff after goals** (and period starts) from Phase 1 is unchanged in timing. |
 
-HUD shows a large glanceable **Steps n/3** (color + pulse per plant) and a separate Passive / PASSIVE line. Traveling uses a red **TRAVELING** banner.
+HUD shows a large glanceable **Steps n/3** (color + pulse per plant), a **Hold** pip/timer beside it, and a separate Passive / PASSIVE line. Traveling / 3 s / double dribble use red free-throw banners.
 
 ## Phase 1 — mini match (still in)
 
@@ -221,13 +241,20 @@ resources/        materials / physics (reserved)
 - [ ] Circulate wing → CB → wing without needing a shot; steps reset on catch
 - [ ] Uncontrolled Home teammates show into open lanes; Away passes when pressed
 
+### Phase B dribble + 3 s
+- [ ] Hold **V** / **R3** with ball → bounce animation; HUD shows `Hold · DRIBBLE`
+- [ ] Take steps, then dribble and release → Steps reset to 0/3
+- [ ] Stand still with ball >3 s (no dribble/pass/shot) → 3 SECONDS free throw
+- [ ] Dribble → release → dribble again → DOUBLE DRIBBLE free throw
+- [ ] Pass or shoot clears the Hold pip / 3 s clock
+
 ### Optional automated smoke (dev)
 
 ```bash
 godot --path . -- --smoke
 ```
 
-Expect `SMOKE_OK` after Phase 1–5 + Phase A pass circulation (wing↔CB↔wing) checks.
+Expect `SMOKE_OK` after Phase 1–5 + Phase A pass circulation + Phase B dribble/hold checks.
 
 ## License
 

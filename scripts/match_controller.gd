@@ -69,7 +69,7 @@ func _ready() -> void:
 	camera_rig.setup(ball, true)
 	_refresh_hud()
 	print(
-		"MyHandball Phase A pass deepen ready. Period=%ds x%d. Pass RMB/G/RB, light lead assist."
+		"MyHandball Phase B dribble/hold ready. Period=%ds x%d. Dribble hold V/R3; Pass RMB/G/RB."
 		% [int(period_length_seconds), periods_total]
 	)
 	var user_args := OS.get_cmdline_user_args()
@@ -230,6 +230,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	# Pass first so RMB/G/RB never starts or finishes a shoot-charge.
 	if event.is_action_pressed("pass_ball") and match_state == MatchState.LIVE:
+		_end_controlled_dribble()
 		_try_pass()
 		get_viewport().set_input_as_handled()
 		return
@@ -253,6 +254,7 @@ func _unhandled_input(event: InputEvent) -> void:
 func _physics_process(delta: float) -> void:
 	_update_camera_attack_side()
 	_update_shot_charge(delta)
+	_update_dribble_input()
 	if match_state != MatchState.LIVE:
 		return
 	clock_remaining = maxf(0.0, clock_remaining - delta)
@@ -264,6 +266,38 @@ func _physics_process(delta: float) -> void:
 		return
 	if clock_remaining <= 0.0:
 		_on_period_expired()
+
+
+## Hold `dribble` (V / R3) while possessing to bounce; release gathers (new steps + 3 s).
+func _update_dribble_input() -> void:
+	if match_state != MatchState.LIVE:
+		_end_controlled_dribble()
+		return
+	var p := controlled_player
+	if p == null or not p.has_ball or p.is_goalkeeper or ball == null or ball.carrier != p:
+		_end_controlled_dribble()
+		return
+	# Don't bounce while charging a shot — shoot owns the hands.
+	if _charging:
+		_end_controlled_dribble()
+		return
+	var want := Input.is_action_pressed("dribble")
+	if want:
+		if not p.dribbling:
+			if rules.try_begin_dribble(p):
+				p.dribbling = true
+			# Double-dribble violation is handled by rules → restart.
+	elif p.dribbling:
+		_end_controlled_dribble()
+
+
+func _end_controlled_dribble() -> void:
+	var p := controlled_player
+	if p == null or not p.dribbling:
+		return
+	p.dribbling = false
+	rules.end_dribble(p)
+	_update_rules_hud()
 
 
 func _update_shot_charge(delta: float) -> void:
@@ -697,6 +731,7 @@ func _place_set_piece(code: String, awarding_team_id: int, spot: Vector3, taker:
 func _clear_possession() -> void:
 	if ball.carrier:
 		ball.carrier.has_ball = false
+		ball.carrier.dribbling = false
 	ball.carrier = null
 	ball._last_carrier = null
 	ball._ignore_carrier_until = 0.0
@@ -707,6 +742,7 @@ func _clear_possession() -> void:
 	ball.collision_mask = 1 | 2
 	for p in _all_players():
 		p.has_ball = false
+		p.dribbling = false
 
 
 func _goalkeeper_for(team_id: int) -> Player:
@@ -745,6 +781,17 @@ func _update_rules_hud() -> void:
 			carrying,
 			pulse
 		)
+	if hud.has_method("set_hold_status"):
+		if carrying:
+			hud.set_hold_status(
+				rules.get_hold_remaining(),
+				HandballRules.HOLD_MAX_S,
+				true,
+				rules.is_dribbling() or (ball.carrier != null and ball.carrier.dribbling),
+				rules.is_hold_warned()
+			)
+		else:
+			hud.set_hold_status(0.0, HandballRules.HOLD_MAX_S, false, false, false)
 	if not hud.has_method("set_rules_status"):
 		return
 	if not carrying:

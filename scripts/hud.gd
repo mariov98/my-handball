@@ -5,6 +5,9 @@ const COLOR_STEPS_IDLE := Color(0.85, 0.9, 0.95, 0.85)
 const COLOR_STEPS_ACTIVE := Color(1.0, 0.98, 0.88, 1.0)
 const COLOR_STEPS_WARN := Color(1.0, 0.78, 0.25, 1.0)
 const COLOR_STEPS_TRAVEL := Color(1.0, 0.35, 0.28, 1.0)
+const COLOR_HOLD_IDLE := Color(0.75, 0.88, 0.95, 0.8)
+const COLOR_HOLD_WARN := Color(1.0, 0.72, 0.28, 1.0)
+const COLOR_HOLD_DRIBBLE := Color(0.55, 0.95, 0.7, 1.0)
 const COLOR_BANNER_DEFAULT := Color(0.95, 0.98, 1.0, 1.0)
 const COLOR_BANNER_WARN := Color(1.0, 0.86, 0.35, 1.0)
 const COLOR_BANNER_TRAVEL := Color(1.0, 0.42, 0.32, 1.0)
@@ -16,6 +19,7 @@ const COLOR_GOAL_AWAY := Color(1.0, 0.72, 0.35, 1.0)
 @onready var clock_label: Label = $Root/ClockLabel
 @onready var period_label: Label = $Root/PeriodLabel
 @onready var steps_label: Label = $Root/StepsLabel
+@onready var hold_label: Label = $Root/HoldLabel
 @onready var rules_label: Label = $Root/RulesLabel
 @onready var goal_label: Label = $Root/GoalLabel
 @onready var banner_label: Label = $Root/BannerLabel
@@ -34,14 +38,17 @@ func _ready() -> void:
 	goal_label.visible = false
 	banner_label.visible = false
 	steps_label.visible = false
+	if hold_label:
+		hold_label.visible = false
 	rules_label.text = ""
 	if shot_label:
 		shot_label.visible = false
 	if power_bar:
 		power_bar.visible = false
 		power_bar.value = 0.0
-	help_label.text = "WASD move · Space jump · hold LMB/E/RT shoot · RMB/G/RB PASS · F/LT lob · C/Ctrl/B dive (GK) · Q cycle · R best · T aim"
+	help_label.text = "WASD move · Space jump · hold V/R3 dribble · hold LMB/E/RT shoot · RMB/G/RB PASS · F/LT lob · C/Ctrl/B dive (GK) · Q cycle · R best · T aim"
 	_ensure_flash_overlay()
+	_ensure_hold_label()
 
 
 func set_score(home: int, away: int) -> void:
@@ -142,6 +149,40 @@ func set_steps_status(steps: int, max_steps: int, warned: bool, visible_now: boo
 		_pulse_steps()
 
 
+## Small 3 s hold pip beside Steps. Shows remaining time, or DRIBBLE while bouncing.
+func set_hold_status(
+	remaining: float,
+	max_s: float,
+	visible_now: bool,
+	dribbling: bool = false,
+	warned: bool = false
+) -> void:
+	_ensure_hold_label()
+	if hold_label == null:
+		return
+	if not visible_now:
+		hold_label.visible = false
+		return
+	hold_label.visible = true
+	if dribbling:
+		hold_label.text = "Hold · DRIBBLE"
+		hold_label.add_theme_color_override("font_color", COLOR_HOLD_DRIBBLE)
+		return
+	var rem := clampf(remaining, 0.0, max_s)
+	# Compact pip: filled blocks drain as the 3 s clock burns.
+	var pips_total := 6
+	var filled := int(ceil((rem / maxf(max_s, 0.001)) * float(pips_total)))
+	filled = clampi(filled, 0, pips_total)
+	var pip := ""
+	for i in range(pips_total):
+		pip += "●" if i < filled else "○"
+	hold_label.text = "Hold %.1f  %s" % [rem, pip]
+	if warned or rem <= 0.6:
+		hold_label.add_theme_color_override("font_color", COLOR_HOLD_WARN)
+	else:
+		hold_label.add_theme_color_override("font_color", COLOR_HOLD_IDLE)
+
+
 ## Secondary rules line (passive only) — keep steps out of this to avoid clutter.
 func set_rules_status(text: String) -> void:
 	rules_label.text = text
@@ -212,6 +253,16 @@ func flash_restart(code: String, team_id: int) -> void:
 			_flash_center(banner_label, "%s — 9m free throw %s" % [title, team], 1.05, 0.4, color)
 			steps_label.add_theme_color_override("font_color", COLOR_STEPS_TRAVEL)
 			return
+		"hold":
+			title = "3 SECONDS"
+			color = COLOR_BANNER_TRAVEL
+			_flash_center(banner_label, "%s — 9m free throw %s" % [title, team], 1.05, 0.4, color)
+			return
+		"double_dribble":
+			title = "DOUBLE DRIBBLE"
+			color = COLOR_BANNER_TRAVEL
+			_flash_center(banner_label, "%s — 9m free throw %s" % [title, team], 1.05, 0.4, color)
+			return
 		"passive":
 			title = "Passive — 9m free throw"
 			color = COLOR_BANNER_WARN
@@ -233,6 +284,13 @@ func flash_rule(message: String, code: String = "") -> void:
 			color = COLOR_BANNER_TRAVEL
 			hold = 1.0
 			message = "TRAVELING — steps"
+		"hold":
+			color = COLOR_BANNER_WARN if message.contains("pass") else COLOR_BANNER_TRAVEL
+			hold = 0.85 if message.contains("pass") else 1.0
+		"double_dribble":
+			color = COLOR_BANNER_TRAVEL
+			hold = 1.0
+			message = "DOUBLE DRIBBLE"
 		"passive":
 			color = COLOR_BANNER_WARN
 		_:
@@ -276,6 +334,25 @@ func _ensure_flash_overlay() -> void:
 	$Root.add_child(_flash_rect)
 	# Keep flash under banners so GOAL text stays readable.
 	$Root.move_child(_flash_rect, 0)
+
+
+func _ensure_hold_label() -> void:
+	if hold_label and is_instance_valid(hold_label):
+		return
+	hold_label = get_node_or_null("Root/HoldLabel") as Label
+	if hold_label:
+		return
+	hold_label = Label.new()
+	hold_label.name = "HoldLabel"
+	hold_label.visible = false
+	hold_label.position = Vector2(200, 18)
+	hold_label.size = Vector2(220, 36)
+	hold_label.add_theme_font_size_override("font_size", 20)
+	hold_label.add_theme_color_override("font_color", COLOR_HOLD_IDLE)
+	hold_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.7))
+	hold_label.add_theme_constant_override("shadow_offset_x", 1)
+	hold_label.add_theme_constant_override("shadow_offset_y", 1)
+	$Root.add_child(hold_label)
 
 
 func _flash_center(label: Label, text: String, hold: float, fade: float, color: Color = COLOR_BANNER_DEFAULT) -> void:
