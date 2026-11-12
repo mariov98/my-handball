@@ -3,6 +3,7 @@ class_name HandballRules
 
 ## Phase 2 sport-logic approximations. MatchController owns restarts; this tracks
 ## steps, passive play, OOB, and goal-area violations and reports when they fire.
+## Phase B: 3 s hold + dribble stream (step/hold reset on catch) + double-dribble lite.
 
 signal rule_warning(code: String, message: String)
 signal rule_violation(code: String, message: String, awarding_team_id: int, spot: Vector3)
@@ -24,6 +25,9 @@ const PASSIVE_PROGRESS_M := 1.5
 ## Brief grace so jump-shot landings / brush of the arc don't spam fouls.
 const GOAL_AREA_GRACE_S := 0.22
 const OOB_COOLDOWN_S := 0.4
+## IHF-ish: hold ≤ 3 s without dribble / pass / shot.
+const HOLD_MAX_S := 3.0
+const HOLD_WARN_S := 2.4
 
 var enabled: bool = true
 var last_touch_team_id: int = 0
@@ -43,6 +47,13 @@ var _passive_warned: bool = false
 var _passive_best_dist: float = INF
 var _possession_team_id: int = -1
 
+## Phase B dribble / hold.
+var _hold_timer: float = 0.0
+var _hold_warned: bool = false
+var _is_dribbling: bool = false
+## After gathering a dribble stream, a second stream is double-dribble.
+var _dribble_caught: bool = false
+
 var _area_timers: Dictionary = {} ## player instance_id -> float
 var _oob_cooldown: float = 0.0
 var _lockout: bool = false ## true while MatchController runs a restart
@@ -60,6 +71,7 @@ func reset_possession_tracking() -> void:
 	_passive_warned = false
 	_passive_best_dist = INF
 	_possession_team_id = -1
+	_reset_hold_and_dribble()
 	_area_timers.clear()
 
 
@@ -88,6 +100,11 @@ func on_pickup(player: Player) -> void:
 	_passive_warned = false
 	_passive_best_dist = INF
 	_possession_team_id = player.team_id
+	# Fresh catch: new 3 s + may start one dribble stream.
+	_hold_timer = 0.0
+	_hold_warned = false
+	_is_dribbling = false
+	_dribble_caught = false
 
 
 func on_release(player: Player) -> void:
@@ -107,6 +124,8 @@ func on_release(player: Player) -> void:
 	_passive_warned = false
 	_passive_best_dist = INF
 	_possession_team_id = -1
+	# Pass / shot clear the 3 s clock and end any bounce stream.
+	_reset_hold_and_dribble()
 
 
 func get_steps() -> int:
@@ -129,6 +148,75 @@ func is_passive_warned() -> bool:
 	return _passive_warned
 
 
+func get_hold_timer() -> float:
+	return _hold_timer
+
+
+func get_hold_remaining() -> float:
+	return maxf(0.0, HOLD_MAX_S - _hold_timer)
+
+
+func is_hold_warned() -> bool:
+	return _hold_warned
+
+
+func is_dribbling() -> bool:
+	return _is_dribbling
+
+
+func has_caught_dribble() -> bool:
+	return _dribble_caught
+
+
+## Begin a continuous bounce stream. Returns false if a double-dribble violation
+## was emitted (caller should not enter dribble visuals).
+func try_begin_dribble(player: Player) -> bool:
+	if player == null or _lockout or not enabled:
+		return false
+	if _is_dribbling:
+		return true
+	if _dribble_caught:
+		var spot := Court.clamp_to_court_xz(player.global_position, 1.0)
+		spot = _free_throw_spot(spot, 1 - player.team_id)
+		rule_violation.emit(
+			"double_dribble",
+			"Double dribble",
+			1 - player.team_id,
+			spot
+		)
+		return false
+	_is_dribbling = true
+	_hold_timer = 0.0
+	_hold_warned = false
+	return true
+
+
+## Gather / catch the bounce stream → new 3 steps + fresh 3 s; further dribble = fault.
+func end_dribble(player: Player) -> void:
+	if player == null:
+		return
+	if not _is_dribbling:
+		return
+	_is_dribbling = false
+	_dribble_caught = true
+	_steps = 0
+	_step_accum = 0.0
+	_have_carrier_sample = false
+	_reception_zero_pending = true
+	_pivoting = false
+	_stop_timer = 0.0
+	_steps_warned = false
+	_hold_timer = 0.0
+	_hold_warned = false
+
+
+func _reset_hold_and_dribble() -> void:
+	_hold_timer = 0.0
+	_hold_warned = false
+	_is_dribbling = false
+	_dribble_caught = false
+
+
 ## Returns true if a violation was emitted (caller should stop further checks).
 func tick(delta: float, ball: Ball, players: Array[Player]) -> bool:
 	if not enabled or _lockout or ball == null:
@@ -138,6 +226,13 @@ func tick(delta: float, ball: Ball, players: Array[Player]) -> bool:
 
 	var carrier: Player = ball.carrier
 	if carrier:
+		# Keep rules dribble flag aligned with player state (AI / restarts).
+		if carrier.dribbling and not _is_dribbling and not _dribble_caught:
+			_is_dribbling = true
+		elif not carrier.dribbling and _is_dribbling:
+			end_dribble(carrier)
+		if _tick_hold(delta, carrier):
+			return true
 		if _tick_steps(delta, carrier):
 			return true
 		if _tick_passive(delta, carrier):
@@ -150,10 +245,38 @@ func tick(delta: float, ball: Ball, players: Array[Player]) -> bool:
 		_pivoting = false
 		_stop_timer = 0.0
 		_steps_warned = false
+		_reset_hold_and_dribble()
 
 	if _tick_oob(ball, carrier):
 		return true
 	if _tick_goal_areas(delta, players, carrier):
+		return true
+	return false
+
+
+func _tick_hold(delta: float, carrier: Player) -> bool:
+	if carrier.is_goalkeeper:
+		_hold_timer = 0.0
+		_hold_warned = false
+		return false
+	# Continuous bounce stream pauses the 3 s clock.
+	if _is_dribbling or carrier.dribbling:
+		_hold_timer = 0.0
+		_hold_warned = false
+		return false
+	_hold_timer += delta
+	if _hold_timer >= HOLD_WARN_S and not _hold_warned:
+		_hold_warned = true
+		rule_warning.emit("hold", "3 seconds — pass, shoot, or dribble")
+	if _hold_timer >= HOLD_MAX_S:
+		var spot := Court.clamp_to_court_xz(carrier.global_position, 1.0)
+		spot = _free_throw_spot(spot, 1 - carrier.team_id)
+		rule_violation.emit(
+			"hold",
+			"Held ball — 3 seconds",
+			1 - carrier.team_id,
+			spot
+		)
 		return true
 	return false
 
@@ -175,6 +298,13 @@ func _tick_steps(delta: float, carrier: Player) -> bool:
 
 	var moved := xz.distance_to(_carrier_last_xz)
 	_carrier_last_xz = xz
+
+	# While dribbling, movement is free — steps resume after gather/catch.
+	if _is_dribbling or carrier.dribbling:
+		_stop_timer = 0.0
+		_pivoting = false
+		_step_accum = 0.0
+		return false
 
 	# Jump-shot: airborne carries do not plant steps (release before landing).
 	if _is_airborne(carrier):

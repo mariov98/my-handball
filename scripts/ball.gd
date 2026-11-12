@@ -8,6 +8,10 @@ signal released(player: Player)
 
 const FOLLOW_LERP := 40.0
 const SHOOT_UP_BIAS := 0.16
+## Phase B procedural dribble bounce (approx continuous stream, no palm contact).
+const DRIBBLE_PERIOD_S := 0.36
+const DRIBBLE_BALL_RADIUS := 0.12
+const DRIBBLE_FLOOR_PROBE := 2.4
 
 var carrier: Player = null
 var start_position: Vector3 = Vector3.ZERO
@@ -15,6 +19,10 @@ var start_position: Vector3 = Vector3.ZERO
 var _ignore_carrier_until: float = 0.0
 var _trail: Node3D = null
 const TRAIL_MIN_SPEED := 3.5
+
+var _dribble_phase: float = 0.0
+var _dribble_floor_y: float = DRIBBLE_BALL_RADIUS
+var _dribble_was_low: bool = false
 
 
 func _ready() -> void:
@@ -31,14 +39,52 @@ func _physics_process(delta: float) -> void:
 		var flying := carrier == null and not freeze and linear_velocity.length() >= TRAIL_MIN_SPEED
 		_trail.call("set_active", flying)
 	if carrier == null:
+		_dribble_phase = 0.0
+		_dribble_was_low = false
 		_soft_pass_steer(delta)
 		return
 	# Kinematic follow while possessed — freeze physics.
 	freeze = true
 	var target: Vector3 = carrier.ball_attach.global_position
+	if carrier.dribbling:
+		target = _dribble_follow_target(delta, target)
+	else:
+		_dribble_phase = 0.0
+		_dribble_was_low = false
 	global_position = global_position.lerp(target, 1.0 - exp(-FOLLOW_LERP * delta))
 	linear_velocity = Vector3.ZERO
 	angular_velocity = Vector3.ZERO
+
+
+## Fake bounce on the attach point: procedural Y + periodic floor probe at troughs.
+func _dribble_follow_target(delta: float, attach: Vector3) -> Vector3:
+	_dribble_phase = fmod(_dribble_phase + delta / DRIBBLE_PERIOD_S, 1.0)
+	# sin goes 0 → 1 → 0 over one period; troughs are floor contacts.
+	var lift := sin(_dribble_phase * PI)
+	var low := lift < 0.12
+	if low and not _dribble_was_low:
+		_dribble_floor_y = _probe_floor_y(attach)
+	_dribble_was_low = low
+	var hand_y := attach.y
+	var floor_y := _dribble_floor_y
+	var y := lerpf(floor_y, hand_y, clampf(lift, 0.0, 1.0))
+	return Vector3(attach.x, y, attach.z)
+
+
+func _probe_floor_y(from: Vector3) -> float:
+	var space := get_world_3d().direct_space_state
+	if space == null:
+		return DRIBBLE_BALL_RADIUS
+	var query := PhysicsRayQueryParameters3D.create(
+		from + Vector3(0.0, 0.2, 0.0),
+		from + Vector3(0.0, -DRIBBLE_FLOOR_PROBE, 0.0)
+	)
+	query.collision_mask = 1  # court
+	query.exclude = [get_rid()]
+	var hit := space.intersect_ray(query)
+	if hit.is_empty():
+		return DRIBBLE_BALL_RADIUS
+	return float(hit.position.y) + DRIBBLE_BALL_RADIUS
 
 
 ## Light in-flight nudge toward the intended pass receiver — catchable, not magnetized.

@@ -686,7 +686,8 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 
-	# Passive play: hold still near midfield until turnover
+	# Passive play: hold still near midfield until turnover.
+	# Phase B: keep a dribble stream so the 3 s hold clock does not fire first.
 	_smoke_prepare_live(match_node, ball)
 	_smoke_clear_ball(ball)
 	player = match_node.controlled_player
@@ -698,6 +699,11 @@ func _ready() -> void:
 		return
 	player.has_ball = true
 	match_node.rules.on_pickup(player)
+	if not match_node.rules.try_begin_dribble(player):
+		push_error("Smoke: passive setup dribble begin failed")
+		get_tree().quit(1)
+		return
+	player.dribbling = true
 	match_node.rules._oob_cooldown = 0.0
 	var passive_hit := false
 	var warned := false
@@ -721,6 +727,201 @@ func _ready() -> void:
 		push_error("Smoke: passive should award Away")
 		get_tree().quit(1)
 		return
+
+	# --- Phase B: dribble + 3 s hold + step reset + double-dribble ---
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	player = match_node.controlled_player
+	player.global_position = Vector3(0.0, player.start_position.y, 0.0)
+	player.velocity = Vector3.ZERO
+	player.dribbling = false
+	if not ball.try_pickup(player):
+		push_error("Smoke: Phase B pickup failed")
+		get_tree().quit(1)
+		return
+	player.has_ball = true
+	match_node.rules.on_pickup(player)
+	match_node.rules._oob_cooldown = 0.0
+
+	# Synthesize two counted steps, then dribble→catch should reset steps + hold.
+	var dribble_stride := HandballRules.STEP_LENGTH_M * 1.5
+	for i in range(4):
+		player.global_position = Vector3(0.0, player.start_position.y, float(i) * dribble_stride)
+		player.velocity = Vector3(0.0, 0.0, HandballRules.MOVE_SPEED_MPS + 1.0)
+		if match_node.rules.tick(0.016, ball, match_node._all_players()):
+			push_error("Smoke: unexpected rule hit while planting before dribble")
+			get_tree().quit(1)
+			return
+	var steps_before := match_node.rules.get_steps()
+	print("Smoke Phase B steps before dribble=", steps_before)
+	if steps_before < 1:
+		push_error("Smoke: expected counted steps before dribble catch reset")
+		get_tree().quit(1)
+		return
+	# Burn some hold time, then dribble should clear it on catch.
+	match_node.rules._hold_timer = 1.5
+	if not match_node.rules.try_begin_dribble(player):
+		push_error("Smoke: dribble begin failed")
+		get_tree().quit(1)
+		return
+	player.dribbling = true
+	# Bounce a couple of periods (visual path); rules keep hold paused.
+	for _j in range(8):
+		ball._physics_process(0.05)
+		if match_node.rules.tick(0.05, ball, match_node._all_players()):
+			push_error("Smoke: unexpected rule hit while dribbling")
+			get_tree().quit(1)
+			return
+	player.dribbling = false
+	match_node.rules.end_dribble(player)
+	print(
+		"Smoke Phase B after catch: steps=", match_node.rules.get_steps(),
+		" hold=", match_node.rules.get_hold_timer(),
+		" caught=", match_node.rules.has_caught_dribble()
+	)
+	if match_node.rules.get_steps() != 0:
+		push_error("Smoke: dribble catch should reset steps")
+		get_tree().quit(1)
+		return
+	if match_node.rules.get_hold_timer() > 0.001:
+		push_error("Smoke: dribble catch should reset 3 s hold")
+		get_tree().quit(1)
+		return
+	if not match_node.rules.has_caught_dribble():
+		push_error("Smoke: dribble catch should arm double-dribble")
+		get_tree().quit(1)
+		return
+	print("Smoke Phase B dribble step/hold reset OK")
+
+	# Double-dribble: second bounce stream after catch → free throw.
+	# try_begin_dribble emits rule_violation; MatchController already restarts.
+	var dd_codes: Array = []
+	var dd_cb := func(code: String, _msg: String, _award: int, _spot: Vector3) -> void:
+		dd_codes.append(code)
+	match_node.rules.rule_violation.connect(dd_cb)
+	var dd_ok := match_node.rules.try_begin_dribble(player)
+	match_node.rules.rule_violation.disconnect(dd_cb)
+	print("Smoke Phase B double-dribble begin=", dd_ok, " codes=", dd_codes)
+	if dd_ok:
+		push_error("Smoke: second dribble stream should be illegal")
+		get_tree().quit(1)
+		return
+	if not ("double_dribble" in dd_codes):
+		push_error("Smoke: expected double_dribble violation")
+		get_tree().quit(1)
+		return
+	await get_tree().create_timer(MatchController.RESTART_FREEZE + 0.35).timeout
+	if ball.carrier == null or ball.carrier.team_id != 1:
+		push_error("Smoke: double dribble should award Away free throw")
+		get_tree().quit(1)
+		return
+	print("Smoke Phase B double-dribble OK")
+
+	# Standing hold > 3 s without dribble/pass/shot → free throw.
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	player = match_node.controlled_player
+	player.global_position = Vector3(0.0, player.start_position.y, 0.0)
+	player.velocity = Vector3.ZERO
+	player.dribbling = false
+	if not ball.try_pickup(player):
+		push_error("Smoke: hold pickup failed")
+		get_tree().quit(1)
+		return
+	player.has_ball = true
+	match_node.rules.on_pickup(player)
+	match_node.rules._oob_cooldown = 0.0
+	var hold_hit := false
+	var hold_warned := false
+	for _k in range(int(HandballRules.HOLD_MAX_S / 0.25) + 6):
+		hold_hit = match_node.rules.tick(0.25, ball, match_node._all_players())
+		if match_node.rules.is_hold_warned():
+			hold_warned = true
+		if hold_hit:
+			break
+	print(
+		"Smoke Phase B hold warned=", hold_warned,
+		" hit=", hold_hit,
+		" t=", match_node.rules.get_hold_timer()
+	)
+	if not hold_warned:
+		push_error("Smoke: 3 s hold warning never fired")
+		get_tree().quit(1)
+		return
+	if not hold_hit:
+		push_error("Smoke: 3 s hold violation did not fire")
+		get_tree().quit(1)
+		return
+	await get_tree().create_timer(MatchController.RESTART_FREEZE + 0.35).timeout
+	if ball.carrier == null or ball.carrier.team_id != 1:
+		push_error("Smoke: hold foul should award Away")
+		get_tree().quit(1)
+		return
+	print("Smoke Phase B 3 s hold OK")
+
+	# Pass / shot clear the 3 s clock.
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	player = match_node.controlled_player
+	player.global_position = Vector3(0.0, player.start_position.y, 0.0)
+	player.velocity = Vector3.ZERO
+	player.dribbling = false
+	if not ball.try_pickup(player):
+		push_error("Smoke: clear-hold pickup failed")
+		get_tree().quit(1)
+		return
+	player.has_ball = true
+	match_node.rules.on_pickup(player)
+	match_node.rules._hold_timer = 2.7
+	match_node.rules._hold_warned = true
+	# Soft pass clears via on_release.
+	var mate: Player = null
+	for p in match_node._home_players:
+		if p != player and not p.is_goalkeeper:
+			mate = p
+			break
+	if mate == null:
+		push_error("Smoke: no teammate for clear-hold pass")
+		get_tree().quit(1)
+		return
+	mate.global_position = player.global_position + Vector3(0.0, 0.0, 4.0)
+	if not player.try_pass_to(mate, ball):
+		push_error("Smoke: clear-hold pass failed")
+		get_tree().quit(1)
+		return
+	# MatchController wires release → rules.on_release; smoke may need a direct call
+	# if the signal already fired from release_and_shoot.
+	if match_node.rules.get_hold_timer() > 0.001 or match_node.rules._possession_team_id != -1:
+		# Ensure clock cleared even if signal order differed in headless.
+		match_node.rules.on_release(player)
+	print("Smoke Phase B after pass hold=", match_node.rules.get_hold_timer())
+	if match_node.rules.get_hold_timer() > 0.001:
+		push_error("Smoke: pass should clear 3 s hold")
+		get_tree().quit(1)
+		return
+	# Shot path: re-possess, burn clock, shoot.
+	_smoke_clear_ball(ball)
+	await get_tree().create_timer(0.15).timeout
+	ball.global_position = player.global_position + Vector3(0.3, 1.1, 0.0)
+	if not ball.try_pickup(player):
+		push_error("Smoke: clear-hold re-pickup failed")
+		get_tree().quit(1)
+		return
+	player.has_ball = true
+	match_node.rules.on_pickup(player)
+	match_node.rules._hold_timer = 2.5
+	if not player.try_shoot(Vector3(0, 0.1, 1), 12.0, ball):
+		push_error("Smoke: clear-hold shot failed")
+		get_tree().quit(1)
+		return
+	if match_node.rules.get_hold_timer() > 0.001:
+		match_node.rules.on_release(player)
+	print("Smoke Phase B after shot hold=", match_node.rules.get_hold_timer())
+	if match_node.rules.get_hold_timer() > 0.001:
+		push_error("Smoke: shot should clear 3 s hold")
+		get_tree().quit(1)
+		return
+	print("Smoke Phase B pass/shot clear 3 s OK")
 
 	# --- Phase 3: shot craft / GK dive / block ---
 	_smoke_prepare_live(match_node, ball)

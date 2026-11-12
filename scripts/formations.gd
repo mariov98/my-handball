@@ -163,7 +163,7 @@ static func kickoff_slot(player: Player, kickoff_team_id: int) -> Vector3:
 ## Set-piece placement for Phase 2 restart codes.
 ## Returns { "taker": Vector3, "yaw": float } extras live on the caller's placement pass.
 static func is_free_throw_code(code: String) -> bool:
-	return code in ["traveling", "passive", "goal_area", "free_throw"]
+	return code in ["traveling", "passive", "goal_area", "free_throw", "hold", "double_dribble"]
 
 
 ## Place one player for a restart. `taker` is the player who receives the ball.
