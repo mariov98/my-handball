@@ -10,9 +10,25 @@ const GOAL_WIDTH := 3.0
 const GOAL_HEIGHT := 2.0
 const GOAL_DEPTH := 1.0
 const GOAL_AREA_RADIUS := 6.0
+## 7 m penalty mark distance from the goal end line (IHF).
+const SEVEN_METER_M := 7.0
 ## Soft out-of-bounds just inside the wall colliders (capsule/ball centers).
 const OOB_HALF_WIDTH := 9.55
 const OOB_HALF_LENGTH := 19.6
+
+
+## Center of the 7 m penalty mark for the given defending team.
+static func seven_meter_spot(defending_team_id: int) -> Vector3:
+	var end_z := -HALF_LENGTH if defending_team_id == 0 else HALF_LENGTH
+	var toward_mid := 1.0 if defending_team_id == 0 else -1.0
+	return Vector3(0.0, 0.0, end_z + toward_mid * SEVEN_METER_M)
+
+
+## Sideline bench parking for a 2-min exclusion (lite). `slot` spreads multiple exclusions.
+static func bench_marker(team_id: int, slot: int = 0) -> Vector3:
+	var side := -1.0 if team_id == 0 else 1.0
+	var z_base := -6.0 if team_id == 0 else 6.0
+	return Vector3(side * (HALF_WIDTH - 0.55), 0.0, z_base + float(slot) * 1.35)
 
 
 ## True if `pos` is inside the defending team's 6 m goal area (semicircle approx).
@@ -145,11 +161,24 @@ func _build_lines() -> void:
 	dashed.albedo_color = Color(0.92, 0.92, 0.9)
 	_add_line_box(lines, Vector3(GOAL_WIDTH + 9.0, 0.02, 0.07), Vector3(0, 0.01, -HALF_LENGTH + 9.0), dashed)
 	_add_line_box(lines, Vector3(GOAL_WIDTH + 9.0, 0.02, 0.07), Vector3(0, 0.01, HALF_LENGTH - 9.0), dashed)
+	# 7 m penalty marks (short cross at each end) — Phase D set piece.
+	var seven_mat := line_mat.duplicate() as StandardMaterial3D
+	seven_mat.albedo_color = Color(1.0, 0.95, 0.75)
+	seven_mat.emission = Color(0.95, 0.85, 0.45)
+	seven_mat.emission_energy_multiplier = 0.35
+	_add_seven_meter_mark(lines, seven_meter_spot(0), seven_mat)
+	_add_seven_meter_mark(lines, seven_meter_spot(1), seven_mat)
 	# Center circle hint
 	_add_line_box(lines, Vector3(3.6, 0.015, 0.08), Vector3(0, 0.012, 1.8), line_mat)
 	_add_line_box(lines, Vector3(3.6, 0.015, 0.08), Vector3(0, 0.012, -1.8), line_mat)
 	_add_line_box(lines, Vector3(0.08, 0.015, 3.6), Vector3(1.8, 0.012, 0), line_mat)
 	_add_line_box(lines, Vector3(0.08, 0.015, 3.6), Vector3(-1.8, 0.012, 0), line_mat)
+
+
+func _add_seven_meter_mark(parent: Node3D, pos: Vector3, mat: Material) -> void:
+	# Small cross so the 7 m spot reads clearly from the elevated camera.
+	_add_line_box(parent, Vector3(0.9, 0.025, 0.08), Vector3(pos.x, 0.015, pos.z), mat)
+	_add_line_box(parent, Vector3(0.08, 0.025, 0.9), Vector3(pos.x, 0.015, pos.z), mat)
 
 
 func _add_line_box(parent: Node3D, size: Vector3, pos: Vector3, mat: Material) -> void:

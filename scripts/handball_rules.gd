@@ -5,6 +5,7 @@ class_name HandballRules
 ## steps, passive play, OOB, and goal-area violations and reports when they fire.
 ## Phase B: 3 s hold + dribble stream (step/hold reset on catch) + double-dribble lite.
 ## Phase C: IHF-inspired passive hybrid — progress/tempo warns, then pass-count.
+## Phase D: contact lite during shoot/pass windup → FT / heuristic 7 m (+ exclusion flag).
 
 signal rule_warning(code: String, message: String)
 signal rule_violation(code: String, message: String, awarding_team_id: int, spot: Vector3)
@@ -36,8 +37,28 @@ const OOB_COOLDOWN_S := 0.4
 const HOLD_MAX_S := 3.0
 const HOLD_WARN_S := 2.4
 
+## Phase D contact lite (tunable / exportable feel knobs).
+## Defender reach-in / body-check volume while attacker windups near 6–9 m.
+const CONTACT_REACH_M := 1.05
+## Arc band from defending goal end where contact during windup is a foul.
+const FOUL_ARC_MIN_M := 6.0
+const FOUL_ARC_MAX_M := 9.5
+## Clear-chance heuristic: airborne shooter inside this distance → 7 m.
+## Approx (not full IHF referee judgment) — documented in README.
+const CLEAR_CHANCE_DIST_M := 8.0
+## Brief overlap before whistle (arcade bump feel; keep low).
+const CONTACT_HOLD_S := 0.04
+## Dot of defender direction vs carrier facing; ≤ this = behind/side (not front).
+const BEHIND_SIDE_DOT := 0.28
+## When true, seven_m fouls set last_foul_warrants_exclusion for MatchController.
+const EXCLUDE_ON_SEVEN_M := true
+
 var enabled: bool = true
 var last_touch_team_id: int = 0
+## Last defender who committed a contact foul (MatchController reads for exclusion).
+var last_fouler: Player = null
+## True when the latest contact foul should trigger a 2-min exclusion lite.
+var last_foul_warrants_exclusion: bool = false
 
 var _steps: int = 0
 var _step_accum: float = 0.0
@@ -69,6 +90,11 @@ var _area_timers: Dictionary = {} ## player instance_id -> float
 var _oob_cooldown: float = 0.0
 var _lockout: bool = false ## true while MatchController runs a restart
 
+## Phase D: MatchController sets while shoot charge / pass act is live.
+var _windup_active: bool = false
+var _windup_is_shot: bool = false
+var _contact_timers: Dictionary = {} ## defender instance_id -> float
+
 
 func reset_possession_tracking() -> void:
 	_steps = 0
@@ -82,6 +108,11 @@ func reset_possession_tracking() -> void:
 	_possession_team_id = -1
 	_reset_hold_and_dribble()
 	_area_timers.clear()
+	_contact_timers.clear()
+	_windup_active = false
+	_windup_is_shot = false
+	last_fouler = null
+	last_foul_warrants_exclusion = false
 
 
 func begin_lockout() -> void:
@@ -92,6 +123,26 @@ func begin_lockout() -> void:
 func end_lockout() -> void:
 	_lockout = false
 	_oob_cooldown = OOB_COOLDOWN_S
+
+
+## Call each frame from MatchController: shoot charge and/or pass act.
+func set_windup(active: bool, is_shot: bool = true) -> void:
+	_windup_active = active
+	_windup_is_shot = is_shot if active else false
+	if not active:
+		_contact_timers.clear()
+
+
+## Instant pass-act probe (pass has no charge window). Returns true if foul emitted.
+func probe_pass_act_contact(ball: Ball, players: Array[Player]) -> bool:
+	if not enabled or _lockout or ball == null or ball.carrier == null:
+		return false
+	if ball.carrier.is_goalkeeper:
+		return false
+	set_windup(true, false)
+	var hit := _evaluate_contact(ball.carrier, players, true)
+	set_windup(false, false)
+	return hit
 
 
 func on_pickup(player: Player) -> void:
@@ -281,6 +332,10 @@ func tick(delta: float, ball: Ball, players: Array[Player]) -> bool:
 			_is_dribbling = true
 		elif not carrier.dribbling and _is_dribbling:
 			end_dribble(carrier)
+		# Contact during shoot/pass windup near the arc (Phase D) — before hold/steps.
+		if _windup_active and not carrier.is_goalkeeper:
+			if _tick_contact(delta, carrier, players):
+				return true
 		if _tick_hold(delta, carrier):
 			return true
 		if _tick_steps(delta, carrier):
@@ -296,6 +351,7 @@ func tick(delta: float, ball: Ball, players: Array[Player]) -> bool:
 		_stop_timer = 0.0
 		_steps_warned = false
 		_reset_hold_and_dribble()
+		_contact_timers.clear()
 
 	if _tick_oob(ball, carrier):
 		return true
@@ -535,3 +591,128 @@ func _free_throw_spot(near: Vector3, awarding_team_id: int) -> Vector3:
 	if absf(spot.z) > 14.0:
 		spot.z = clampf(spot.z - mid_sign * 0.5, -16.5, 16.5)
 	return spot
+
+
+func _tick_contact(delta: float, carrier: Player, players: Array[Player]) -> bool:
+	# Accumulate overlap, then whistle (arcade bump → FT / 7 m).
+	var fouler := _find_contact_fouler(carrier, players)
+	if fouler == null:
+		_contact_timers.clear()
+		return false
+	var id := fouler.get_instance_id()
+	var t: float = float(_contact_timers.get(id, 0.0)) + delta
+	_contact_timers[id] = t
+	# Drop timers for other defenders so a brush doesn't linger.
+	for key in _contact_timers.keys():
+		if int(key) != id:
+			_contact_timers.erase(key)
+	if t < CONTACT_HOLD_S:
+		return false
+	return _emit_contact_foul(carrier, fouler)
+
+
+## Immediate evaluate (pass act / smoke). Skips the short hold when `instant`.
+func _evaluate_contact(carrier: Player, players: Array[Player], instant: bool) -> bool:
+	var fouler := _find_contact_fouler(carrier, players)
+	if fouler == null:
+		return false
+	if not instant:
+		var id := fouler.get_instance_id()
+		_contact_timers[id] = CONTACT_HOLD_S
+	return _emit_contact_foul(carrier, fouler)
+
+
+func _find_contact_fouler(carrier: Player, players: Array[Player]) -> Player:
+	if carrier == null or not _in_attack_foul_zone(carrier.global_position, carrier.team_id):
+		return null
+	var best: Player = null
+	var best_d := INF
+	for p in players:
+		if p == null or p == carrier or p.is_goalkeeper:
+			continue
+		if p.team_id == carrier.team_id:
+			continue
+		# Excluded defenders are off the court.
+		if p.excluded:
+			continue
+		var d := _planar_distance(carrier.global_position, p.global_position)
+		if d > CONTACT_REACH_M:
+			continue
+		if d < best_d:
+			best_d = d
+			best = p
+	return best
+
+
+func _emit_contact_foul(carrier: Player, fouler: Player) -> bool:
+	last_fouler = fouler
+	last_foul_warrants_exclusion = false
+	var award := carrier.team_id
+	var dist_goal := _dist_to_defend_goal(carrier.global_position, 1 - carrier.team_id)
+	var behind_side := _is_contact_from_behind_or_side(carrier, fouler)
+	# Clear-chance heuristic (approx): airborne shooter inside ~8 m + contact behind/side.
+	# Height/up-velocity count even if floor contact is sticky after a teleport frame.
+	var airborne_shot := (
+		_is_airborne(carrier)
+		or carrier.global_position.y > 0.85
+		or carrier.velocity.y > 1.0
+	)
+	var clear_chance := (
+		_windup_is_shot
+		and airborne_shot
+		and dist_goal <= CLEAR_CHANCE_DIST_M
+		and behind_side
+	)
+	if clear_chance:
+		last_foul_warrants_exclusion = EXCLUDE_ON_SEVEN_M
+		var spot := Court.seven_meter_spot(1 - award)
+		rule_violation.emit(
+			"seven_m",
+			"7 m — clear chance (heuristic)",
+			award,
+			spot
+		)
+		return true
+	# Default arcade path: free throw at foul spot.
+	var ft := Court.clamp_to_court_xz(carrier.global_position, 1.0)
+	ft = _free_throw_spot(ft, award)
+	rule_violation.emit("foul", "Foul — free throw", award, ft)
+	return true
+
+
+func _in_attack_foul_zone(pos: Vector3, attack_team_id: int) -> bool:
+	var defend_team := 1 - attack_team_id
+	var dist := _dist_to_defend_goal(pos, defend_team)
+	return dist >= FOUL_ARC_MIN_M and dist <= FOUL_ARC_MAX_M
+
+
+func _dist_to_defend_goal(pos: Vector3, defending_team_id: int) -> float:
+	var end_z := -Court.HALF_LENGTH if defending_team_id == 0 else Court.HALF_LENGTH
+	var nearest_x := clampf(pos.x, -Court.GOAL_WIDTH * 0.5, Court.GOAL_WIDTH * 0.5)
+	var dx := pos.x - nearest_x
+	var dz := pos.z - end_z
+	return sqrt(dx * dx + dz * dz)
+
+
+func _is_contact_from_behind_or_side(carrier: Player, defender: Player) -> bool:
+	var face := carrier.face_direction()
+	face.y = 0.0
+	if face.length_squared() < 0.0001:
+		face = Vector3(0.0, 0.0, 1.0 if carrier.team_id == 0 else -1.0)
+	else:
+		face = face.normalized()
+	var to_def := Vector3(
+		defender.global_position.x - carrier.global_position.x,
+		0.0,
+		defender.global_position.z - carrier.global_position.z
+	)
+	if to_def.length_squared() < 0.0001:
+		return true
+	to_def = to_def.normalized()
+	return face.dot(to_def) <= BEHIND_SIDE_DOT
+
+
+func _planar_distance(a: Vector3, b: Vector3) -> float:
+	var dx := a.x - b.x
+	var dz := a.z - b.z
+	return sqrt(dx * dx + dz * dz)

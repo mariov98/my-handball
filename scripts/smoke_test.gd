@@ -1377,6 +1377,189 @@ func _ready() -> void:
 		return
 	print("Smoke cycle switch OK")
 
+	# --- Phase D: contact lite → FT / 7 m / exclusion ---
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	# Clear any leftover exclusions from prior tests.
+	for p in match_node._all_players():
+		p.excluded = false
+		p.exclusion_remaining = 0.0
+		p.visible = true
+	match_node.exclusion_on_seven_m = true
+	match_node.exclusion_seconds = 3.0
+	match_node._configure_ai()
+
+	# 7 m marks exist on court.
+	var seven_home := Court.seven_meter_spot(0)
+	var seven_away := Court.seven_meter_spot(1)
+	print("Smoke 7m spots home=", seven_home, " away=", seven_away)
+	if absf(seven_away.z - 13.0) > 0.01 or absf(seven_home.z + 13.0) > 0.01:
+		push_error("Smoke: 7 m spots should sit 7 m inside each end (z=±13)")
+		get_tree().quit(1)
+		return
+
+	# Contact during shoot windup near arc (grounded) → free throw (foul).
+	player = match_node._first_outfield(match_node._home_players)
+	match_node._set_controlled(player)
+	player.global_position = Vector3(0.5, player.start_position.y, 12.0)
+	player.rotation.y = 0.0
+	player.velocity = Vector3.ZERO
+	var foul_def: Player = null
+	for p in match_node._away_players:
+		if not p.is_goalkeeper:
+			foul_def = p
+			break
+	if foul_def == null:
+		push_error("Smoke: no away defender for foul")
+		get_tree().quit(1)
+		return
+	# Side contact inside reach, in 6–9 m band.
+	foul_def.global_position = player.global_position + Vector3(0.7, 0.0, 0.15)
+	foul_def.velocity = Vector3.ZERO
+	foul_def.match_frozen = true
+	foul_def.ai_enabled = false
+	if not ball.try_pickup(player):
+		push_error("Smoke: Phase D foul pickup failed")
+		get_tree().quit(1)
+		return
+	player.has_ball = true
+	match_node.rules.on_pickup(player)
+	match_node.rules.set_windup(true, true)
+	var foul_codes: Array = []
+	var foul_cb := func(code: String, _msg: String, _award: int, _spot: Vector3) -> void:
+		foul_codes.append(code)
+	match_node.rules.rule_violation.connect(foul_cb)
+	var foul_hit := false
+	for _i in range(6):
+		foul_hit = match_node.rules.tick(0.02, ball, match_node._all_players())
+		if foul_hit:
+			break
+	match_node.rules.rule_violation.disconnect(foul_cb)
+	match_node.rules.set_windup(false)
+	print("Smoke Phase D foul hit=", foul_hit, " codes=", foul_codes)
+	if not foul_hit or not ("foul" in foul_codes):
+		push_error("Smoke: contact during windup near arc should free-throw (foul)")
+		get_tree().quit(1)
+		return
+	await get_tree().create_timer(MatchController.RESTART_FREEZE + 0.35).timeout
+	if match_node.match_state != MatchController.MatchState.LIVE:
+		push_error("Smoke: expected LIVE after foul free throw")
+		get_tree().quit(1)
+		return
+	if ball.carrier == null or ball.carrier.team_id != 0:
+		push_error("Smoke: foul should award Home free throw")
+		get_tree().quit(1)
+		return
+	print("Smoke Phase D contact → FT OK")
+
+	# Clear-chance heuristic: airborne shooter inside ~8 m + behind/side → 7 m.
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	for p in match_node._all_players():
+		p.excluded = false
+		p.exclusion_remaining = 0.0
+	player = match_node._first_outfield(match_node._home_players)
+	match_node._set_controlled(player)
+	# Inside 8 m of away goal (end z=20): place at z≈13.5 → dist≈6.5.
+	player.global_position = Vector3(0.2, 1.35, 13.5)
+	player.rotation.y = 0.0
+	player.velocity = Vector3(0.0, 2.5, 0.0)
+	var pen_def: Player = null
+	for p in match_node._away_players:
+		if not p.is_goalkeeper:
+			pen_def = p
+			break
+	# Behind the shooter (negative Z relative to facing +Z).
+	pen_def.global_position = player.global_position + Vector3(0.15, 0.0, -0.75)
+	pen_def.global_position.y = pen_def.start_position.y
+	pen_def.velocity = Vector3.ZERO
+	pen_def.match_frozen = true
+	pen_def.ai_enabled = false
+	await get_tree().physics_frame
+	if not ball.try_pickup(player):
+		push_error("Smoke: Phase D 7m pickup failed")
+		get_tree().quit(1)
+		return
+	player.has_ball = true
+	match_node.rules.on_pickup(player)
+	# Re-assert airborne after pickup teleports ball attach.
+	player.global_position.y = 1.4
+	player.velocity.y = 2.0
+	match_node.rules.set_windup(true, true)
+	var seven_codes: Array = []
+	var seven_cb := func(code: String, _msg: String, _award: int, _spot: Vector3) -> void:
+		seven_codes.append(code)
+	match_node.rules.rule_violation.connect(seven_cb)
+	var seven_hit := false
+	for _j in range(8):
+		player.global_position.y = 1.4
+		player.velocity.y = 2.0
+		seven_hit = match_node.rules.tick(0.02, ball, match_node._all_players())
+		if seven_hit:
+			break
+	match_node.rules.rule_violation.disconnect(seven_cb)
+	match_node.rules.set_windup(false)
+	print(
+		"Smoke Phase D 7m hit=", seven_hit, " codes=", seven_codes,
+		" air=", match_node.rules._is_airborne(player),
+		" dist=", match_node.rules._dist_to_defend_goal(player.global_position, 1)
+	)
+	if not seven_hit or not ("seven_m" in seven_codes):
+		push_error("Smoke: clear-chance contact should award 7 m")
+		get_tree().quit(1)
+		return
+	await get_tree().create_timer(MatchController.RESTART_FREEZE + 0.4).timeout
+	var seven_spot := Court.seven_meter_spot(1)
+	if ball.carrier == null or ball.carrier.team_id != 0:
+		push_error("Smoke: 7 m should award Home taker")
+		get_tree().quit(1)
+		return
+	if ball.carrier.global_position.distance_to(seven_spot) > 1.4:
+		push_error("Smoke: 7 m taker should stand on the 7 m mark")
+		get_tree().quit(1)
+		return
+	# Only defending GK may stay near the goal — outfield defenders outside ~9 m.
+	var away_gk := match_node._goalkeeper_for(1)
+	for p in match_node._away_players:
+		if p.is_goalkeeper or p.excluded:
+			continue
+		var d_goal := match_node.rules._dist_to_defend_goal(p.global_position, 1)
+		if d_goal < Formations.FREE_THROW_LINE_M - 0.5:
+			push_error("Smoke: defending outfield must clear outside 9 m on 7 m")
+			get_tree().quit(1)
+			return
+	if away_gk == null or away_gk.global_position.distance_to(away_gk.start_position) > 2.5:
+		push_error("Smoke: defending GK should stay on the line for 7 m")
+		get_tree().quit(1)
+		return
+	# Exclusion lite: fouler benched.
+	if not pen_def.excluded:
+		push_error("Smoke: 7 m clear-chance should exclude the fouler")
+		get_tree().quit(1)
+		return
+	var bench := Court.bench_marker(pen_def.team_id, maxi(0, pen_def.player_index - 1))
+	if pen_def.global_position.distance_to(bench) > 1.5:
+		push_error("Smoke: excluded player should sit on bench marker")
+		get_tree().quit(1)
+		return
+	if pen_def.ai_enabled:
+		push_error("Smoke: excluded player must have ai_enabled=false")
+		get_tree().quit(1)
+		return
+	print("Smoke Phase D 7m placement + GK-only + exclusion OK")
+
+	# Exclusion expires on short timer.
+	pen_def.exclusion_remaining = 0.05
+	match_node.match_state = MatchController.MatchState.LIVE
+	match_node._set_players_frozen(false)
+	for _k in range(8):
+		match_node._tick_exclusions(0.02)
+	if pen_def.excluded:
+		push_error("Smoke: exclusion should end when timer elapses")
+		get_tree().quit(1)
+		return
+	print("Smoke Phase D exclusion return OK")
+
 	# --- Phase 5 presentation ---
 	if ball.get_node_or_null("BallTrail") == null and ball._trail == null:
 		push_error("Smoke: ball trail missing")

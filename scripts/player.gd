@@ -67,6 +67,9 @@ var match_frozen: bool = false
 var diving: bool = false
 ## Brief window after dive / raise where blocks are sticky.
 var block_ready: bool = false
+## Phase D: 2-min exclusion lite — parked at bench, AI off until MatchController restores.
+var excluded: bool = false
+var exclusion_remaining: float = 0.0
 
 var _bob_phase: float = 0.0
 var _pickup_block: float = 0.0
@@ -139,7 +142,12 @@ func _physics_process(delta: float) -> void:
 		velocity.y -= ProjectSettings.get_setting("physics/3d/default_gravity") * delta
 
 	var wish := Vector3.ZERO
-	if match_frozen:
+	if excluded:
+		# Sit on the bench marker — no movement / AI while excluded.
+		wish = Vector3.ZERO
+		velocity.x = 0.0
+		velocity.z = 0.0
+	elif match_frozen:
 		wish = Vector3.ZERO
 	elif diving:
 		wish = Vector3.ZERO
@@ -258,6 +266,9 @@ func reset_to_start() -> void:
 	_dive_cd = 0.0
 	_block_timer = 0.0
 	block_ready = false
+	excluded = false
+	exclusion_remaining = 0.0
+	visible = true
 	_set_dive_pose(false)
 	if _mesh:
 		_mesh.position.y = _mesh_base_y

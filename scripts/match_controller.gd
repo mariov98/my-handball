@@ -2,7 +2,7 @@ extends Node3D
 class_name MatchController
 
 ## Routes input, possession, team switch, scoring, clock, kickoff, AI, Phase 2–4
-## rules/tactics, and Phase 5 presentation (materials / trail / goal juice).
+## rules/tactics, Phase 5 presentation, and Phase D contact / 7 m / exclusion lite.
 
 enum AimMode { FACE, MOUSE_COURT }
 enum MatchState { PRE_KICKOFF, LIVE, GOAL_PAUSE, PERIOD_BREAK, MATCH_OVER, RULE_RESTART }
@@ -27,6 +27,10 @@ const PASS_IMPULSE_MAX := 13.0
 ## Sandbox default: 2 minutes per half. Raise toward 1800 for full IHF halves later.
 @export var period_length_seconds: float = 120.0
 @export var periods_total: int = 2
+## Phase D: 2-min exclusion lite duration (match-clock seconds). Tunable.
+@export var exclusion_seconds: float = 120.0
+## When true, clear-chance → 7 m also benches the fouler for exclusion_seconds.
+@export var exclusion_on_seven_m: bool = true
 
 var aim_mode: AimMode = AimMode.FACE
 var controlled_player: Player = null
@@ -69,7 +73,7 @@ func _ready() -> void:
 	camera_rig.setup(ball, true)
 	_refresh_hud()
 	print(
-		"MyHandball Phase B dribble/hold ready. Period=%ds x%d. Dribble hold V/R3; Pass RMB/G/RB."
+		"MyHandball Phase D contact/7m ready. Period=%ds x%d. Dribble V/R3; Pass RMB/G/RB."
 		% [int(period_length_seconds), periods_total]
 	)
 	var user_args := OS.get_cmdline_user_args()
@@ -180,15 +184,15 @@ func _configure_ai() -> void:
 	for p in _home_players:
 		p.match_ball = ball
 		# Phase 4: uncontrolled home teammates hold formation slots (off-ball AI).
-		p.ai_enabled = p != controlled_player
+		p.ai_enabled = (not p.excluded) and p != controlled_player
 	for p in _away_players:
 		p.match_ball = ball
-		p.ai_enabled = true
+		p.ai_enabled = not p.excluded
 
 
 func _refresh_home_ai() -> void:
 	for p in _home_players:
-		p.ai_enabled = p != controlled_player
+		p.ai_enabled = (not p.excluded) and p != controlled_player
 		p.match_ball = ball
 
 
@@ -260,9 +264,13 @@ func _physics_process(delta: float) -> void:
 	clock_remaining = maxf(0.0, clock_remaining - delta)
 	if hud and hud.has_method("set_clock"):
 		hud.set_clock(clock_remaining)
+	_tick_exclusions(delta)
 	_update_rules_hud()
 	_update_shot_hud()
+	# Phase D: shoot charge counts as windup for contact fouls near the arc.
+	rules.set_windup(_charging and controlled_player != null and controlled_player.has_ball, true)
 	if rules.tick(delta, ball, _all_players()):
+		rules.set_windup(false)
 		return
 	if clock_remaining <= 0.0:
 		_on_period_expired()
@@ -368,14 +376,18 @@ func _cycle_teammate() -> void:
 	var roster := _home_players if controlled_team_id == 0 else _away_players
 	if roster.size() < 2:
 		return
-	# Cycle: next roster index (wrap), skipping nobody — readable team control.
+	# Cycle: next roster index (wrap), skipping excluded players.
 	var start_i := 0
 	for i in range(roster.size()):
 		if roster[i] == controlled_player:
 			start_i = i
 			break
-	var next_i := (start_i + 1) % roster.size()
-	_set_controlled(roster[next_i])
+	for step in range(1, roster.size() + 1):
+		var next_i := (start_i + step) % roster.size()
+		if roster[next_i].excluded:
+			continue
+		_set_controlled(roster[next_i])
+		return
 
 
 ## Switch-to-best: ball nearest / open receiver / best defender (Phase 4).
@@ -460,6 +472,9 @@ func _try_pass() -> void:
 	if _charging:
 		_cancel_charge()
 	_pass_suppress_shoot = true
+	# Phase D: pass act can still draw a contact foul near 6–9 m (FT, not 7 m).
+	if rules.probe_pass_act_contact(ball, _all_players()):
+		return
 	var aim_hint := _compute_aim(false)
 	aim_hint.y = 0.0
 	if aim_hint.length_squared() < 0.01:
@@ -647,6 +662,15 @@ func _on_rule_violation(code: String, message: String, awarding_team_id: int, sp
 	print("RULE [%s]: %s → team %d @ %s" % [code, message, awarding_team_id, str(spot)])
 	if hud and hud.has_method("flash_rule"):
 		hud.flash_rule(message, code)
+	# Phase D: optional 2-min exclusion on clear-chance 7 m.
+	if (
+		code == "seven_m"
+		and exclusion_on_seven_m
+		and rules.last_foul_warrants_exclusion
+		and rules.last_fouler != null
+		and is_instance_valid(rules.last_fouler)
+	):
+		_begin_exclusion(rules.last_fouler)
 	# Fire-and-forget async restart (same pattern as goal kickoff).
 	_run_rule_restart(code, message, awarding_team_id, spot)
 
@@ -669,13 +693,15 @@ func _run_rule_restart(code: String, _message: String, awarding_team_id: int, sp
 		if taker == null and not roster.is_empty():
 			taker = roster[0]
 
-	# Phase 4: place both teams into set-piece shape (9 m wall / throw-in lanes).
+	# Phase 4/D: place both teams into set-piece shape (9 m wall / 7 m / throw-in).
 	_place_set_piece(code, awarding_team_id, spot, taker)
 
 	if taker:
 		var face_yaw := 0.0 if awarding_team_id == 0 else PI
 		if code == "throw_in":
 			face_yaw = -PI * 0.5 if spot.x > 0.0 else PI * 0.5
+		elif Formations.is_seven_meter_code(code):
+			face_yaw = 0.0 if awarding_team_id == 0 else PI
 		elif Formations.is_free_throw_code(code):
 			face_yaw = Formations.free_throw_taker_yaw(awarding_team_id, spot)
 		taker.rotation.y = face_yaw
@@ -714,19 +740,30 @@ func _run_rule_restart(code: String, _message: String, awarding_team_id: int, sp
 func _place_set_piece(code: String, awarding_team_id: int, spot: Vector3, taker: Player) -> void:
 	for p in _all_players():
 		var place := Formations.set_piece_slot(p, code, awarding_team_id, spot, taker)
+		if p.excluded:
+			place = Court.bench_marker(p.team_id, maxi(0, p.player_index - 1))
 		p.global_position = place
 		p.velocity = Vector3.ZERO
 		var face := 0.0 if p.team_id == 0 else PI
 		if code == "throw_in":
 			face = -PI * 0.5 if spot.x > 0.0 else PI * 0.5
+		elif Formations.is_seven_meter_code(code):
+			if p == taker or p.team_id == awarding_team_id:
+				face = 0.0 if awarding_team_id == 0 else PI
+			elif p.is_goalkeeper:
+				face = PI if awarding_team_id == 0 else 0.0
+			else:
+				var to_spot := spot - p.global_position
+				if to_spot.length_squared() > 0.01:
+					face = atan2(to_spot.x, to_spot.z)
 		elif Formations.is_free_throw_code(code):
 			if p.team_id == awarding_team_id:
 				face = Formations.free_throw_taker_yaw(awarding_team_id, spot)
 			else:
 				# Wall faces the taker / midfield.
-				var to_spot := spot - p.global_position
-				if to_spot.length_squared() > 0.01:
-					face = atan2(to_spot.x, to_spot.z)
+				var to_spot2 := spot - p.global_position
+				if to_spot2.length_squared() > 0.01:
+					face = atan2(to_spot2.x, to_spot2.z)
 		p.rotation.y = face
 	# Teleports skip physics — nudge any stacked capsules apart.
 	_resolve_player_overlaps(taker)
@@ -762,13 +799,76 @@ func _nearest_outfield(team_id: int, spot: Vector3) -> Player:
 	var best: Player = null
 	var best_d := INF
 	for p in roster:
-		if p.is_goalkeeper:
+		if p.is_goalkeeper or p.excluded:
 			continue
 		var d := p.global_position.distance_squared_to(spot)
 		if d < best_d:
 			best_d = d
 			best = p
 	return best
+
+
+## Phase D: park fouler on the bench with AI off for exclusion_seconds of match clock.
+func _begin_exclusion(fouler: Player) -> void:
+	if fouler == null or fouler.is_goalkeeper:
+		return
+	fouler.excluded = true
+	fouler.exclusion_remaining = exclusion_seconds
+	fouler.ai_enabled = false
+	fouler.controlled = false
+	fouler.has_ball = false
+	fouler.dribbling = false
+	fouler.velocity = Vector3.ZERO
+	fouler.global_position = Court.bench_marker(fouler.team_id, maxi(0, fouler.player_index - 1))
+	if controlled_player == fouler:
+		var fallback := _nearest_outfield(fouler.team_id, fouler.global_position)
+		if fallback == null:
+			fallback = _first_outfield(_home_players if fouler.team_id == 0 else _away_players)
+		if fallback:
+			_set_controlled(fallback)
+	_configure_ai()
+	print(
+		"EXCLUSION lite: %s benched for %.0fs"
+		% [fouler.name, exclusion_seconds]
+	)
+	if hud and hud.has_method("flash_rule"):
+		hud.flash_rule("2 min exclusion", "exclusion")
+
+
+func _tick_exclusions(delta: float) -> void:
+	for p in _all_players():
+		if not p.excluded:
+			continue
+		p.exclusion_remaining = maxf(0.0, p.exclusion_remaining - delta)
+		# Keep parked on the bench while the clock runs.
+		var bench := Court.bench_marker(p.team_id, maxi(0, p.player_index - 1))
+		p.global_position = bench
+		p.velocity = Vector3.ZERO
+		p.ai_enabled = false
+		if p.exclusion_remaining <= 0.0:
+			_end_exclusion(p)
+
+
+func _end_exclusion(player: Player) -> void:
+	if player == null:
+		return
+	player.excluded = false
+	player.exclusion_remaining = 0.0
+	# Re-enter outside own crease near mid of own half.
+	var face := 1.0 if player.team_id == 0 else -1.0
+	var slot := Vector3(
+		clampf(player.start_position.x, -6.0, 6.0),
+		0.0,
+		face * -4.0
+	)
+	slot = Court.clamp_to_court_xz(slot, 1.0)
+	if Court.in_goal_area(slot, player.team_id):
+		slot = Court.eject_from_goal_area(slot, player.team_id, 0.8)
+	player.global_position = slot
+	player.velocity = Vector3.ZERO
+	_configure_ai()
+	_refresh_home_ai()
+	print("EXCLUSION ended: %s returns" % player.name)
 
 
 func _update_rules_hud() -> void:
@@ -999,7 +1099,7 @@ func _refresh_hud() -> void:
 
 func _first_outfield(roster: Array[Player]) -> Player:
 	for p in roster:
-		if not p.is_goalkeeper:
+		if not p.is_goalkeeper and not p.excluded:
 			return p
 	return null
 
