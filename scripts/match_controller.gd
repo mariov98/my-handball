@@ -552,6 +552,9 @@ func _try_shoot_charged(held_s: float) -> void:
 	var timed := ShotCraft.apply_jump_timing(aim, impulse, jump_q)
 	aim = timed["aim"]
 	impulse = timed["impulse"]
+	# Phase F: timed sweet window stacks a small bonus on top of height sweet.
+	if controlled_player.jump_shot_active:
+		impulse = ShotCraft.apply_window_bonus(impulse, jump_q, controlled_player.jump_shot_air_s)
 	var up := ShotCraft.up_bias(lob)
 	# Jump shots naturally loft a touch more.
 	if jump_q >= 0:
@@ -561,6 +564,9 @@ func _try_shoot_charged(held_s: float) -> void:
 		"lob": lob,
 		"jump_quality": jump_q,
 		"impulse": impulse,
+		"jump_shot": controlled_player.jump_shot_active,
+		"jump_air_s": controlled_player.jump_shot_air_s,
+		"jump_phase": controlled_player.jump_shot_phase,
 	}
 	var from := controlled_player.global_position + Vector3(0, 1.2, 0)
 	if controlled_player.try_shoot(aim, impulse, ball, up, meta):
@@ -577,6 +583,7 @@ func _try_shoot() -> void:
 
 
 ## Soft pass to best teammate in the aim cone (light lead assist). Never fires a shot.
+## Pass types: flat (default) · bounce (hold B / D-pad Left) · lob (hold F / LT).
 func _try_pass() -> void:
 	if controlled_player == null or not controlled_player.has_ball:
 		return
@@ -587,25 +594,37 @@ func _try_pass() -> void:
 	# Phase D: pass act can still draw a contact foul near 6–9 m (FT, not 7 m).
 	if rules.probe_pass_act_contact(ball, _all_players()):
 		return
-	var aim_hint := _compute_aim(false)
+	var lob_held := Input.is_action_pressed("lob")
+	var bounce_held := Input.is_action_pressed("bounce_pass")
+	var pass_type := PassCraft.resolve_pass_type(lob_held, bounce_held)
+	var aim_hint := _compute_aim(pass_type == PassCraft.PassType.LOB)
 	aim_hint.y = 0.0
 	if aim_hint.length_squared() < 0.01:
 		aim_hint = controlled_player.face_direction()
 		aim_hint.y = 0.0
 	var target := _best_pass_target(controlled_player, aim_hint)
 	if target:
-		controlled_player.try_pass_to(target, ball, -1.0, aim_hint)
+		controlled_player.try_pass_to(target, ball, -1.0, aim_hint, pass_type)
 		return
 	# No open mate in cone — soft toss along aim so the action never feels dead.
 	var toss := aim_hint.normalized()
-	toss.y = 0.1
+	var loft := PassCraft.LOFT_MIN + 0.04
+	match pass_type:
+		PassCraft.PassType.LOB:
+			toss.y = 0.35
+			loft = PassCraft.LOB_LOFT_MIN
+		PassCraft.PassType.BOUNCE:
+			toss.y = -0.35
+			loft = 0.0
+		_:
+			toss.y = 0.1
 	toss = toss.normalized()
 	controlled_player.try_shoot(
 		toss,
 		PASS_IMPULSE_MIN + 0.5,
 		ball,
-		PassCraft.LOFT_MIN + 0.04,
-		{"pass": true, "charge": 0.25}
+		loft,
+		{"pass": true, "charge": 0.25, "pass_type": pass_type}
 	)
 
 
@@ -709,10 +728,16 @@ func _update_shot_hud() -> void:
 	var lob := _charging and Input.is_action_pressed("lob")
 	var jump_q := ShotCraft.jump_shot_quality(controlled_player)
 	var jump_txt := ShotCraft.jump_label(jump_q)
+	if jump_txt.is_empty() and controlled_player.jump_shot_active:
+		jump_txt = ShotCraft.jump_phase_label(controlled_player.jump_shot_phase)
 	# While charging, shot HUD owns the line; otherwise surface a clear PASS prompt.
-	hud.set_shot_status(charge, lob, jump_txt, _charging or jump_q >= 0)
+	hud.set_shot_status(charge, lob, jump_txt, _charging or jump_q >= 0 or controlled_player.jump_shot_active)
 	if hud.has_method("set_pass_hint"):
-		hud.set_pass_hint(not _charging)
+		var pass_type := PassCraft.resolve_pass_type(
+			Input.is_action_pressed("lob"),
+			Input.is_action_pressed("bounce_pass")
+		)
+		hud.set_pass_hint(not _charging, pass_type)
 
 
 func _mouse_on_court() -> Variant:

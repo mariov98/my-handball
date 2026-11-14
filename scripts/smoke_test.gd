@@ -1697,6 +1697,273 @@ func _ready() -> void:
 	match_node._sync_team_shapes()
 	print("Smoke Phase E shapes OK")
 
+	# --- Phase F: jump-shot craft / pass types / GK angle-cut+outlet / catch settle ---
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	player = match_node._first_outfield(match_node._home_players)
+	match_node._set_controlled(player)
+	player.match_frozen = false
+	player.ai_enabled = false
+
+	# Jump-shot window vs standing: craft air sweet differs from grounded -1.
+	player.global_position = Vector3(0.0, player.start_position.y, 8.0)
+	player.velocity = Vector3(0.0, 0.0, 4.0)
+	player.has_ball = true
+	ball.carrier = player
+	ball.freeze = true
+	player.jump_shot_active = false
+	player.jump_shot_air_s = 0.0
+	var q_stand := ShotCraft.jump_shot_quality(player)
+	player.jump_shot_active = true
+	player.jump_shot_air_s = 0.08
+	player.global_position.y = 0.35
+	player.velocity.y = 6.0
+	player.velocity = Vector3(0.0, 6.0, 3.0)
+	# Force off-floor for quality (teleport may still report floor).
+	for _i in range(2):
+		player.move_and_slide()
+		await get_tree().physics_frame
+	player.global_position.y = maxf(player.global_position.y, 0.45)
+	var q_early := ShotCraft.window_quality_from_air_s(0.08)
+	var q_sweet := ShotCraft.window_quality_from_air_s(0.36)
+	var q_late := ShotCraft.window_quality_from_air_s(0.70)
+	var stand_timed: Dictionary = ShotCraft.apply_jump_timing(Vector3(0, 0.1, 1), 14.0, -1)
+	var sweet_timed: Dictionary = ShotCraft.apply_jump_timing(Vector3(0, 0.1, 1), 14.0, 1)
+	var stand_imp: float = float(stand_timed["impulse"])
+	var sweet_imp: float = ShotCraft.apply_window_bonus(float(sweet_timed["impulse"]), 1, 0.36)
+	print(
+		"Smoke Phase F jump: stand_q=", q_stand,
+		" early=", q_early, " sweet=", q_sweet, " late=", q_late,
+		" stand_imp=", stand_imp, " sweet_imp=", sweet_imp
+	)
+	if q_stand != -1:
+		push_error("Smoke: grounded standing shot quality should be -1")
+		get_tree().quit(1)
+		return
+	if q_early != 0:
+		push_error("Smoke: jump-shot early window should be 0")
+		get_tree().quit(1)
+		return
+	if q_sweet != 1:
+		push_error("Smoke: jump-shot sweet window should be 1")
+		get_tree().quit(1)
+		return
+	if q_late != 2:
+		push_error("Smoke: jump-shot late window should be 2")
+		get_tree().quit(1)
+		return
+	if sweet_imp <= stand_imp:
+		push_error("Smoke: jump-shot sweet should punch harder than standing")
+		get_tree().quit(1)
+		return
+	# Plant → air state machine.
+	player.global_position = Vector3(0.0, 0.0, 8.0)
+	player.velocity = Vector3(0.0, 0.0, 5.0)
+	player._begin_jump_from_input(Vector3(0.0, 0.0, 1.0))
+	if not player.jump_shot_active or player.jump_shot_phase != ShotCraft.JumpPhase.PLANTED:
+		push_error("Smoke: approach jump with ball should plant jump-shot craft")
+		get_tree().quit(1)
+		return
+	player._js_plant_t = 0.0
+	player._tick_jump_shot_craft(0.02)
+	if player.velocity.y < Player.JUMP_VELOCITY * 0.5 and player.is_on_floor():
+		# Manually launch if floor still holding — plant end sets JUMP_VELOCITY.
+		player.velocity.y = Player.JUMP_VELOCITY
+	print("Smoke Phase F plant→jump craft OK phase=", player.jump_shot_phase)
+
+	# Pass types: flat / lob loft + bounce floor hop then catch.
+	_smoke_clear_ball(ball)
+	var home_lw_f: Player = null
+	var home_cb_f: Player = null
+	var home_rw_f: Player = null
+	for p in match_node._home_players:
+		if p.is_goalkeeper:
+			continue
+		match Formations.role_for(p):
+			Formations.Role.LEFT_WING:
+				home_lw_f = p
+			Formations.Role.CENTER_BACK:
+				home_cb_f = p
+			Formations.Role.RIGHT_WING:
+				home_rw_f = p
+	if home_lw_f == null or home_cb_f == null or home_rw_f == null:
+		push_error("Smoke: missing home wings/CB for Phase F passes")
+		get_tree().quit(1)
+		return
+	_smoke_lock_pass_bots(match_node, [home_lw_f, home_cb_f, home_rw_f])
+	home_cb_f.global_position = Vector3(0.0, home_cb_f.start_position.y, 0.0)
+	home_rw_f.global_position = Vector3(2.5, home_rw_f.start_position.y, 6.0)
+	home_lw_f.global_position = Vector3(-6.0, home_lw_f.start_position.y, 2.0)
+	match_node._set_controlled(home_cb_f)
+	_smoke_lock_pass_bots(match_node, [home_lw_f, home_cb_f, home_rw_f])
+	ball.global_position = home_cb_f.global_position + Vector3(0.3, 1.1, 0.0)
+	if not ball.try_pickup(home_cb_f):
+		push_error("Smoke: Phase F lob setup pickup failed")
+		get_tree().quit(1)
+		return
+	home_cb_f.has_ball = true
+	if not home_cb_f.try_pass_to(home_rw_f, ball, -1.0, Vector3(0, 0, 1), PassCraft.PassType.LOB):
+		push_error("Smoke: lob pass failed to release")
+		get_tree().quit(1)
+		return
+	if int(ball.last_shot_meta.get("pass_type", -1)) != PassCraft.PassType.LOB:
+		push_error("Smoke: lob pass meta missing")
+		get_tree().quit(1)
+		return
+	var lob_dir: Vector3 = ball.last_shot_meta.get("dir", Vector3.ZERO)
+	if lob_dir.y < 0.22:
+		push_error("Smoke: lob pass should have high loft")
+		get_tree().quit(1)
+		return
+	# Flat reference for the same lane should loft lower.
+	var flat_built := PassCraft.build_pass(home_cb_f, home_rw_f, Vector3(0, 0, 1), -1.0, PassCraft.PassType.FLAT)
+	if float(flat_built.get("loft", 0.0)) >= float(PassCraft.loft_for_distance(6.0, PassCraft.PassType.LOB)):
+		push_error("Smoke: lob loft should exceed flat loft")
+		get_tree().quit(1)
+		return
+	var lob_caught := await _smoke_await_carrier(ball, home_rw_f, 3.0)
+	print(
+		"Smoke Phase F lob catch=", lob_caught,
+		" carrier=", ball.carrier,
+		" ball=", ball.global_position,
+		" dir_y=", lob_dir.y
+	)
+	if not lob_caught:
+		push_error("Smoke: RW did not catch lob pass")
+		get_tree().quit(1)
+		return
+
+	_smoke_clear_ball(ball)
+	_smoke_lock_pass_bots(match_node, [home_lw_f, home_cb_f, home_rw_f])
+	home_cb_f.global_position = Vector3(0.0, home_cb_f.start_position.y, 0.0)
+	home_lw_f.global_position = Vector3(-3.5, home_lw_f.start_position.y, 7.5)
+	home_rw_f.global_position = Vector3(6.0, home_rw_f.start_position.y, 1.0)
+	match_node._set_controlled(home_cb_f)
+	_smoke_lock_pass_bots(match_node, [home_lw_f, home_cb_f, home_rw_f])
+	ball.global_position = home_cb_f.global_position + Vector3(0.3, 1.1, 0.0)
+	if not ball.try_pickup(home_cb_f):
+		push_error("Smoke: Phase F bounce setup pickup failed")
+		get_tree().quit(1)
+		return
+	home_cb_f.has_ball = true
+	if not home_cb_f.try_pass_to(home_lw_f, ball, -1.0, Vector3(0, 0, 1), PassCraft.PassType.BOUNCE):
+		push_error("Smoke: bounce pass failed to release")
+		get_tree().quit(1)
+		return
+	if int(ball.last_shot_meta.get("pass_type", -1)) != PassCraft.PassType.BOUNCE:
+		push_error("Smoke: bounce pass meta missing")
+		get_tree().quit(1)
+		return
+	# Wait for floor hop then catch.
+	var hopped := false
+	for _i in range(90):
+		await get_tree().physics_frame
+		if bool(ball.last_shot_meta.get("bounce_hopped", false)):
+			hopped = true
+			break
+		# Nudge floor redirect if contact missed under llvmpipe.
+		if ball.carrier == null and ball.global_position.y < 0.35:
+			ball._try_bounce_floor_redirect()
+	print("Smoke Phase F bounce hopped=", hopped, " y=", ball.global_position.y)
+	if not hopped:
+		push_error("Smoke: bounce pass never hit floor hop")
+		get_tree().quit(1)
+		return
+	var bounce_caught := await _smoke_await_carrier(ball, home_lw_f, 2.2)
+	print("Smoke Phase F bounce catch=", bounce_caught, " carrier=", ball.carrier)
+	if not bounce_caught:
+		push_error("Smoke: LW did not catch bounce pass")
+		get_tree().quit(1)
+		return
+
+	# Catch settle briefly slows movement.
+	if not home_lw_f.is_catch_settling():
+		home_lw_f.begin_catch_settle()
+	var settle_mul := home_lw_f._move_speed_mul()
+	print("Smoke Phase F catch settle mul=", settle_mul, " t=", home_lw_f._catch_settle_t)
+	if settle_mul >= 0.95 or home_lw_f._catch_settle_t <= 0.0:
+		push_error("Smoke: catch settle should briefly slow movement")
+		get_tree().quit(1)
+		return
+
+	# GK angle-cut: threat on the right → GK X biased toward near (right) post.
+	var home_gk_f := match_node._goalkeeper_for(0)
+	if home_gk_f == null:
+		push_error("Smoke: missing home GK for Phase F")
+		get_tree().quit(1)
+		return
+	home_gk_f.match_frozen = false
+	home_gk_f.ai_enabled = true
+	home_gk_f.global_position = home_gk_f.start_position
+	var threat_pos := Vector3(4.5, 0.0, -8.0)
+	var cut := home_gk_f._gk_angle_cut_target(threat_pos, home_gk_f.start_position, 1.0)
+	var center_cut := home_gk_f._gk_angle_cut_target(Vector3(0.0, 0.0, -8.0), home_gk_f.start_position, 1.0)
+	print("Smoke Phase F GK cut x=", cut.x, " center_x=", center_cut.x, " z=", cut.z)
+	if cut.x <= center_cut.x + 0.15:
+		push_error("Smoke: GK angle-cut should bias toward near post (right threat)")
+		get_tree().quit(1)
+		return
+	if cut.z <= home_gk_f.start_position.z + 0.2:
+		push_error("Smoke: GK angle-cut should step off the goal line")
+		get_tree().quit(1)
+		return
+
+	# Post-save outlet: GK gathers → arms outlet → lob to a wing.
+	_smoke_clear_ball(ball)
+	for p in match_node._home_players:
+		p.ai_enabled = false
+		p.velocity = Vector3.ZERO
+	home_gk_f.ai_enabled = true
+	home_gk_f.controlled = false
+	home_gk_f.global_position = home_gk_f.start_position
+	home_lw_f.global_position = Vector3(-7.0, home_lw_f.start_position.y, -6.0)
+	home_rw_f.global_position = Vector3(7.0, home_rw_f.start_position.y, -5.0)
+	home_cb_f.global_position = Vector3(0.0, home_cb_f.start_position.y, -2.0)
+	ball.global_position = home_gk_f.global_position + Vector3(0.2, 1.0, 0.8)
+	ball.last_shot_meta = {"shooter": home_cb_f}  # opponent-ish last touch for outlet arm path
+	# Mark as away shooter so _should_arm_outlet_from_ball passes.
+	var away_shooter := match_node._first_outfield(match_node._away_players)
+	if away_shooter:
+		ball.last_shot_meta = {"shooter": away_shooter}
+	if not ball.try_pickup(home_gk_f):
+		push_error("Smoke: GK outlet pickup failed")
+		get_tree().quit(1)
+		return
+	home_gk_f.has_ball = true
+	home_gk_f.arm_outlet_pass()
+	home_gk_f._outlet_timer = 0.0
+	home_gk_f._outlet_cd = 0.0
+	home_gk_f._ai_pass_cd = 0.0
+	home_gk_f._tick_gk_outlet(0.05)
+	var outlet_meta_ok := bool(ball.last_shot_meta.get("pass", false))
+	var outlet_type := int(ball.last_shot_meta.get("pass_type", -1))
+	print(
+		"Smoke Phase F outlet released=", ball.carrier == null,
+		" pass=", outlet_meta_ok, " type=", outlet_type, " target=", ball.pass_intended_receiver()
+	)
+	if ball.carrier != null or not outlet_meta_ok:
+		push_error("Smoke: GK outlet pass did not fire")
+		get_tree().quit(1)
+		return
+	if outlet_type != PassCraft.PassType.LOB:
+		push_error("Smoke: GK outlet should be a lob pass")
+		get_tree().quit(1)
+		return
+	var outlet_recv := ball.pass_intended_receiver()
+	if outlet_recv == null or outlet_recv.is_goalkeeper:
+		push_error("Smoke: GK outlet should target a wing/outfield")
+		get_tree().quit(1)
+		return
+	var outlet_role := Formations.role_for(outlet_recv)
+	if (
+		outlet_role != Formations.Role.LEFT_WING
+		and outlet_role != Formations.Role.RIGHT_WING
+	):
+		push_error("Smoke: GK outlet should prefer a wing, got role=%s" % outlet_role)
+		get_tree().quit(1)
+		return
+	print("Smoke Phase F movement craft OK")
+
 	# --- Phase 5 presentation ---
 	if ball.get_node_or_null("BallTrail") == null and ball._trail == null:
 		push_error("Smoke: ball trail missing")
