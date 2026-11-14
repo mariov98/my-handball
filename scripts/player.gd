@@ -70,6 +70,11 @@ var block_ready: bool = false
 ## Phase D: 2-min exclusion lite — parked at bench, AI off until MatchController restores.
 var excluded: bool = false
 var exclusion_remaining: float = 0.0
+## Phase E: team shape presets (MatchController syncs Home toggles / Away AI).
+## Defaults are Formations.AttackShape.WIDE / DefenseShape.FLAT (0) — int avoids
+## a Player↔Formations class-name cycle at parse time.
+var attack_shape: int = 0
+var defense_shape: int = 0
 
 var _bob_phase: float = 0.0
 var _pickup_block: float = 0.0
@@ -470,8 +475,11 @@ func _ai_defend_block(carrier: Player) -> Vector3:
 func _ai_support_attack(carrier: Player) -> Vector3:
 	# Show for pass: hold a formation lane but step into an open angle when a
 	# teammate (esp. the human) has the ball — readable wing↔CB circulation.
+	# Crash: ball-side wing may seal a light screen between CB and nearest defender.
 	var ball_pos := carrier.global_position
-	var slot := Formations.show_for_pass_slot(self, ball_pos)
+	var pivot := _ai_teammate_cb()
+	var screen_def := _ai_nearest_opponent() if attack_shape == Formations.AttackShape.CRASH else null
+	var slot := Formations.show_for_pass_slot(self, ball_pos, pivot, screen_def)
 	var to_carrier := slot.distance_to(Vector3(ball_pos.x, 0.0, ball_pos.z))
 	if to_carrier < 2.4:
 		# Don't stack on the ball carrier — slide wider.
@@ -483,6 +491,44 @@ func _ai_support_attack(carrier: Player) -> Vector3:
 	slot = _keep_outfield_legal(slot)
 	# Slightly sharper close-out when showing so the lane arrives in time.
 	return _steer_toward(slot) * minf(AI_ATTACK_SPEED_SCALE * 1.08, 1.0)
+
+
+func _ai_teammate_cb() -> Player:
+	var parent_n := get_parent()
+	if parent_n == null:
+		return null
+	for sibling in parent_n.get_children():
+		if sibling == self or not (sibling is Player):
+			continue
+		var mate := sibling as Player
+		if mate.is_goalkeeper or mate.excluded:
+			continue
+		if Formations.role_for(mate) == Formations.Role.CENTER_BACK:
+			return mate
+	return null
+
+
+func _ai_nearest_opponent() -> Player:
+	var best: Player = null
+	var best_d := INF
+	var my_parent := get_parent()
+	if my_parent == null or my_parent.get_parent() == null:
+		return null
+	# Home/Away roots are siblings under MatchController.
+	for team_root in my_parent.get_parent().get_children():
+		if team_root == my_parent:
+			continue
+		for child in team_root.get_children():
+			if not (child is Player):
+				continue
+			var opp := child as Player
+			if opp.team_id == team_id or opp.is_goalkeeper or opp.excluded:
+				continue
+			var d := global_position.distance_squared_to(opp.global_position)
+			if d < best_d:
+				best_d = d
+				best = opp
+	return best
 
 
 func _ai_attack_with_ball(_delta: float) -> Vector3:

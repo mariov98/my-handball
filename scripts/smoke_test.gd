@@ -1560,6 +1560,143 @@ func _ready() -> void:
 		return
 	print("Smoke Phase D exclusion return OK")
 
+	# --- Phase E: attack/defense shape presets ---
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	var e_lw: Player = null
+	var e_cb: Player = null
+	var e_rw: Player = null
+	for p in match_node._home_players:
+		if p.is_goalkeeper:
+			continue
+		match Formations.role_for(p):
+			Formations.Role.LEFT_WING:
+				e_lw = p
+			Formations.Role.RIGHT_WING:
+				e_rw = p
+			Formations.Role.CENTER_BACK:
+				e_cb = p
+	if e_lw == null or e_cb == null or e_rw == null:
+		push_error("Smoke: Phase E missing LW/CB/RW")
+		get_tree().quit(1)
+		return
+
+	# Defaults: Wide / Flat. Ball at mid-attack so Wide stays backcourt while Crash tucks.
+	match_node.home_attack_shape = Formations.AttackShape.WIDE
+	match_node.home_defense_shape = Formations.DefenseShape.FLAT
+	match_node._sync_team_shapes()
+	var shape_ball := Vector3(0.0, 0.0, 4.0)
+	var wide_cb := Formations.attack_slot(e_cb, shape_ball)
+	# Crash tucks CB onto the soft-pivot line (closer to opponent goal for Home).
+	match_node.home_attack_shape = Formations.AttackShape.CRASH
+	match_node._sync_team_shapes()
+	var crash_cb := Formations.attack_slot(e_cb, shape_ball)
+	print("Smoke Phase E Wide CB=", wide_cb, " Crash CB=", crash_cb)
+	if crash_cb.z <= wide_cb.z + 0.4:
+		push_error("Smoke: Crash should tuck CB closer to opponent goal than Wide")
+		get_tree().quit(1)
+		return
+	# Wings stay wide under Crash.
+	var crash_lw := Formations.attack_slot(e_lw, shape_ball)
+	var crash_rw := Formations.attack_slot(e_rw, shape_ball)
+	if crash_lw.x >= -3.5 or crash_rw.x <= 3.5:
+		push_error("Smoke: Crash wings should stay wide")
+		get_tree().quit(1)
+		return
+
+	# Toggle helpers flip Home shapes.
+	match_node.home_attack_shape = Formations.AttackShape.WIDE
+	match_node._toggle_home_attack_shape()
+	if match_node.home_attack_shape != Formations.AttackShape.CRASH:
+		push_error("Smoke: toggle_home_attack_shape should select Crash")
+		get_tree().quit(1)
+		return
+	match_node._toggle_home_attack_shape()
+	if match_node.home_attack_shape != Formations.AttackShape.WIDE:
+		push_error("Smoke: toggle_home_attack_shape should return to Wide")
+		get_tree().quit(1)
+		return
+
+	# Flat vs OneUp: CB steps up toward ~9 m.
+	match_node.home_defense_shape = Formations.DefenseShape.FLAT
+	match_node._sync_team_shapes()
+	var threat := Vector3(1.5, 0.0, -6.0)
+	var flat_cb := Formations.defense_slot(e_cb, threat, null)
+	match_node.home_defense_shape = Formations.DefenseShape.ONE_UP
+	match_node._sync_team_shapes()
+	var oneup_cb := Formations.defense_slot(e_cb, threat, null)
+	print("Smoke Phase E Flat CB=", flat_cb, " OneUp CB=", oneup_cb)
+	# Home own goal at z=-20; OneUp CB should be farther from own goal (larger z).
+	if oneup_cb.z <= flat_cb.z + 0.6:
+		push_error("Smoke: OneUp should step CB up from the flat wall")
+		get_tree().quit(1)
+		return
+	match_node._toggle_home_defense_shape()
+	if match_node.home_defense_shape != Formations.DefenseShape.FLAT:
+		push_error("Smoke: toggle_home_defense_shape should return to Flat from OneUp")
+		get_tree().quit(1)
+		return
+
+	# Cosmetic CB → LB/RB remap by ball side.
+	if Formations.role_label_hud(Formations.Role.CENTER_BACK, -3.0) != "LB":
+		push_error("Smoke: CB should remap to LB on ball-left")
+		get_tree().quit(1)
+		return
+	if Formations.role_label_hud(Formations.Role.CENTER_BACK, 3.0) != "RB":
+		push_error("Smoke: CB should remap to RB on ball-right")
+		get_tree().quit(1)
+		return
+	if Formations.role_label_hud(Formations.Role.CENTER_BACK, 0.0) != "CB":
+		push_error("Smoke: CB should stay CB when ball is central")
+		get_tree().quit(1)
+		return
+
+	# Screen slot sits between pivot and defender.
+	var screen := Formations.screen_slot(Vector3(0, 0, 12), Vector3(2, 0, 10), 0)
+	if screen.x < 0.4 or screen.x > 1.8:
+		push_error("Smoke: screen_slot should sit between pivot and defender on X")
+		get_tree().quit(1)
+		return
+
+	# Away AI: losing late → Crash + OneUp; winning → Wide + Flat.
+	match_node.score_home = 3
+	match_node.score_away = 1
+	match_node.current_period = match_node.periods_total
+	match_node.clock_remaining = match_node.period_length_seconds * 0.2
+	match_node.away_attack_shape = Formations.AttackShape.WIDE
+	match_node.away_defense_shape = Formations.DefenseShape.FLAT
+	match_node._update_away_shapes()
+	print(
+		"Smoke Phase E Away losing late atk=", match_node.away_attack_shape,
+		" def=", match_node.away_defense_shape
+	)
+	if match_node.away_attack_shape != Formations.AttackShape.CRASH:
+		push_error("Smoke: Away losing should pick Crash attack")
+		get_tree().quit(1)
+		return
+	if match_node.away_defense_shape != Formations.DefenseShape.ONE_UP:
+		push_error("Smoke: Away losing late/down should pick OneUp defense")
+		get_tree().quit(1)
+		return
+	match_node.score_home = 1
+	match_node.score_away = 3
+	match_node._update_away_shapes()
+	if match_node.away_attack_shape != Formations.AttackShape.WIDE:
+		push_error("Smoke: Away winning should pick Wide attack")
+		get_tree().quit(1)
+		return
+	if match_node.away_defense_shape != Formations.DefenseShape.FLAT:
+		push_error("Smoke: Away winning should pick Flat defense")
+		get_tree().quit(1)
+		return
+	# Reset Home shapes for remaining presentation checks.
+	match_node.home_attack_shape = Formations.AttackShape.WIDE
+	match_node.home_defense_shape = Formations.DefenseShape.FLAT
+	match_node.score_home = 0
+	match_node.score_away = 0
+	match_node._sync_team_shapes()
+	print("Smoke Phase E shapes OK")
+
 	# --- Phase 5 presentation ---
 	if ball.get_node_or_null("BallTrail") == null and ball._trail == null:
 		push_error("Smoke: ball trail missing")

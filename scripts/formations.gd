@@ -1,17 +1,22 @@
 extends RefCounted
 class_name Formations
 
-## Phase 4 tactics lite — recognizable handball spacing for 3 outfield + GK.
-## Roles: left wing / center back (backcourt) / right wing, with a soft pivot fill
-## when the attack is near the 6 m. Defense is a simple 3-across wall outside the crease.
+## Phase 4 tactics lite + Phase E shape presets — recognizable handball spacing
+## for 3 outfield + GK. Roles: LW / CB / RW. Attack Wide (3-3-ish) vs Crash
+## (2-4-ish soft pivot). Defense Flat (6-0-ish) vs OneUp (5-1-ish).
 
 enum Role { GK, LEFT_WING, CENTER_BACK, RIGHT_WING }
+## Attack shape presets (3-outfield reading of 3-3 / 2-4).
+enum AttackShape { WIDE, CRASH }
+## Defense shape presets (3-outfield reading of 6-0 / 5-1).
+enum DefenseShape { FLAT, ONE_UP }
 
 const FREE_THROW_LINE_M := 9.0 ## Distance from goal end for 9 m-style wall / free throws.
 const ATTACK_ARC_M := 9.2 ## Wings sit near the free-throw arc.
 const BACKCOURT_DEPTH_M := 12.5 ## Center back depth from opponent goal.
-const PIVOT_DEPTH_M := 7.2 ## Soft pivot fill just outside 6 m.
-const DEFENSE_LINE_M := 7.6 ## Defenders stand outside own 6 m.
+const PIVOT_DEPTH_M := 7.2 ## Soft pivot / line fill just outside 6 m.
+const DEFENSE_LINE_M := 7.6 ## Flat defenders stand outside own 6 m.
+const ONE_UP_DEPTH_M := 9.4 ## OneUp CB steps toward ~9 m on the ball.
 const WALL_GAP_M := 3.2 ## Min distance defenders keep from free-throw taker.
 
 
@@ -40,15 +45,86 @@ static func role_label(role: Role) -> String:
 			return "CB"
 
 
+## Cosmetic HUD teaching: CB reads as LB/RB by ball side (roles stay LW/CB/RW).
+static func role_label_hud(role: Role, ball_x: float = 0.0, remap_cb_by_ball: bool = true) -> String:
+	if role == Role.CENTER_BACK and remap_cb_by_ball:
+		if ball_x < -1.5:
+			return "LB"
+		if ball_x > 1.5:
+			return "RB"
+	return role_label(role)
+
+
+static func attack_shape_label(shape: AttackShape) -> String:
+	match shape:
+		AttackShape.CRASH:
+			return "Crash"
+		_:
+			return "Wide"
+
+
+static func defense_shape_label(shape: DefenseShape) -> String:
+	match shape:
+		DefenseShape.ONE_UP:
+			return "OneUp"
+		_:
+			return "Flat"
+
+
+static func attack_shape_of(player: Player) -> AttackShape:
+	if player == null:
+		return AttackShape.WIDE
+	return player.attack_shape as AttackShape
+
+
+static func defense_shape_of(player: Player) -> DefenseShape:
+	if player == null:
+		return DefenseShape.FLAT
+	return player.defense_shape as DefenseShape
+
+
+## Approx screen: stand between pivot (CB) and a marking defender.
+static func screen_slot(pivot_pos: Vector3, defender_pos: Vector3, team_id: int) -> Vector3:
+	var pivot := Vector3(pivot_pos.x, 0.0, pivot_pos.z)
+	var defender := Vector3(defender_pos.x, 0.0, defender_pos.z)
+	# Bias slightly toward the defender so the seal reads as a screen, not a stack.
+	var slot := pivot.lerp(defender, 0.55)
+	# Nudge a touch toward own attack so the screen isn't behind the pivot.
+	var attack_sign := 1.0 if team_id == 0 else -1.0
+	slot.z += attack_sign * 0.35
+	return _legalize_outfield(slot, team_id)
+
+
 ## Off-ball "show for pass": attack slot nudged into an open lane toward the ball.
-## Keeps width/depth readable for wing↔CB↔wing circulation without stacking.
-static func show_for_pass_slot(player: Player, ball_pos: Vector3) -> Vector3:
+## Crash shape: ball-side wing can set a light screen between CB and nearest defender.
+static func show_for_pass_slot(
+	player: Player,
+	ball_pos: Vector3,
+	pivot: Player = null,
+	screen_defender: Player = null
+) -> Vector3:
 	var slot := attack_slot(player, ball_pos)
 	if player == null or player.is_goalkeeper:
 		return slot
 	var role := role_for(player)
+	var shape := attack_shape_of(player)
 	var attack_sign := 1.0 if player.team_id == 0 else -1.0
 	var ball_xz := Vector3(ball_pos.x, 0.0, ball_pos.z)
+
+	# Crash soft-pivot screen: ball-side wing seals between CB and a defender (approx).
+	if (
+		shape == AttackShape.CRASH
+		and pivot != null
+		and screen_defender != null
+		and (role == Role.LEFT_WING or role == Role.RIGHT_WING)
+	):
+		var ball_side_wing := (
+			(role == Role.LEFT_WING and ball_xz.x <= 0.6)
+			or (role == Role.RIGHT_WING and ball_xz.x >= -0.6)
+		)
+		if ball_side_wing:
+			return screen_slot(pivot.global_position, screen_defender.global_position, player.team_id)
+
 	# Step slightly toward the ball on depth so the passing lane is live.
 	slot.z = lerpf(slot.z, ball_xz.z + attack_sign * 1.2, 0.28)
 	match role:
@@ -60,16 +136,21 @@ static func show_for_pass_slot(player: Player, ball_pos: Vector3) -> Vector3:
 			slot.x = lerpf(slot.x, maxf(slot.x - 1.1, 3.6), 0.35)
 			slot.x = clampf(slot.x, 3.2, 8.6)
 		Role.CENTER_BACK:
-			# Present between the wings, slightly ahead of the ball for a give-and-go feel.
-			slot.x = lerpf(slot.x, ball_xz.x * 0.45, 0.4)
-			slot.x = clampf(slot.x, -3.2, 3.2)
-			slot.z = lerpf(slot.z, ball_xz.z + attack_sign * 2.4, 0.22)
+			if shape == AttackShape.CRASH:
+				# Stay on the line / soft-pivot lane while Crash is on.
+				slot.x = lerpf(slot.x, ball_xz.x * 0.4, 0.45)
+				slot.x = clampf(slot.x, -2.6, 2.6)
+			else:
+				# Present between the wings, slightly ahead of the ball for a give-and-go feel.
+				slot.x = lerpf(slot.x, ball_xz.x * 0.45, 0.4)
+				slot.x = clampf(slot.x, -3.2, 3.2)
+				slot.z = lerpf(slot.z, ball_xz.z + attack_sign * 2.4, 0.22)
 		_:
 			pass
 	return _legalize_outfield(slot, player.team_id)
 
 
-## Attack spacing relative to opponent goal. Ball bias shifts the shape slightly.
+## Attack spacing relative to opponent goal. Shape presets drive CB depth.
 static func attack_slot(player: Player, ball_pos: Vector3) -> Vector3:
 	if player == null:
 		return Vector3.ZERO
@@ -77,23 +158,31 @@ static func attack_slot(player: Player, ball_pos: Vector3) -> Vector3:
 		return _gk_slot(player)
 
 	var role := role_for(player)
+	var shape := attack_shape_of(player)
 	var attack_sign := 1.0 if player.team_id == 0 else -1.0
 	var goal_z := 20.0 * attack_sign
 	var ball_x := clampf(ball_pos.x, -7.0, 7.0)
 	var progress := clampf(absf(ball_pos.z) / 16.0, 0.0, 1.0)
-	# Near the crease, CB tucks into a pivot-ish lane; wings stay wide.
-	var use_pivot := progress > 0.55 and absf(ball_pos.z - goal_z) < 14.0
+	# Wide (3-3-ish): soft pivot only near the crease.
+	# Crash (2-4-ish): dedicated line bias once the ball is past midfield.
+	var use_pivot := false
+	if shape == AttackShape.CRASH:
+		use_pivot = (ball_pos.z * attack_sign) > -1.0
+	else:
+		use_pivot = progress > 0.55 and absf(ball_pos.z - goal_z) < 14.0
 
+	var wing_x := 7.6 if shape == AttackShape.CRASH else 7.2
 	var slot := Vector3.ZERO
 	match role:
 		Role.LEFT_WING:
-			slot = Vector3(-7.2 + ball_x * 0.08, 0.0, goal_z - attack_sign * ATTACK_ARC_M)
+			slot = Vector3(-wing_x + ball_x * 0.08, 0.0, goal_z - attack_sign * ATTACK_ARC_M)
 			slot.x = clampf(slot.x, -8.6, -4.0)
 		Role.RIGHT_WING:
-			slot = Vector3(7.2 + ball_x * 0.08, 0.0, goal_z - attack_sign * ATTACK_ARC_M)
+			slot = Vector3(wing_x + ball_x * 0.08, 0.0, goal_z - attack_sign * ATTACK_ARC_M)
 			slot.x = clampf(slot.x, 4.0, 8.6)
 		Role.CENTER_BACK:
 			if use_pivot:
+				# Soft pivot / line: Crash tucks earlier and holds the lane outside 6 m.
 				slot = Vector3(ball_x * 0.35, 0.0, goal_z - attack_sign * PIVOT_DEPTH_M)
 				slot.x = clampf(slot.x, -2.8, 2.8)
 			else:
@@ -105,7 +194,7 @@ static func attack_slot(player: Player, ball_pos: Vector3) -> Vector3:
 	return _legalize_outfield(slot, player.team_id)
 
 
-## Defense spacing: 3-across in front of own 6 m, ball-side bias.
+## Defense spacing: Flat = 3-across wall; OneUp = CB steps to ~9 m on the ball.
 static func defense_slot(player: Player, ball_pos: Vector3, carrier: Player = null) -> Vector3:
 	if player == null:
 		return Vector3.ZERO
@@ -113,6 +202,7 @@ static func defense_slot(player: Player, ball_pos: Vector3, carrier: Player = nu
 		return _gk_slot(player)
 
 	var role := role_for(player)
+	var shape := defense_shape_of(player)
 	var defend_sign := -1.0 if player.team_id == 0 else 1.0 # toward own goal from midfield
 	var own_goal_z := -20.0 if player.team_id == 0 else 20.0
 	var threat := ball_pos
@@ -130,11 +220,23 @@ static func defense_slot(player: Player, ball_pos: Vector3, carrier: Player = nu
 			lane_x = 0.0
 
 	# Slide slightly toward the ball so the wall isn't static.
-	lane_x = clampf(lane_x + threat_x * 0.22, -7.5, 7.5)
-	var slot := Vector3(lane_x, 0.0, own_goal_z - defend_sign * DEFENSE_LINE_M)
-	# When ball is mid-court, push the line up a bit.
-	var mid_push := clampf((10.0 - absf(threat.z)) / 10.0, 0.0, 1.0)
-	slot.z += (-defend_sign) * mid_push * 1.8
+	var slide := 0.22
+	var line_depth := DEFENSE_LINE_M
+	if shape == DefenseShape.ONE_UP and role == Role.CENTER_BACK:
+		# 5-1-ish: CB presses up to ~9 m on the ball; wings stay flat.
+		slide = 0.55
+		line_depth = ONE_UP_DEPTH_M
+		lane_x = threat_x * 0.15
+	lane_x = clampf(lane_x + threat_x * slide, -7.5, 7.5)
+	var slot := Vector3(lane_x, 0.0, own_goal_z - defend_sign * line_depth)
+	# When ball is mid-court, push the flat line up a bit (OneUp CB already stepped).
+	if not (shape == DefenseShape.ONE_UP and role == Role.CENTER_BACK):
+		var mid_push := clampf((10.0 - absf(threat.z)) / 10.0, 0.0, 1.0)
+		slot.z += (-defend_sign) * mid_push * 1.8
+	else:
+		# Track ball depth a little so the one-up isn't glued to a fixed Z.
+		var ball_push := clampf((absf(threat.z) - 4.0) / 10.0, -0.4, 1.0)
+		slot.z += (-defend_sign) * ball_push * 1.2
 	slot.z = clampf(slot.z, -16.5, 16.5)
 	return _legalize_outfield(slot, player.team_id)
 
