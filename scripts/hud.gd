@@ -47,7 +47,7 @@ func _ready() -> void:
 	if power_bar:
 		power_bar.visible = false
 		power_bar.value = 0.0
-	help_label.text = "WASD move · Space jump · hold V/R3 dribble · hold LMB/E/RT shoot · RMB/G/RB PASS · F/LT lob · C/Ctrl/B dive (GK) · Q cycle · R best · T aim · 1 atk shape · 2 def shape"
+	help_label.text = "WASD move · Space jump · hold V/R3 dribble · hold LMB/E/RT shoot · RMB/G/RB PASS (+B bounce / +F lob) · F/LT lob-shot · C/Ctrl/East dive (GK) · Q cycle · R best · T aim · 1 atk · 2 def"
 	_ensure_flash_overlay()
 	_ensure_hold_label()
 	_ensure_shapes_label()
@@ -123,7 +123,8 @@ func set_shot_status(charge: float, lob: bool, jump_text: String, visible_now: b
 
 
 ## Clear PASS vs hold-to-shoot: show when possessed and not charging.
-func set_pass_hint(visible_now: bool) -> void:
+## `pass_type` highlights flat / bounce / lob modifiers (PassCraft.PassType).
+func set_pass_hint(visible_now: bool, pass_type: int = 0) -> void:
 	if shot_label == null:
 		return
 	if not visible_now:
@@ -138,8 +139,15 @@ func set_pass_hint(visible_now: bool) -> void:
 		if shot_label.text.contains("SHOOT") or shot_label.text.contains("JUMP"):
 			return
 	shot_label.visible = true
-	shot_label.text = "PASS · RMB / G / RB"
-	shot_label.add_theme_color_override("font_color", Color(0.7, 0.95, 1.0, 1.0))
+	var type_name := PassCraft.pass_type_name(pass_type)
+	shot_label.text = "PASS · %s · RMB/G/RB" % type_name
+	match pass_type:
+		PassCraft.PassType.BOUNCE:
+			shot_label.add_theme_color_override("font_color", Color(0.95, 0.82, 0.55, 1.0))
+		PassCraft.PassType.LOB:
+			shot_label.add_theme_color_override("font_color", Color(0.65, 0.88, 1.0, 1.0))
+		_:
+			shot_label.add_theme_color_override("font_color", Color(0.7, 0.95, 1.0, 1.0))
 
 
 ## Glanceable steps readout. `pulse` bumps scale when a new plant lands.

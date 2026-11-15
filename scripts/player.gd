@@ -47,6 +47,13 @@ const DIVE_UP := 3.0
 const GK_LATERAL_BOOST := 1.18
 const AI_DIVE_REACT_DIST := 11.5
 const AI_DIVE_MIN_BALL_SPEED := 7.0
+## Phase F: catch settle (brief move penalty) + GK outlet delay.
+const CATCH_SETTLE_S := 0.38
+const CATCH_SETTLE_SPEED := 0.52
+const GK_OUTLET_DELAY_S := 0.42
+const GK_OUTLET_COOLDOWN_S := 1.1
+## Phase F jump-shot plant slows approach so the takeoff reads.
+const JUMP_PLANT_SPEED := 0.28
 
 @export var team_id: int = 0 ## 0 = home (blue), 1 = away (red)
 @export var is_goalkeeper: bool = false
@@ -75,6 +82,10 @@ var exclusion_remaining: float = 0.0
 ## a Player↔Formations class-name cycle at parse time.
 var attack_shape: int = 0
 var defense_shape: int = 0
+## Phase F jump-shot craft — exposed for ShotCraft.jump_shot_quality duck-typing.
+var jump_shot_active: bool = false
+var jump_shot_air_s: float = 0.0
+var jump_shot_phase: int = 0  # ShotCraft.JumpPhase
 
 var _bob_phase: float = 0.0
 var _pickup_block: float = 0.0
@@ -96,6 +107,13 @@ var _save_area: Area3D
 var _block_area: Area3D
 var _body_mat: StandardMaterial3D
 var _kit_nodes_ready: bool = false
+## Phase F catch settle + jump plant + GK outlet.
+var _catch_settle_t: float = 0.0
+var _js_plant_t: float = 0.0
+var _js_was_airborne: bool = false
+var _outlet_pending: bool = false
+var _outlet_timer: float = 0.0
+var _outlet_cd: float = 0.0
 
 @onready var ball_attach: Marker3D = $BallAttach
 @onready var pickup_area: Area3D = $PickupArea
@@ -127,6 +145,10 @@ func _physics_process(delta: float) -> void:
 		_ai_pass_cd = maxf(0.0, _ai_pass_cd - delta)
 	if _dive_cd > 0.0:
 		_dive_cd = maxf(0.0, _dive_cd - delta)
+	if _outlet_cd > 0.0:
+		_outlet_cd = maxf(0.0, _outlet_cd - delta)
+	if _catch_settle_t > 0.0:
+		_catch_settle_t = maxf(0.0, _catch_settle_t - delta)
 	if _block_timer > 0.0:
 		_block_timer = maxf(0.0, _block_timer - delta)
 		block_ready = _block_timer > 0.0 or diving
@@ -175,23 +197,32 @@ func _physics_process(delta: float) -> void:
 			target_speed *= AI_GK_SPEED_SCALE * AI_GK_TRACK_SPEED_SCALE
 		else:
 			target_speed *= AI_CHASE_SPEED_SCALE
+	# Catch settle + jump plant briefly slow the carrier for readability.
+	target_speed *= _move_speed_mul()
 	# Snappy ground response; softer air control for jump-shot steering.
-	if not diving:
+	if not diving and _js_plant_t <= 0.0:
 		var desired := wish * target_speed
 		var rate := 18.0 if is_on_floor() else (18.0 * AIR_CONTROL)
 		var blend := 1.0 - exp(-rate * delta)
 		velocity.x = lerpf(velocity.x, desired.x, blend)
 		velocity.z = lerpf(velocity.z, desired.z, blend)
+	elif _js_plant_t > 0.0 and not diving:
+		# Plant: bleed planar speed while feet stay glued.
+		velocity.x = lerpf(velocity.x, 0.0, 1.0 - exp(-22.0 * delta))
+		velocity.z = lerpf(velocity.z, 0.0, 1.0 - exp(-22.0 * delta))
 
 	if controlled and not match_frozen and not diving and Input.is_action_just_pressed("jump") and is_on_floor():
-		velocity.y = JUMP_VELOCITY
+		_begin_jump_from_input(wish)
+
+	_tick_jump_shot_craft(delta)
+	_tick_gk_outlet(delta)
 
 	# Soft velocity push clears nested capsules without freezing wish/slide motion.
 	_apply_soft_player_separation()
 	move_and_slide()
 
 	var planar := Vector3(velocity.x, 0.0, velocity.z)
-	if planar.length() > FACE_THRESHOLD and not diving:
+	if planar.length() > FACE_THRESHOLD and not diving and _js_plant_t <= 0.0:
 		var target_yaw := atan2(planar.x, planar.z)
 		rotation.y = lerp_angle(rotation.y, target_yaw, 1.0 - exp(-12.0 * delta))
 
@@ -212,9 +243,136 @@ func try_shoot(
 	_pickup_block = PICKUP_COOLDOWN
 	dribbling = false
 	has_ball = false
+	_outlet_pending = false
+	_outlet_timer = 0.0
+	# Preserve jump-shot craft meta for the release, then clear plant if still grounded.
+	if jump_shot_active and not shot_meta.has("jump_shot"):
+		shot_meta["jump_shot"] = true
+		shot_meta["jump_air_s"] = jump_shot_air_s
+		shot_meta["jump_phase"] = jump_shot_phase
 	possession_changed.emit(false)
 	ball.release_and_shoot(aim_dir, impulse_strength, up_bias, shot_meta)
 	return true
+
+
+func begin_catch_settle() -> void:
+	_catch_settle_t = CATCH_SETTLE_S
+
+
+func is_catch_settling() -> bool:
+	return _catch_settle_t > 0.0
+
+
+func _move_speed_mul() -> float:
+	var mul := 1.0
+	if _catch_settle_t > 0.0:
+		mul *= CATCH_SETTLE_SPEED
+	if _js_plant_t > 0.0:
+		mul *= JUMP_PLANT_SPEED
+	return mul
+
+
+## Jump with ball + approach → plant → jump-shot craft; otherwise a normal hop.
+func _begin_jump_from_input(wish: Vector3) -> void:
+	if _js_plant_t > 0.0:
+		return
+	var planar := Vector3(velocity.x, 0.0, velocity.z)
+	var approach := planar.length()
+	if wish.length_squared() > 0.01:
+		approach = maxf(approach, wish.length() * SPEED * 0.55)
+	var craft := has_ball and approach >= ShotCraft.APPROACH_MIN_SPEED
+	if craft:
+		jump_shot_active = true
+		jump_shot_phase = ShotCraft.JumpPhase.PLANTED
+		jump_shot_air_s = 0.0
+		_js_plant_t = ShotCraft.PLANT_HOLD_S
+		_js_was_airborne = false
+	else:
+		# Standing hop / no-ball jump — height heuristic only if somehow shooting mid-air.
+		if has_ball:
+			jump_shot_active = false
+			jump_shot_phase = ShotCraft.JumpPhase.NONE
+			jump_shot_air_s = 0.0
+		velocity.y = JUMP_VELOCITY
+
+
+func _tick_jump_shot_craft(delta: float) -> void:
+	if _js_plant_t > 0.0:
+		_js_plant_t = maxf(0.0, _js_plant_t - delta)
+		jump_shot_phase = ShotCraft.JumpPhase.PLANTED
+		if _js_plant_t <= 0.0 and is_on_floor():
+			velocity.y = JUMP_VELOCITY
+			_js_was_airborne = false
+			jump_shot_air_s = 0.0
+			jump_shot_phase = ShotCraft.JumpPhase.AIRBORNE
+		return
+	if not jump_shot_active:
+		if is_on_floor():
+			jump_shot_air_s = 0.0
+			jump_shot_phase = ShotCraft.JumpPhase.NONE
+		return
+	if is_on_floor():
+		if _js_was_airborne:
+			# Landed — craft complete.
+			jump_shot_active = false
+			jump_shot_phase = ShotCraft.JumpPhase.NONE
+			jump_shot_air_s = 0.0
+			_js_was_airborne = false
+		return
+	_js_was_airborne = true
+	jump_shot_air_s += delta
+	var q := ShotCraft.jump_shot_window_quality(self, jump_shot_air_s)
+	if q == 1:
+		jump_shot_phase = ShotCraft.JumpPhase.WINDOW
+	elif jump_shot_air_s < ShotCraft.WINDOW_OPEN_S:
+		jump_shot_phase = ShotCraft.JumpPhase.AIRBORNE
+	else:
+		jump_shot_phase = ShotCraft.JumpPhase.WINDOW if q != 2 else ShotCraft.JumpPhase.AIRBORNE
+
+
+## After a save gather, AI GK outlets to a wing (fast break lite).
+func arm_outlet_pass() -> void:
+	if not is_goalkeeper:
+		return
+	_outlet_pending = true
+	_outlet_timer = GK_OUTLET_DELAY_S
+
+
+func _tick_gk_outlet(delta: float) -> void:
+	if not is_goalkeeper or not _outlet_pending:
+		return
+	if not has_ball or match_ball == null or match_ball.carrier != self:
+		_outlet_pending = false
+		_outlet_timer = 0.0
+		return
+	if controlled and not ai_enabled:
+		# Human GK keeps the ball — outlet is an AI assist after saves.
+		return
+	_outlet_timer = maxf(0.0, _outlet_timer - delta)
+	if _outlet_timer > 0.0 or _outlet_cd > 0.0 or _ai_pass_cd > 0.0:
+		return
+	var wing := _ai_outlet_wing()
+	if wing == null:
+		_outlet_pending = false
+		return
+	var hint := wing.global_position - global_position
+	hint.y = 0.0
+	if try_pass_to(wing, match_ball, -1.0, hint, PassCraft.PassType.LOB):
+		_outlet_pending = false
+		_outlet_cd = GK_OUTLET_COOLDOWN_S
+		_ai_pass_cd = AI_PASS_COOLDOWN
+
+
+func _ai_outlet_wing() -> Player:
+	var parent_n := get_parent()
+	if parent_n == null:
+		return null
+	var roster: Array = []
+	for sibling in parent_n.get_children():
+		if sibling is Player:
+			roster.append(sibling)
+	var best := PassCraft.best_outlet_wing(self, roster, team_id)
+	return best as Player
 
 
 ## GK dive toward a planar direction. Returns true if dive started.
@@ -274,6 +432,15 @@ func reset_to_start() -> void:
 	excluded = false
 	exclusion_remaining = 0.0
 	visible = true
+	_catch_settle_t = 0.0
+	_js_plant_t = 0.0
+	_js_was_airborne = false
+	jump_shot_active = false
+	jump_shot_air_s = 0.0
+	jump_shot_phase = ShotCraft.JumpPhase.NONE
+	_outlet_pending = false
+	_outlet_timer = 0.0
+	_outlet_cd = 0.0
 	_set_dive_pose(false)
 	if _mesh:
 		_mesh.position.y = _mesh_base_y
@@ -388,18 +555,19 @@ func _ai_wish(delta: float) -> Vector3:
 
 
 func _ai_gk_wish() -> Vector3:
+	# Holding after a save: stay put while outlet arms / fires.
+	if has_ball and match_ball != null and match_ball.carrier == self:
+		return Vector3.ZERO
+
 	var ball_pos := match_ball.global_position
 	var home := start_position
-	var track_x := clampf(ball_pos.x, -3.4, 3.4)
-	# Ease slightly off the line toward the ball when it approaches.
-	var gap := absf(ball_pos.z - home.z)
-	var approach := clampf(1.0 - gap / 12.0, 0.0, 1.0)
 	var toward_court := 1.0 if team_id == 0 else -1.0
-	var target := Vector3(track_x, 0.0, home.z + toward_court * approach * 1.8)
-	if team_id == 0:
-		target.z = clampf(target.z, -18.5, -14.0)
-	else:
-		target.z = clampf(target.z, 14.0, 18.5)
+	var threat_pos := ball_pos
+	if match_ball.carrier != null and match_ball.carrier.team_id != team_id:
+		threat_pos = match_ball.carrier.global_position
+	# Phase F angle-cut: stand on shooter→goal line with near-post bias.
+	var target := _gk_angle_cut_target(threat_pos, home, toward_court)
+	var gap := absf(ball_pos.z - home.z)
 
 	# Predict incoming shot and dive into the flight path.
 	if match_ball.carrier == null and not diving and _dive_cd <= 0.0:
@@ -416,6 +584,31 @@ func _ai_gk_wish() -> Vector3:
 			target.x = clampf(intercept.x, -3.4, 3.4)
 
 	return _steer_toward(target)
+
+
+## Cut the angle: advance off the line toward the threat, bias near post.
+func _gk_angle_cut_target(threat_pos: Vector3, home: Vector3, toward_court: float) -> Vector3:
+	var goal_z := home.z
+	var goal_center := Vector3(0.0, 0.0, goal_z)
+	var gap := absf(threat_pos.z - goal_z)
+	var depth_frac := clampf(1.0 - gap / 16.0, 0.0, 1.0)
+	# Near post = post on the shooter's side; center threats keep middle.
+	var near_post_x := 0.0
+	if absf(threat_pos.x) > 0.65:
+		near_post_x = signf(threat_pos.x) * (Court.GOAL_WIDTH * 0.5)
+	# Interpolate along shooter → goal, then bias X toward near post.
+	var cut := threat_pos.lerp(goal_center, lerpf(0.72, 0.88, depth_frac))
+	cut.x = lerpf(cut.x, near_post_x, 0.38)
+	cut.x = clampf(cut.x, -3.4, 3.4)
+	# Step off the goal line as the threat closes (angle cut).
+	var step := lerpf(0.55, 2.35, depth_frac)
+	cut.z = goal_z + toward_court * step
+	if team_id == 0:
+		cut.z = clampf(cut.z, -18.5, -14.0)
+	else:
+		cut.z = clampf(cut.z, 14.0, 18.5)
+	cut.y = 0.0
+	return cut
 
 
 func _predict_gk_intercept(ball_pos: Vector3, ball_vel: Vector3) -> Vector3:
@@ -588,11 +781,13 @@ func _ai_attack_with_ball(_delta: float) -> Vector3:
 
 ## Soft pass to a teammate (used by MatchController + Away AI).
 ## Optional `aim_hint` = face / mouse direction; light cone assist blends toward target.
+## `pass_type`: PassCraft.PassType FLAT / BOUNCE / LOB.
 func try_pass_to(
 	target: Player,
 	ball: Ball,
 	impulse: float = -1.0,
-	aim_hint: Vector3 = Vector3.ZERO
+	aim_hint: Vector3 = Vector3.ZERO,
+	pass_type: int = PassCraft.PassType.FLAT
 ) -> bool:
 	if target == null or not has_ball or ball == null or ball.carrier != self:
 		return false
@@ -602,7 +797,7 @@ func try_pass_to(
 		hint.y = 0.0
 		if hint.length_squared() < 0.01:
 			hint = face_direction()
-	var built := PassCraft.build_pass(self, target, hint, impulse)
+	var built := PassCraft.build_pass(self, target, hint, impulse, pass_type)
 	if built.is_empty():
 		return false
 	var meta := {
@@ -610,7 +805,10 @@ func try_pass_to(
 		"charge": 0.3,
 		"ai": ai_enabled and not controlled,
 		"pass_target": target,
+		"pass_type": int(built.get("pass_type", pass_type)),
 	}
+	if pass_type == PassCraft.PassType.BOUNCE and built.has("floor_point"):
+		meta["floor_point"] = built["floor_point"]
 	return try_shoot(built["aim"], built["impulse"], ball, built["loft"], meta)
 
 
@@ -673,6 +871,12 @@ func _try_sticky_pass_catch() -> void:
 		return
 	if match_ball.carrier != null or not match_ball.is_pass_in_flight():
 		return
+	# Bounce passes aren't catchable until after the floor hop.
+	if (
+		match_ball.pass_type() == PassCraft.PassType.BOUNCE
+		and not bool(match_ball.last_shot_meta.get("bounce_hopped", false))
+	):
+		return
 	var intended := match_ball.pass_intended_receiver()
 	# Intended receiver gets sticky catch; other teammates still get a slightly tighter window.
 	var sticky := PassCraft.CATCH_STICKY_RADIUS
@@ -680,11 +884,18 @@ func _try_sticky_pass_catch() -> void:
 		sticky *= 0.85
 	elif intended == self:
 		sticky *= 1.12
+	var pass_type := match_ball.pass_type()
+	var y_slack := 1.35
+	if pass_type == PassCraft.PassType.LOB:
+		y_slack = PassCraft.LOB_CATCH_Y
+		sticky *= PassCraft.LOB_CATCH_STICKY_SCALE
+	elif pass_type == PassCraft.PassType.BOUNCE:
+		y_slack = PassCraft.BOUNCE_CATCH_Y
 	# Measure from chest height — feet-origin distance alone is already ~1.1 m vertically.
 	var catch_at := global_position + Vector3(0.0, 1.05, 0.0)
 	var to_ball := match_ball.global_position - catch_at
 	var planar := Vector3(to_ball.x, 0.0, to_ball.z)
-	if planar.length() > sticky or absf(to_ball.y) > 1.35:
+	if planar.length() > sticky or absf(to_ball.y) > y_slack:
 		return
 	# Prefer balls still approaching the catcher (planar).
 	if match_ball.linear_velocity.length() > 1.0 and planar.length_squared() > 0.01:
@@ -700,6 +911,7 @@ func _try_sticky_pass_catch() -> void:
 		has_ball = true
 		_ai_carry_dist = 0.0
 		_ai_carry_sampling = false
+		begin_catch_settle()
 		possession_changed.emit(true)
 
 
@@ -730,10 +942,20 @@ func _on_pickup_body_entered(body: Node3D) -> void:
 		return
 	if body is Ball:
 		var ball := body as Ball
+		# Bounce pass: wait for floor hop before Area pickup.
+		if (
+			ball.is_pass_in_flight()
+			and ball.pass_type() == PassCraft.PassType.BOUNCE
+			and not bool(ball.last_shot_meta.get("bounce_hopped", false))
+		):
+			return
 		if ball.try_pickup(self):
 			has_ball = true
 			_ai_carry_dist = 0.0
 			_ai_carry_sampling = false
+			begin_catch_settle()
+			if is_goalkeeper and _should_arm_outlet_from_ball(ball):
+				arm_outlet_pass()
 			possession_changed.emit(true)
 
 
@@ -784,6 +1006,9 @@ func _contest_ball(ball: Ball, is_save: bool) -> void:
 		# Soft gather — try pickup.
 		if ball.try_pickup(self):
 			has_ball = true
+			begin_catch_settle()
+			if is_save:
+				arm_outlet_pass()
 			possession_changed.emit(true)
 			block_attempted.emit(self, ball, true)
 		return
@@ -797,6 +1022,15 @@ func _contest_ball(ball: Ball, is_save: bool) -> void:
 	# Saves kill more pace than outfield tips — leave rebounds playable.
 	var deflect_speed := clampf(speed * (0.42 if is_save else 0.55), 4.0, 12.0)
 	var up := 2.4 if is_save else 1.6
+	# Stronger saves (dive) can gather instead of tip when the ball is slow enough.
+	if is_save and (diving or speed < 6.5):
+		if ball.try_pickup(self):
+			has_ball = true
+			begin_catch_settle()
+			arm_outlet_pass()
+			possession_changed.emit(true)
+			block_attempted.emit(self, ball, true)
+			return
 	ball.linear_velocity = away * deflect_speed + Vector3(0.0, up, 0.0)
 	ball.angular_velocity = Vector3(randf_range(-8.0, 8.0), randf_range(-4.0, 4.0), randf_range(-8.0, 8.0))
 	block_attempted.emit(self, ball, success)
@@ -806,6 +1040,17 @@ func _contest_ball(ball: Ball, is_save: bool) -> void:
 	else:
 		_block_timer = 0.08
 		block_ready = false
+
+
+func _should_arm_outlet_from_ball(ball: Ball) -> bool:
+	if ball == null:
+		return false
+	# Arm outlet when the last touch was an opponent shot / free ball into the area.
+	var shooter: Variant = ball.last_shot_meta.get("shooter", null)
+	if shooter != null and is_instance_valid(shooter) and shooter is Player:
+		return (shooter as Player).team_id != team_id
+	# Free ball with no shooter meta — still a distribution chance.
+	return ball._last_carrier == null or ball._last_carrier.team_id != team_id
 
 
 func _ensure_craft_nodes() -> void:

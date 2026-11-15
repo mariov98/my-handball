@@ -1,6 +1,6 @@
 # MyHandball
 
-Desktop handball prototype built with **Godot 4.3** (GDScript). Phases **0–5** are in: sandbox → mini match → rules → GK/shot craft → tactics → presentation. **Phase A** deepens soft pass circulation; **Phase B** adds **dribble** (hold V / R3) with procedural bounce, a **3-second hold** clock, step reset on dribble catch, and double-dribble lite; **Phase C** remounts **passive play** as an IHF-inspired hybrid (progress warn → pass-count); **Phase D** adds **contact lite** (bump → free throw, clear-chance heuristic → **7 m**, optional **2-min exclusion**); **Phase E** adds **attack/defense shape presets** on the 3+GK roster (Wide/Crash · Flat/OneUp). Still engine primitives (polished capsules, no Mixamo).
+Desktop handball prototype built with **Godot 4.3** (GDScript). Phases **0–5** are in: sandbox → mini match → rules → GK/shot craft → tactics → presentation. **Phase A** deepens soft pass circulation; **Phase B** adds **dribble** (hold V / R3) with procedural bounce, a **3-second hold** clock, step reset on dribble catch, and double-dribble lite; **Phase C** remounts **passive play** as an IHF-inspired hybrid (progress warn → pass-count); **Phase D** adds **contact lite** (bump → free throw, clear-chance heuristic → **7 m**, optional **2-min exclusion**); **Phase E** adds **attack/defense shape presets** on the 3+GK roster (Wide/Crash · Flat/OneUp); **Phase F** adds **movement craft** (jump-shot state, flat/bounce/lob passes, GK angle-cut + outlet, catch settle). Still engine primitives (polished capsules, no Mixamo).
 
 ## Requirements (Windows)
 
@@ -30,8 +30,10 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 | Jump | Space | A / South |
 | **Dribble (hold)** | Hold **V** | Hold **R3** (right stick click) |
 | **Shoot (hold for power)** | Hold Left mouse / **E** | Hold RT / R2 |
-| **PASS** (instant; cancels charge) | Right mouse / **G** | RB (right bumper) |
-| **Lob** (while charging shoot) | Hold **F** | Hold LT / L2 |
+| **PASS** flat (instant; cancels charge) | Right mouse / **G** | RB (right bumper) |
+| **PASS** bounce (hold + pass) | Hold **B** + pass | Hold D-pad Left + RB |
+| **PASS** lob (hold + pass) | Hold **F** + pass | Hold LT / L2 + RB |
+| **Lob shot** (while charging shoot) | Hold **F** | Hold LT / L2 |
 | **Dive** (GK only) | **C** or Ctrl | B / East |
 | **Cycle** teammate | **Q** or Tab | LB (left bumper) |
 | **Switch-to-best** | **R** | X / West |
@@ -52,9 +54,28 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 - **Face** — shot / pass aim follows where the capsule is facing (default).
 - **Mouse** — aim toward the mouse cursor projected onto the court plane (lob lifts the shot aim point).
 
-**Pass vs shoot:** Hold **LMB/E/RT** to charge a shot (HUD shows `SHOOT · FLAT/LOB`). Tap **RMB/G/RB** for an instant **PASS** — it cancels any charge and never fires the shot. Passes use a light lead in your aim cone (not a heavy magnet). HUD shows `PASS · RMB / G / RB` while you have the ball and are not charging.
+**Pass vs shoot:** Hold **LMB/E/RT** to charge a shot (HUD shows `SHOOT · FLAT/LOB`). Tap **RMB/G/RB** for an instant **PASS** — it cancels any charge and never fires the shot. Pass types share that pass button: **flat** alone, **bounce** with **B** / D-pad Left, **lob** with **F** / LT (same lob key as lob-shot while charging). Passes use a light lead in your aim cone (not a heavy magnet). HUD shows `PASS · FLAT/BOUNCE/LOB · RMB/G/RB`.
+
+**Jump-shot craft (Phase F):** With the ball, approach and press **Space** / A → brief **plant** → jump. Release the charged shot inside the timed **window** near apex for sweet timing (feels different from a standing charge). HUD shows plant / rise / window / early·sweet·late.
 
 **Dribble vs shoot/pass/jump:** Hold **V** (keyboard) or **R3** (gamepad) to bounce while moving. Chosen so it does not fight shoot (LMB/E/RT), pass (RMB/G/RB), jump (Space/A), or lob (F/LT). Release gathers the ball (new 3 steps + fresh 3 s). Starting a second bounce stream after gather = **double dribble**. Pass and shot clear the 3 s clock. Charging a shot ends an active dribble.
+
+## Phase F — movement craft
+
+| Feature | How it feels in play |
+|---------|----------------------|
+| **Jump-shot state** | Approach + jump with ball → plant → airborne **release window**; sweet timed release punches harder than a standing shot. |
+| **Pass types** | **Flat** chest pass; **bounce** hits the floor then hops to the receiver; **lob** floats over the wall. Same aim (face/mouse). |
+| **GK angle-cut** | AI GK steps off the line toward the threat with near-post bias (cuts the angle). |
+| **Post-save outlet** | After a save gather, AI GK lobs an outlet to a wing (fast-break lite). |
+| **Catch settle** | Fresh catch briefly slows movement so reception reads before the next drive. |
+
+### Intentional simplifications (Phase F)
+
+- Jump plant is a short grounded stick, not full three-step drive animation.
+- Bounce pass = floor redirect hop (**approx**), not true spin/palm.
+- Outlet is AI-only after saves; human GK keeps distribution manual.
+- No roster expand (still 3+GK) — Phase G.
 
 ## Phase B — dribble + 3-second hold
 
