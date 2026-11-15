@@ -54,6 +54,18 @@ const GK_OUTLET_DELAY_S := 0.42
 const GK_OUTLET_COOLDOWN_S := 1.1
 ## Phase F jump-shot plant slows approach so the takeoff reads.
 const JUMP_PLANT_SPEED := 0.28
+## Phase G stamina — drain on sprint / jump / shot; recover off-ball / on bench.
+const STAMINA_MAX := 100.0
+const SPRINT_SPEED_MUL := 1.26
+const STAMINA_DRAIN_SPRINT := 16.0
+const STAMINA_DRAIN_JUMP := 7.5
+const STAMINA_DRAIN_SHOT := 5.5
+const STAMINA_RECOVER_MOVE := 7.0
+const STAMINA_RECOVER_IDLE := 11.0
+const STAMINA_RECOVER_BENCH := 22.0
+const STAMINA_LOW := 28.0
+const STAMINA_SPEED_FLOOR := 0.78
+const STAMINA_ACCURACY_FLOOR := 0.62
 
 @export var team_id: int = 0 ## 0 = home (blue), 1 = away (red)
 @export var is_goalkeeper: bool = false
@@ -77,6 +89,13 @@ var block_ready: bool = false
 ## Phase D: 2-min exclusion lite — parked at bench, AI off until MatchController restores.
 var excluded: bool = false
 var exclusion_remaining: float = 0.0
+## Phase G: voluntary bench (substitution) — parked sideline, not an exclusion.
+var on_bench: bool = false
+## Sideline parking slot index (0+) for bench / exclusion spread.
+var bench_slot: int = 0
+## Phase G stamina 0–100.
+var stamina: float = STAMINA_MAX
+var sprinting: bool = false
 ## Phase E: team shape presets (MatchController syncs Home toggles / Away AI).
 ## Defaults are Formations.AttackShape.WIDE / DefenseShape.FLAT (0) — int avoids
 ## a Player↔Formations class-name cycle at parse time.
@@ -169,15 +188,19 @@ func _physics_process(delta: float) -> void:
 		velocity.y -= ProjectSettings.get_setting("physics/3d/default_gravity") * delta
 
 	var wish := Vector3.ZERO
-	if excluded:
-		# Sit on the bench marker — no movement / AI while excluded.
+	sprinting = false
+	if excluded or on_bench:
+		# Sit on the bench marker — no movement / AI while benched or excluded.
 		wish = Vector3.ZERO
 		velocity.x = 0.0
 		velocity.z = 0.0
+		_tick_stamina(delta, false, false)
 	elif match_frozen:
 		wish = Vector3.ZERO
+		_tick_stamina(delta, false, false)
 	elif diving:
 		wish = Vector3.ZERO
+		_tick_stamina(delta, false, false)
 	elif controlled:
 		var input_dir := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
 		# WASD / left stick are camera-relative: forward = into the screen along
@@ -185,6 +208,13 @@ func _physics_process(delta: float) -> void:
 		wish = camera_relative_wish(input_dir)
 		if is_goalkeeper and Input.is_action_just_pressed("dive"):
 			try_dive(_preferred_dive_dir(wish))
+		# Phase G sprint (Shift / Back) — drains stamina while moving.
+		sprinting = (
+			Input.is_action_pressed("sprint")
+			and wish.length_squared() > 0.04
+			and stamina > 0.5
+			and not is_goalkeeper
+		)
 	elif ai_enabled:
 		wish = _ai_wish(delta)
 
@@ -197,10 +227,12 @@ func _physics_process(delta: float) -> void:
 			target_speed *= AI_GK_SPEED_SCALE * AI_GK_TRACK_SPEED_SCALE
 		else:
 			target_speed *= AI_CHASE_SPEED_SCALE
-	# Catch settle + jump plant briefly slow the carrier for readability.
+	if sprinting:
+		target_speed *= SPRINT_SPEED_MUL
+	# Catch settle + jump plant + low stamina briefly softens speed.
 	target_speed *= _move_speed_mul()
 	# Snappy ground response; softer air control for jump-shot steering.
-	if not diving and _js_plant_t <= 0.0:
+	if not diving and _js_plant_t <= 0.0 and not on_bench and not excluded:
 		var desired := wish * target_speed
 		var rate := 18.0 if is_on_floor() else (18.0 * AIR_CONTROL)
 		var blend := 1.0 - exp(-rate * delta)
@@ -211,11 +243,21 @@ func _physics_process(delta: float) -> void:
 		velocity.x = lerpf(velocity.x, 0.0, 1.0 - exp(-22.0 * delta))
 		velocity.z = lerpf(velocity.z, 0.0, 1.0 - exp(-22.0 * delta))
 
-	if controlled and not match_frozen and not diving and Input.is_action_just_pressed("jump") and is_on_floor():
+	if (
+		controlled
+		and not match_frozen
+		and not diving
+		and not on_bench
+		and not excluded
+		and Input.is_action_just_pressed("jump")
+		and is_on_floor()
+	):
 		_begin_jump_from_input(wish)
 
-	_tick_jump_shot_craft(delta)
-	_tick_gk_outlet(delta)
+	if not on_bench and not excluded:
+		_tick_stamina(delta, sprinting, wish.length_squared() > 0.04)
+		_tick_jump_shot_craft(delta)
+		_tick_gk_outlet(delta)
 
 	# Soft velocity push clears nested capsules without freezing wish/slide motion.
 	_apply_soft_player_separation()
@@ -245,6 +287,7 @@ func try_shoot(
 	has_ball = false
 	_outlet_pending = false
 	_outlet_timer = 0.0
+	drain_stamina(STAMINA_DRAIN_SHOT)
 	# Preserve jump-shot craft meta for the release, then clear plant if still grounded.
 	if jump_shot_active and not shot_meta.has("jump_shot"):
 		shot_meta["jump_shot"] = true
@@ -269,7 +312,48 @@ func _move_speed_mul() -> float:
 		mul *= CATCH_SETTLE_SPEED
 	if _js_plant_t > 0.0:
 		mul *= JUMP_PLANT_SPEED
+	mul *= stamina_speed_mul()
 	return mul
+
+
+func stamina_01() -> float:
+	return clampf(stamina / STAMINA_MAX, 0.0, 1.0)
+
+
+## Soft speed floor when stamina is low (1.0 full → STAMINA_SPEED_FLOOR empty).
+func stamina_speed_mul() -> float:
+	var t := stamina_01()
+	if t >= STAMINA_LOW / STAMINA_MAX:
+		return 1.0
+	var low_t := clampf(t / (STAMINA_LOW / STAMINA_MAX), 0.0, 1.0)
+	return lerpf(STAMINA_SPEED_FLOOR, 1.0, low_t)
+
+
+## Soft shot/pass accuracy (1.0 full → STAMINA_ACCURACY_FLOOR empty).
+func stamina_accuracy_mul() -> float:
+	var t := stamina_01()
+	if t >= STAMINA_LOW / STAMINA_MAX:
+		return 1.0
+	var low_t := clampf(t / (STAMINA_LOW / STAMINA_MAX), 0.0, 1.0)
+	return lerpf(STAMINA_ACCURACY_FLOOR, 1.0, low_t)
+
+
+func drain_stamina(amount: float) -> void:
+	stamina = clampf(stamina - maxf(0.0, amount), 0.0, STAMINA_MAX)
+
+
+func _tick_stamina(delta: float, is_sprinting: bool, is_moving: bool) -> void:
+	if on_bench or excluded:
+		stamina = minf(STAMINA_MAX, stamina + STAMINA_RECOVER_BENCH * delta)
+		return
+	if is_sprinting:
+		drain_stamina(STAMINA_DRAIN_SPRINT * delta)
+		return
+	# Off-ball / non-sprint recover — slower while carrying so sprint still matters.
+	var rate := STAMINA_RECOVER_IDLE if not is_moving else STAMINA_RECOVER_MOVE
+	if has_ball:
+		rate *= 0.55
+	stamina = minf(STAMINA_MAX, stamina + rate * delta)
 
 
 ## Jump with ball + approach → plant → jump-shot craft; otherwise a normal hop.
@@ -280,6 +364,7 @@ func _begin_jump_from_input(wish: Vector3) -> void:
 	var approach := planar.length()
 	if wish.length_squared() > 0.01:
 		approach = maxf(approach, wish.length() * SPEED * 0.55)
+	drain_stamina(STAMINA_DRAIN_JUMP)
 	var craft := has_ball and approach >= ShotCraft.APPROACH_MIN_SPEED
 	if craft:
 		jump_shot_active = true
@@ -431,6 +516,11 @@ func reset_to_start() -> void:
 	block_ready = false
 	excluded = false
 	exclusion_remaining = 0.0
+	# on_bench / bench_slot preserved — MatchController owns sub state across resets.
+	if on_bench:
+		global_position = Court.bench_marker(team_id, maxi(0, bench_slot))
+	stamina = STAMINA_MAX
+	sprinting = false
 	visible = true
 	_catch_settle_t = 0.0
 	_js_plant_t = 0.0
@@ -448,11 +538,15 @@ func reset_to_start() -> void:
 
 ## Light XZ velocity bias when another player capsule overlaps this one.
 func _apply_soft_player_separation() -> void:
+	if on_bench or excluded:
+		return
 	var min_sep := BODY_RADIUS * 2.0
 	for node in get_tree().get_nodes_in_group("players"):
 		if node == self or not (node is Player):
 			continue
 		var other := node as Player
+		if other.on_bench or other.excluded:
+			continue
 		var offset := Vector3(
 			global_position.x - other.global_position.x,
 			0.0,
@@ -537,6 +631,8 @@ func _preferred_dive_dir(wish: Vector3) -> Vector3:
 
 
 func _ai_wish(delta: float) -> Vector3:
+	if on_bench or excluded:
+		return Vector3.ZERO
 	if match_ball == null:
 		return _steer_toward(Formations.attack_slot(self, start_position))
 
@@ -634,7 +730,7 @@ func _ai_free_ball_position() -> Vector3:
 			if sibling == self or not (sibling is Player):
 				continue
 			var mate := sibling as Player
-			if mate.is_goalkeeper or mate.match_frozen:
+			if mate.is_goalkeeper or mate.match_frozen or mate.excluded or mate.on_bench:
 				continue
 			if mate.global_position.distance_squared_to(match_ball.global_position) + 0.35 < my_d:
 				i_am_chaser = false
@@ -668,16 +764,17 @@ func _ai_defend_block(carrier: Player) -> Vector3:
 func _ai_support_attack(carrier: Player) -> Vector3:
 	# Show for pass: hold a formation lane but step into an open angle when a
 	# teammate (esp. the human) has the ball — readable wing↔CB circulation.
-	# Crash: ball-side wing may seal a light screen between CB and nearest defender.
+	# Crash: ball-side wing may seal a light screen between pivot and nearest defender.
 	var ball_pos := carrier.global_position
-	var pivot := _ai_teammate_cb()
+	var pivot := _ai_teammate_pivot()
 	var screen_def := _ai_nearest_opponent() if attack_shape == Formations.AttackShape.CRASH else null
 	var slot := Formations.show_for_pass_slot(self, ball_pos, pivot, screen_def)
 	var to_carrier := slot.distance_to(Vector3(ball_pos.x, 0.0, ball_pos.z))
 	if to_carrier < 2.4:
 		# Don't stack on the ball carrier — slide wider.
-		var side := 1.0 if Formations.role_for(self) == Formations.Role.RIGHT_WING else -1.0
-		if Formations.role_for(self) == Formations.Role.CENTER_BACK:
+		var role := Formations.role_for(self)
+		var side := 1.0 if role == Formations.Role.RIGHT_WING or role == Formations.Role.RIGHT_BACK else -1.0
+		if role == Formations.Role.CENTER_BACK or role == Formations.Role.PIVOT:
 			side = 0.0
 			slot.z += (-1.0 if team_id == 0 else 1.0) * 1.5
 		slot.x += side * 2.2
@@ -686,19 +783,24 @@ func _ai_support_attack(carrier: Player) -> Vector3:
 	return _steer_toward(slot) * minf(AI_ATTACK_SPEED_SCALE * 1.08, 1.0)
 
 
-func _ai_teammate_cb() -> Player:
+func _ai_teammate_pivot() -> Player:
 	var parent_n := get_parent()
 	if parent_n == null:
 		return null
+	var pivot: Player = null
+	var cb: Player = null
 	for sibling in parent_n.get_children():
 		if sibling == self or not (sibling is Player):
 			continue
 		var mate := sibling as Player
-		if mate.is_goalkeeper or mate.excluded:
+		if mate.is_goalkeeper or mate.excluded or mate.on_bench:
 			continue
-		if Formations.role_for(mate) == Formations.Role.CENTER_BACK:
-			return mate
-	return null
+		var role := Formations.role_for(mate)
+		if role == Formations.Role.PIVOT:
+			pivot = mate
+		elif role == Formations.Role.CENTER_BACK:
+			cb = mate
+	return pivot if pivot else cb
 
 
 func _ai_nearest_opponent() -> Player:
@@ -715,7 +817,7 @@ func _ai_nearest_opponent() -> Player:
 			if not (child is Player):
 				continue
 			var opp := child as Player
-			if opp.team_id == team_id or opp.is_goalkeeper or opp.excluded:
+			if opp.team_id == team_id or opp.is_goalkeeper or opp.excluded or opp.on_bench:
 				continue
 			var d := global_position.distance_squared_to(opp.global_position)
 			if d < best_d:

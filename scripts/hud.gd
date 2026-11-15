@@ -29,6 +29,8 @@ const COLOR_GOAL_AWAY := Color(1.0, 0.72, 0.35, 1.0)
 @onready var shot_label: Label = $Root/ShotLabel
 @onready var power_bar: ProgressBar = $Root/PowerBar
 var shapes_label: Label
+var stamina_label: Label
+var sub_label: Label
 
 var _steps_pulse: Tween
 var _goal_tween: Tween
@@ -47,10 +49,12 @@ func _ready() -> void:
 	if power_bar:
 		power_bar.visible = false
 		power_bar.value = 0.0
-	help_label.text = "WASD move · Space jump · hold V/R3 dribble · hold LMB/E/RT shoot · RMB/G/RB PASS (+B bounce / +F lob) · F/LT lob-shot · C/Ctrl/East dive (GK) · Q cycle · R best · T aim · 1 atk · 2 def"
+	help_label.text = "WASD · Shift sprint · Space jump · V dribble · LMB/E shoot · RMB/G PASS (+B bounce / +F lob) · C dive · Q cycle · R best · 1/2 shapes · ,/. sub on whistle"
 	_ensure_flash_overlay()
 	_ensure_hold_label()
 	_ensure_shapes_label()
+	_ensure_stamina_label()
+	_ensure_sub_label()
 
 
 func set_score(home: int, away: int) -> void:
@@ -83,6 +87,50 @@ func set_shapes_status(attack_label: String, defense_label: String) -> void:
 		return
 	shapes_label.visible = true
 	shapes_label.text = "Shape Atk %s · Def %s" % [attack_label, defense_label]
+
+
+## Phase G: controlled player stamina 0–1.
+func set_stamina(amount_01: float, sprinting: bool = false) -> void:
+	_ensure_stamina_label()
+	if stamina_label == null:
+		return
+	stamina_label.visible = true
+	var pct := int(round(clampf(amount_01, 0.0, 1.0) * 100.0))
+	var pips_total := 8
+	var filled := int(round(clampf(amount_01, 0.0, 1.0) * float(pips_total)))
+	filled = clampi(filled, 0, pips_total)
+	var pip := ""
+	for i in range(pips_total):
+		pip += "●" if i < filled else "○"
+	var tag := "SPRINT" if sprinting else "Stamina"
+	stamina_label.text = "%s %d  %s" % [tag, pct, pip]
+	if amount_01 <= 0.28:
+		stamina_label.add_theme_color_override("font_color", Color(1.0, 0.55, 0.35, 1.0))
+	elif sprinting:
+		stamina_label.add_theme_color_override("font_color", Color(0.55, 0.95, 0.7, 1.0))
+	else:
+		stamina_label.add_theme_color_override("font_color", Color(0.85, 0.95, 0.9, 0.9))
+
+
+## Phase G: dead-ball sub hint.
+func set_sub_status(can_sub: bool, bench_label: String, bench_count: int) -> void:
+	_ensure_sub_label()
+	if sub_label == null:
+		return
+	if bench_count <= 0:
+		sub_label.visible = false
+		return
+	sub_label.visible = true
+	if can_sub:
+		sub_label.text = "SUB ready · , cycle · . confirm%s" % (
+			(" · %s" % bench_label) if not bench_label.is_empty() else ""
+		)
+		sub_label.add_theme_color_override("font_color", Color(0.7, 1.0, 0.75, 1.0))
+	else:
+		sub_label.text = "SUB on whistle · , cycle%s" % (
+			(" · %s" % bench_label) if not bench_label.is_empty() else ""
+		)
+		sub_label.add_theme_color_override("font_color", Color(0.75, 0.82, 0.9, 0.75))
 
 
 ## Phase 3 power / lob / jump-shot readout. Hidden when idle to avoid clutter.
@@ -403,6 +451,46 @@ func _ensure_shapes_label() -> void:
 	shapes_label.add_theme_constant_override("shadow_offset_y", 1)
 	shapes_label.text = "Shape Atk Wide · Def Flat"
 	$Root.add_child(shapes_label)
+
+
+func _ensure_stamina_label() -> void:
+	if stamina_label and is_instance_valid(stamina_label):
+		return
+	stamina_label = get_node_or_null("Root/StaminaLabel") as Label
+	if stamina_label:
+		return
+	stamina_label = Label.new()
+	stamina_label.name = "StaminaLabel"
+	stamina_label.visible = true
+	stamina_label.position = Vector2(200, 52)
+	stamina_label.size = Vector2(280, 28)
+	stamina_label.add_theme_font_size_override("font_size", 16)
+	stamina_label.add_theme_color_override("font_color", Color(0.85, 0.95, 0.9, 0.9))
+	stamina_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.65))
+	stamina_label.add_theme_constant_override("shadow_offset_x", 1)
+	stamina_label.add_theme_constant_override("shadow_offset_y", 1)
+	stamina_label.text = "Stamina 100  ●●●●●●●●"
+	$Root.add_child(stamina_label)
+
+
+func _ensure_sub_label() -> void:
+	if sub_label and is_instance_valid(sub_label):
+		return
+	sub_label = get_node_or_null("Root/SubLabel") as Label
+	if sub_label:
+		return
+	sub_label = Label.new()
+	sub_label.name = "SubLabel"
+	sub_label.visible = true
+	sub_label.position = Vector2(980, 78)
+	sub_label.size = Vector2(320, 28)
+	sub_label.add_theme_font_size_override("font_size", 15)
+	sub_label.add_theme_color_override("font_color", Color(0.75, 0.82, 0.9, 0.75))
+	sub_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.65))
+	sub_label.add_theme_constant_override("shadow_offset_x", 1)
+	sub_label.add_theme_constant_override("shadow_offset_y", 1)
+	sub_label.text = "SUB on whistle · , cycle"
+	$Root.add_child(sub_label)
 
 
 func _flash_center(label: Label, text: String, hold: float, fade: float, color: Color = COLOR_BANNER_DEFAULT) -> void:
