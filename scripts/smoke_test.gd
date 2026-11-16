@@ -365,14 +365,14 @@ func _ready() -> void:
 	var home_cb: Player = null
 	var home_rw: Player = null
 	for p in match_node._home_players:
-		if p.is_goalkeeper:
+		if p.is_goalkeeper or p.on_bench:
 			continue
 		match Formations.role_for(p):
 			Formations.Role.LEFT_WING:
 				home_lw = p
 			Formations.Role.RIGHT_WING:
 				home_rw = p
-			_:
+			Formations.Role.CENTER_BACK:
 				home_cb = p
 	if home_lw == null or home_cb == null or home_rw == null:
 		push_error("Smoke: missing home LW/CB/RW for pass circulation")
@@ -380,6 +380,8 @@ func _ready() -> void:
 		return
 
 	# Park wing→CB first; keep RW wide/back so cone scoring prefers CB.
+	# Phase G: stash LB/RB/Pivot far away so they don't steal the pass cone.
+	_smoke_park_unused_outfield(match_node, [home_lw, home_cb, home_rw])
 	home_lw.global_position = Vector3(-2.5, home_lw.start_position.y, -1.0)
 	home_cb.global_position = Vector3(0.0, home_cb.start_position.y, 5.0)
 	home_rw.global_position = Vector3(7.5, home_rw.start_position.y, -3.0)
@@ -451,6 +453,7 @@ func _ready() -> void:
 	# CB → RW
 	match_node._set_controlled(home_cb)
 	_smoke_lock_pass_bots(match_node, [home_lw, home_cb, home_rw])
+	_smoke_park_unused_outfield(match_node, [home_lw, home_cb, home_rw])
 	home_cb.global_position = Vector3(0.0, home_cb.start_position.y, 5.0)
 	home_cb.rotation.y = 0.0
 	home_cb.velocity = Vector3.ZERO
@@ -481,6 +484,7 @@ func _ready() -> void:
 	# RW → CB (close the wing↔CB↔wing loop)
 	match_node._set_controlled(home_rw)
 	_smoke_lock_pass_bots(match_node, [home_lw, home_cb, home_rw])
+	_smoke_park_unused_outfield(match_node, [home_lw, home_cb, home_rw])
 	home_rw.global_position = Vector3(3.0, home_rw.start_position.y, 10.5)
 	home_rw.rotation.y = PI # face back toward CB (-Z)
 	home_rw.velocity = Vector3.ZERO
@@ -1102,8 +1106,15 @@ func _ready() -> void:
 		return
 
 	# Jump-shot quality: grounded = -1; raised player near apex = sweet(1)
+	player.jump_shot_active = false
+	player.jump_shot_air_s = 0.0
+	player.jump_shot_phase = ShotCraft.JumpPhase.NONE
 	player.global_position.y = 0.0
 	player.velocity = Vector3.ZERO
+	# Settle on floor — teleports alone often leave is_on_floor() false (esp. denser roster).
+	for _i in range(4):
+		player.move_and_slide()
+		await get_tree().physics_frame
 	var q_ground := ShotCraft.jump_shot_quality(player)
 	player.global_position.y = ShotCraft.JUMP_APEX_Y * 0.75
 	player.velocity = Vector3(0.0, 0.2, 0.0)
@@ -1113,7 +1124,7 @@ func _ready() -> void:
 	await get_tree().physics_frame
 	await get_tree().physics_frame
 	var q_air := ShotCraft.jump_shot_quality(player)
-	print("Smoke jump quality ground=", q_ground, " air=", q_air, " y=", player.global_position.y)
+	print("Smoke jump quality ground=", q_ground, " air=", q_air, " y=", player.global_position.y, " on_floor=", player.is_on_floor())
 	if q_ground != -1:
 		push_error("Smoke: grounded jump quality should be -1")
 		get_tree().quit(1)
@@ -1195,12 +1206,12 @@ func _ready() -> void:
 	_smoke_prepare_live(match_node, ball)
 	_smoke_clear_ball(ball)
 
-	# Role map: idx 1=LW, 2=CB, 3=RW
+	# Role map: idx 1=LW … 3=CB … 5=RW (skip bench).
 	var lw: Player = null
 	var cb: Player = null
 	var rw: Player = null
 	for p in match_node._home_players:
-		if p.is_goalkeeper:
+		if p.is_goalkeeper or p.on_bench:
 			continue
 		match Formations.role_for(p):
 			Formations.Role.LEFT_WING:
@@ -1259,6 +1270,8 @@ func _ready() -> void:
 		return
 
 	# Forced stack → placement resolver must nudge capsules apart.
+	# Park other on-court bodies far away so the 7-man wall doesn't pin the stack.
+	_smoke_park_unused_outfield(match_node, [lw, cb, rw])
 	lw.global_position = Vector3(0.0, 0.0, 0.0)
 	rw.global_position = Vector3(0.05, 0.0, 0.02)
 	cb.global_position = Vector3(-0.02, 0.0, -0.04)
@@ -1333,6 +1346,7 @@ func _ready() -> void:
 
 	# Switch-to-best: free ball near LW → should prefer LW over far RW
 	_smoke_clear_ball(ball)
+	_smoke_park_unused_outfield(match_node, [lw, cb, rw])
 	lw.global_position = Vector3(-4.0, lw.start_position.y, 0.0)
 	rw.global_position = Vector3(8.0, rw.start_position.y, -10.0)
 	cb.global_position = Vector3(0.0, cb.start_position.y, -8.0)
@@ -1348,6 +1362,7 @@ func _ready() -> void:
 
 	# Switch-to-best defending: prefer outfielder near carrier
 	_smoke_clear_ball(ball)
+	_smoke_park_unused_outfield(match_node, [lw, cb, rw])
 	var away_carrier := match_node._first_outfield(match_node._away_players)
 	away_carrier.global_position = Vector3(2.0, away_carrier.start_position.y, -6.0)
 	if not ball.try_pickup(away_carrier):
@@ -1537,7 +1552,7 @@ func _ready() -> void:
 		push_error("Smoke: 7 m clear-chance should exclude the fouler")
 		get_tree().quit(1)
 		return
-	var bench := Court.bench_marker(pen_def.team_id, maxi(0, pen_def.player_index - 1))
+	var bench := Court.bench_marker(pen_def.team_id, 2 + maxi(0, pen_def.player_index % 4))
 	if pen_def.global_position.distance_to(bench) > 1.5:
 		push_error("Smoke: excluded player should sit on bench marker")
 		get_tree().quit(1)
@@ -1567,7 +1582,7 @@ func _ready() -> void:
 	var e_cb: Player = null
 	var e_rw: Player = null
 	for p in match_node._home_players:
-		if p.is_goalkeeper:
+		if p.is_goalkeeper or p.on_bench:
 			continue
 		match Formations.role_for(p):
 			Formations.Role.LEFT_WING:
@@ -1637,17 +1652,21 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 
-	# Cosmetic CB → LB/RB remap by ball side.
-	if Formations.role_label_hud(Formations.Role.CENTER_BACK, -3.0) != "LB":
-		push_error("Smoke: CB should remap to LB on ball-left")
+	# Phase G: real LB / RB / Pivot labels (no cosmetic CB remap).
+	if Formations.role_label(Formations.Role.LEFT_BACK) != "LB":
+		push_error("Smoke: LEFT_BACK should label LB")
 		get_tree().quit(1)
 		return
-	if Formations.role_label_hud(Formations.Role.CENTER_BACK, 3.0) != "RB":
-		push_error("Smoke: CB should remap to RB on ball-right")
+	if Formations.role_label(Formations.Role.RIGHT_BACK) != "RB":
+		push_error("Smoke: RIGHT_BACK should label RB")
 		get_tree().quit(1)
 		return
-	if Formations.role_label_hud(Formations.Role.CENTER_BACK, 0.0) != "CB":
-		push_error("Smoke: CB should stay CB when ball is central")
+	if Formations.role_label(Formations.Role.PIVOT) != "P":
+		push_error("Smoke: PIVOT should label P")
+		get_tree().quit(1)
+		return
+	if Formations.role_label_hud(Formations.Role.CENTER_BACK, -3.0) != "CB":
+		push_error("Smoke: CB should stay CB (real LB/RB exist)")
 		get_tree().quit(1)
 		return
 
@@ -1777,7 +1796,7 @@ func _ready() -> void:
 	var home_cb_f: Player = null
 	var home_rw_f: Player = null
 	for p in match_node._home_players:
-		if p.is_goalkeeper:
+		if p.is_goalkeeper or p.on_bench:
 			continue
 		match Formations.role_for(p):
 			Formations.Role.LEFT_WING:
@@ -1790,6 +1809,7 @@ func _ready() -> void:
 		push_error("Smoke: missing home wings/CB for Phase F passes")
 		get_tree().quit(1)
 		return
+	_smoke_park_unused_outfield(match_node, [home_lw_f, home_cb_f, home_rw_f])
 	_smoke_lock_pass_bots(match_node, [home_lw_f, home_cb_f, home_rw_f])
 	home_cb_f.global_position = Vector3(0.0, home_cb_f.start_position.y, 0.0)
 	home_rw_f.global_position = Vector3(2.5, home_rw_f.start_position.y, 6.0)
@@ -2022,6 +2042,146 @@ func _ready() -> void:
 	Engine.time_scale = 1.0
 	print("Smoke Phase 5 presentation OK")
 
+	# --- Phase G: roster 7+2, stamina, dead-ball substitutions ---
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	var home_court := 0
+	var home_bench := 0
+	var roles_seen: Dictionary = {}
+	for p in match_node._home_players:
+		if p.on_bench:
+			home_bench += 1
+			continue
+		home_court += 1
+		if not p.is_goalkeeper:
+			roles_seen[Formations.role_for(p)] = true
+	print(
+		"Smoke Phase G roster home court=", home_court,
+		" bench=", home_bench, " roles=", roles_seen.size()
+	)
+	if home_court != 7:
+		push_error("Smoke: expected 7 on-court Home players (GK+6)")
+		get_tree().quit(1)
+		return
+	if home_bench < 2:
+		push_error("Smoke: expected ≥2 Home bench players")
+		get_tree().quit(1)
+		return
+	for need_role in [
+		Formations.Role.LEFT_WING,
+		Formations.Role.LEFT_BACK,
+		Formations.Role.CENTER_BACK,
+		Formations.Role.RIGHT_BACK,
+		Formations.Role.RIGHT_WING,
+		Formations.Role.PIVOT,
+	]:
+		if not roles_seen.has(need_role):
+			push_error("Smoke: missing on-court role %s" % Formations.role_label(need_role))
+			get_tree().quit(1)
+			return
+
+	# Stamina drains on sprint / jump / shot; recovers off-ball.
+	var stam_p := match_node._first_outfield(match_node._home_players)
+	match_node._set_controlled(stam_p)
+	stam_p.stamina = Player.STAMINA_MAX
+	stam_p.global_position = Vector3(0.0, 0.0, 0.0)
+	stam_p.velocity = Vector3.ZERO
+	stam_p.match_frozen = false
+	stam_p.on_bench = false
+	# Simulate sprint drain without relying on Input actions in headless.
+	var stam_before := stam_p.stamina
+	stam_p._tick_stamina(1.0, true, true)
+	print("Smoke Phase G sprint drain ", stam_before, " -> ", stam_p.stamina)
+	if stam_p.stamina >= stam_before - Player.STAMINA_DRAIN_SPRINT * 0.5:
+		push_error("Smoke: sprint should drain stamina")
+		get_tree().quit(1)
+		return
+	stam_p.stamina = 20.0
+	var speed_mul := stam_p.stamina_speed_mul()
+	var acc_mul := stam_p.stamina_accuracy_mul()
+	print("Smoke Phase G low stamina speed=", speed_mul, " acc=", acc_mul)
+	if speed_mul >= 0.99 or acc_mul >= 0.99:
+		push_error("Smoke: low stamina should soften speed/accuracy")
+		get_tree().quit(1)
+		return
+	var shot_before := stam_p.stamina
+	stam_p.drain_stamina(Player.STAMINA_DRAIN_SHOT)
+	stam_p.drain_stamina(Player.STAMINA_DRAIN_JUMP)
+	if stam_p.stamina >= shot_before:
+		push_error("Smoke: jump/shot should drain stamina")
+		get_tree().quit(1)
+		return
+	# Off-ball recover.
+	stam_p.has_ball = false
+	var recover_before := stam_p.stamina
+	stam_p._tick_stamina(1.0, false, false)
+	if stam_p.stamina <= recover_before:
+		push_error("Smoke: stamina should recover off-ball")
+		get_tree().quit(1)
+		return
+	print("Smoke Phase G stamina drain/recover OK")
+
+	# Dead-ball sub: controlled outfielder ↔ selected bench.
+	match_node.match_state = MatchController.MatchState.RULE_RESTART
+	match_node._set_players_frozen(true)
+	var out_player := match_node._first_outfield(match_node._home_players)
+	match_node._set_controlled(out_player)
+	var out_role_idx := out_player.player_index
+	var out_name := out_player.name
+	var bench_list := match_node._bench_players(0)
+	if bench_list.is_empty():
+		push_error("Smoke: no Home bench for sub")
+		get_tree().quit(1)
+		return
+	match_node._bench_select_i = 0
+	var in_player: Player = bench_list[0]
+	var in_name := in_player.name
+	if not match_node._can_substitute_now():
+		push_error("Smoke: RULE_RESTART should allow subs")
+		get_tree().quit(1)
+		return
+	match_node._try_substitution()
+	print(
+		"Smoke Phase G sub: out=", out_name, " in=", in_name,
+		" controlled=", match_node.controlled_player.name if match_node.controlled_player else "null",
+		" role_idx=", match_node.controlled_player.player_index if match_node.controlled_player else -1
+	)
+	if match_node.controlled_player != in_player:
+		push_error("Smoke: sub should control the incoming bench player")
+		get_tree().quit(1)
+		return
+	if match_node.controlled_player.player_index != out_role_idx:
+		push_error("Smoke: incoming should inherit outgoing court role index")
+		get_tree().quit(1)
+		return
+	if not out_player.on_bench:
+		push_error("Smoke: outgoing should be on the bench after sub")
+		get_tree().quit(1)
+		return
+	if in_player.on_bench:
+		push_error("Smoke: incoming should leave the bench after sub")
+		get_tree().quit(1)
+		return
+	# Live play blocks subs.
+	match_node.match_state = MatchController.MatchState.LIVE
+	match_node._set_players_frozen(false)
+	if match_node._can_substitute_now():
+		push_error("Smoke: LIVE should block substitutions")
+		get_tree().quit(1)
+		return
+	# Cycle still skips bench.
+	var before_cycle_g := match_node.controlled_player
+	match_node._cycle_teammate()
+	if match_node.controlled_player == null or match_node.controlled_player == before_cycle_g:
+		push_error("Smoke: cycle should still advance with 7 on court")
+		get_tree().quit(1)
+		return
+	if match_node.controlled_player.on_bench:
+		push_error("Smoke: cycle must not select bench players")
+		get_tree().quit(1)
+		return
+	print("Smoke Phase G roster/stamina/sub OK")
+
 	print("SMOKE_OK")
 	get_tree().quit(0)
 
@@ -2100,6 +2260,23 @@ func _smoke_lock_pass_bots(match_node: MatchController, bots: Array) -> void:
 		(p as Player).ai_enabled = false
 		(p as Player).match_frozen = false
 		(p as Player).velocity = Vector3.ZERO
+
+
+## Phase G: park unused on-court outfield so pass cones / switch-best stay deterministic.
+func _smoke_park_unused_outfield(match_node: MatchController, keep: Array) -> void:
+	var keep_set: Dictionary = {}
+	for p in keep:
+		if p != null:
+			keep_set[p] = true
+	var park_i := 0
+	for p in match_node._home_players:
+		if p.is_goalkeeper or p.on_bench or keep_set.has(p):
+			continue
+		p.global_position = Vector3(-8.0 + float(park_i) * 0.4, p.start_position.y, -14.0)
+		p.velocity = Vector3.ZERO
+		p.ai_enabled = false
+		p.match_frozen = true
+		park_i += 1
 
 
 func _smoke_snap_ball_to_carrier(ball: Ball) -> void:

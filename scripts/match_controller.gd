@@ -2,7 +2,8 @@ extends Node3D
 class_name MatchController
 
 ## Routes input, possession, team switch, scoring, clock, kickoff, AI, Phase 2–5
-## rules/tactics/presentation, Phase D contact / 7 m / exclusion, Phase E shapes.
+## rules/tactics/presentation, Phase D contact / 7 m / exclusion, Phase E shapes,
+## Phase G sim depth (7-man roster, stamina, dead-ball substitutions).
 
 enum AimMode { FACE, MOUSE_COURT }
 enum MatchState { PRE_KICKOFF, LIVE, GOAL_PAUSE, PERIOD_BREAK, MATCH_OVER, RULE_RESTART }
@@ -52,6 +53,8 @@ var home_attack_shape: int = 0
 var home_defense_shape: int = 0
 var away_attack_shape: int = 0
 var away_defense_shape: int = 0
+## Phase G: selected bench index into the team's bench list (for sub UI).
+var _bench_select_i: int = 0
 ## Set when rules emit step_taken so the HUD can pulse once.
 var _steps_hud_pulse: bool = false
 ## Phase 3 charge-to-shoot.
@@ -80,7 +83,7 @@ func _ready() -> void:
 	_refresh_hud()
 	_sync_team_shapes()
 	print(
-		"MyHandball Phase E shapes ready. Period=%ds x%d. Atk 1/D-pad↑ · Def 2/D-pad↓."
+		"MyHandball Phase G sim ready. Period=%ds x%d. Roster 7+2. Sprint Shift · Sub ,/. on whistle."
 		% [int(period_length_seconds), periods_total]
 	)
 	var user_args := OS.get_cmdline_user_args()
@@ -147,21 +150,30 @@ func _ready() -> void:
 func _spawn_roster() -> void:
 	if player_scene == null:
 		player_scene = load("res://scenes/actors/player.tscn") as PackedScene
-	# Home attacks +Z (toward away goal). Layout: GK near own goal, 3 outfield.
-	# Punchier kit colors for Phase 5 readability.
+	# Home attacks +Z. Phase G: full 7 on court (GK+LW/LB/CB/RB/RW/P) + 2 bench.
 	var home_color := Color(0.12, 0.42, 0.92)
 	var away_color := Color(0.92, 0.16, 0.14)
 	var home_spots: Array = [
 		{"pos": Vector3(0, 0, -17.5), "yaw": 0.0, "gk": true, "idx": 0},
-		{"pos": Vector3(-3.5, 0, -6.0), "yaw": 0.0, "gk": false, "idx": 1},
-		{"pos": Vector3(0.0, 0, -4.0), "yaw": 0.0, "gk": false, "idx": 2},
-		{"pos": Vector3(3.5, 0, -6.0), "yaw": 0.0, "gk": false, "idx": 3},
+		{"pos": Vector3(-6.2, 0, -7.0), "yaw": 0.0, "gk": false, "idx": 1}, # LW
+		{"pos": Vector3(-3.2, 0, -5.2), "yaw": 0.0, "gk": false, "idx": 2}, # LB
+		{"pos": Vector3(0.0, 0, -4.0), "yaw": 0.0, "gk": false, "idx": 3}, # CB
+		{"pos": Vector3(3.2, 0, -5.2), "yaw": 0.0, "gk": false, "idx": 4}, # RB
+		{"pos": Vector3(6.2, 0, -7.0), "yaw": 0.0, "gk": false, "idx": 5}, # RW
+		{"pos": Vector3(0.0, 0, -8.2), "yaw": 0.0, "gk": false, "idx": 6}, # Pivot
+		{"pos": Court.bench_marker(0, 0), "yaw": 0.0, "gk": false, "idx": 7, "bench": true, "slot": 0},
+		{"pos": Court.bench_marker(0, 1), "yaw": 0.0, "gk": false, "idx": 8, "bench": true, "slot": 1},
 	]
 	var away_spots: Array = [
 		{"pos": Vector3(0, 0, 17.5), "yaw": PI, "gk": true, "idx": 0},
-		{"pos": Vector3(3.5, 0, 6.0), "yaw": PI, "gk": false, "idx": 1},
-		{"pos": Vector3(0.0, 0, 4.0), "yaw": PI, "gk": false, "idx": 2},
-		{"pos": Vector3(-3.5, 0, 6.0), "yaw": PI, "gk": false, "idx": 3},
+		{"pos": Vector3(6.2, 0, 7.0), "yaw": PI, "gk": false, "idx": 1}, # LW (mirrored)
+		{"pos": Vector3(3.2, 0, 5.2), "yaw": PI, "gk": false, "idx": 2}, # LB
+		{"pos": Vector3(0.0, 0, 4.0), "yaw": PI, "gk": false, "idx": 3}, # CB
+		{"pos": Vector3(-3.2, 0, 5.2), "yaw": PI, "gk": false, "idx": 4}, # RB
+		{"pos": Vector3(-6.2, 0, 7.0), "yaw": PI, "gk": false, "idx": 5}, # RW
+		{"pos": Vector3(0.0, 0, 8.2), "yaw": PI, "gk": false, "idx": 6}, # Pivot
+		{"pos": Court.bench_marker(1, 0), "yaw": PI, "gk": false, "idx": 7, "bench": true, "slot": 0},
+		{"pos": Court.bench_marker(1, 1), "yaw": PI, "gk": false, "idx": 8, "bench": true, "slot": 1},
 	]
 	for spot in home_spots:
 		_spawn_player(_home_root, 0, home_color, spot)
@@ -174,10 +186,13 @@ func _spawn_player(parent: Node, team_id: int, color: Color, spot: Dictionary) -
 	p.team_id = team_id
 	p.is_goalkeeper = spot["gk"]
 	p.player_index = spot["idx"]
+	p.on_bench = bool(spot.get("bench", false))
+	p.bench_slot = int(spot.get("slot", maxi(0, int(spot["idx"]) - 7)))
 	p.body_color = color.darkened(0.15) if spot["gk"] else color
+	var kind := "GK" if spot["gk"] else ("BN" if p.on_bench else "OF")
 	p.name = "%s_%s%d" % [
 		"Home" if team_id == 0 else "Away",
-		"GK" if spot["gk"] else "OF",
+		kind,
 		spot["idx"] + 1
 	]
 	parent.add_child(p)
@@ -185,21 +200,24 @@ func _spawn_player(parent: Node, team_id: int, color: Color, spot: Dictionary) -
 	p.rotation.y = spot["yaw"]
 	p.start_position = spot["pos"]
 	p.start_yaw = spot["yaw"]
+	if p.on_bench:
+		p.ai_enabled = false
+		p.visible = true
 
 
 func _configure_ai() -> void:
 	for p in _home_players:
 		p.match_ball = ball
-		# Phase 4: uncontrolled home teammates hold formation slots (off-ball AI).
-		p.ai_enabled = (not p.excluded) and p != controlled_player
+		# Phase 4/G: uncontrolled on-court home teammates hold formation slots.
+		p.ai_enabled = (not p.excluded) and (not p.on_bench) and p != controlled_player
 	for p in _away_players:
 		p.match_ball = ball
-		p.ai_enabled = not p.excluded
+		p.ai_enabled = (not p.excluded) and (not p.on_bench)
 
 
 func _refresh_home_ai() -> void:
 	for p in _home_players:
-		p.ai_enabled = (not p.excluded) and p != controlled_player
+		p.ai_enabled = (not p.excluded) and (not p.on_bench) and p != controlled_player
 		p.match_ball = ball
 
 
@@ -236,6 +254,15 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if event.is_action_pressed("toggle_defense_shape"):
 		_toggle_home_defense_shape()
+		get_viewport().set_input_as_handled()
+		return
+	# Phase G: dead-ball substitutions (, cycle bench / . confirm).
+	if event.is_action_pressed("cycle_bench"):
+		_cycle_bench_select()
+		get_viewport().set_input_as_handled()
+		return
+	if event.is_action_pressed("confirm_sub"):
+		_try_substitution()
 		get_viewport().set_input_as_handled()
 		return
 	if event.is_action_pressed("switch_best"):
@@ -275,6 +302,9 @@ func _physics_process(delta: float) -> void:
 	_update_camera_attack_side()
 	_update_shot_charge(delta)
 	_update_dribble_input()
+	_park_bench_players()
+	_update_stamina_hud()
+	_update_sub_hud()
 	if match_state != MatchState.LIVE:
 		return
 	clock_remaining = maxf(0.0, clock_remaining - delta)
@@ -391,12 +421,14 @@ func _refresh_controlled_hud() -> void:
 	var role := "GK"
 	if not player.is_goalkeeper:
 		var ball_x := ball.global_position.x if ball else 0.0
-		role = Formations.role_label_hud(Formations.role_for(player), ball_x, true)
+		role = Formations.role_label_hud(Formations.role_for(player), ball_x, false)
 	hud.set_controlled("Team %s #%d (%s)" % [
 		"Home" if player.team_id == 0 else "Away",
 		player.player_index + 1,
 		role
 	])
+	_update_stamina_hud()
+	_update_sub_hud()
 
 
 func _toggle_home_attack_shape() -> void:
@@ -485,10 +517,10 @@ func _update_shapes_hud() -> void:
 
 
 func _cycle_teammate() -> void:
-	var roster := _home_players if controlled_team_id == 0 else _away_players
+	var roster := _on_court_players(controlled_team_id)
 	if roster.size() < 2:
 		return
-	# Cycle: next roster index (wrap), skipping excluded players.
+	# Cycle: next on-court index (wrap), skipping excluded players.
 	var start_i := 0
 	for i in range(roster.size()):
 		if roster[i] == controlled_player:
@@ -504,7 +536,7 @@ func _cycle_teammate() -> void:
 
 ## Switch-to-best: ball nearest / open receiver / best defender (Phase 4).
 func _switch_to_best() -> void:
-	var roster := _home_players if controlled_team_id == 0 else _away_players
+	var roster := _on_court_players(controlled_team_id)
 	if roster.size() < 2:
 		return
 	var best: Player = null
@@ -518,6 +550,161 @@ func _switch_to_best() -> void:
 			best = p
 	if best:
 		_set_controlled(best)
+
+
+func _on_court_players(team_id: int) -> Array[Player]:
+	var out: Array[Player] = []
+	var roster := _home_players if team_id == 0 else _away_players
+	for p in roster:
+		if p.on_bench:
+			continue
+		out.append(p)
+	return out
+
+
+func _bench_players(team_id: int) -> Array[Player]:
+	var out: Array[Player] = []
+	var roster := _home_players if team_id == 0 else _away_players
+	for p in roster:
+		if p.on_bench and not p.excluded:
+			out.append(p)
+	return out
+
+
+func _can_substitute_now() -> bool:
+	# Dead ball / whistle windows only (Phase G first slice).
+	return match_state in [
+		MatchState.PRE_KICKOFF,
+		MatchState.GOAL_PAUSE,
+		MatchState.PERIOD_BREAK,
+		MatchState.RULE_RESTART,
+	]
+
+
+func _cycle_bench_select() -> void:
+	var bench := _bench_players(controlled_team_id)
+	if bench.is_empty():
+		_bench_select_i = 0
+		_update_sub_hud()
+		return
+	_bench_select_i = (_bench_select_i + 1) % bench.size()
+	_update_sub_hud()
+	if hud and hud.has_method("flash_rule"):
+		var pick := bench[_bench_select_i]
+		hud.flash_rule("Bench → #%d" % (pick.player_index + 1), "sub")
+
+
+func _selected_bench_player() -> Player:
+	var bench := _bench_players(controlled_team_id)
+	if bench.is_empty():
+		return null
+	_bench_select_i = clampi(_bench_select_i, 0, bench.size() - 1)
+	return bench[_bench_select_i]
+
+
+## Swap controlled on-court outfielder with selected bench player (dead ball only).
+func _try_substitution() -> void:
+	if not _can_substitute_now():
+		if hud and hud.has_method("flash_rule"):
+			hud.flash_rule("Subs only on whistle", "sub")
+		return
+	var outgoing := controlled_player
+	if outgoing == null or outgoing.is_goalkeeper or outgoing.on_bench or outgoing.excluded:
+		if hud and hud.has_method("flash_rule"):
+			hud.flash_rule("Select an outfielder to sub out", "sub")
+		return
+	if outgoing.has_ball:
+		if hud and hud.has_method("flash_rule"):
+			hud.flash_rule("Can't sub the ball carrier", "sub")
+		return
+	var incoming := _selected_bench_player()
+	if incoming == null:
+		if hud and hud.has_method("flash_rule"):
+			hud.flash_rule("No bench player", "sub")
+		return
+	_swap_players_for_sub(outgoing, incoming)
+	if hud and hud.has_method("flash_rule"):
+		hud.flash_rule(
+			"SUB %s ↔ #%d"
+			% [Formations.role_label(Formations.role_for(incoming)), incoming.player_index + 1],
+			"sub"
+		)
+	print(
+		"SUB: %s off, %s on (role idx %d)"
+		% [outgoing.name, incoming.name, incoming.player_index]
+	)
+
+
+func _swap_players_for_sub(outgoing: Player, incoming: Player) -> void:
+	var out_idx := outgoing.player_index
+	var out_pos := outgoing.global_position
+	var out_start := outgoing.start_position
+	var out_yaw := outgoing.rotation.y
+	var out_start_yaw := outgoing.start_yaw
+	var in_slot := incoming.bench_slot
+	var in_idx := incoming.player_index
+
+	# Outgoing → bench (keeps a high bench index for identity; role rides with index swap).
+	outgoing.on_bench = true
+	outgoing.player_index = in_idx
+	outgoing.bench_slot = in_slot
+	outgoing.ai_enabled = false
+	outgoing.controlled = false
+	outgoing.velocity = Vector3.ZERO
+	outgoing.global_position = Court.bench_marker(outgoing.team_id, in_slot)
+	outgoing.start_position = outgoing.global_position
+	outgoing.start_yaw = outgoing.rotation.y
+
+	# Incoming inherits the court role / slot.
+	incoming.on_bench = false
+	incoming.player_index = out_idx
+	incoming.bench_slot = 0
+	incoming.global_position = out_pos
+	incoming.start_position = out_start
+	incoming.start_yaw = out_start_yaw
+	incoming.rotation.y = out_yaw
+	incoming.velocity = Vector3.ZERO
+	incoming.attack_shape = outgoing.attack_shape
+	incoming.defense_shape = outgoing.defense_shape
+	_set_controlled(incoming)
+	_configure_ai()
+	_park_bench_players()
+	_update_sub_hud()
+
+
+func _park_bench_players() -> void:
+	for p in _all_players():
+		if not p.on_bench:
+			continue
+		if p.excluded:
+			continue
+		p.global_position = Court.bench_marker(p.team_id, maxi(0, p.bench_slot))
+		p.velocity = Vector3.ZERO
+		p.ai_enabled = false
+		p.has_ball = false
+		p.dribbling = false
+
+
+func _update_stamina_hud() -> void:
+	if hud == null or not hud.has_method("set_stamina"):
+		return
+	if controlled_player == null:
+		hud.set_stamina(1.0, false)
+		return
+	hud.set_stamina(controlled_player.stamina_01(), controlled_player.sprinting)
+
+
+func _update_sub_hud() -> void:
+	if hud == null or not hud.has_method("set_sub_status"):
+		return
+	var can_sub := _can_substitute_now()
+	var bench := _bench_players(controlled_team_id)
+	var label := ""
+	if not bench.is_empty():
+		var pick := _selected_bench_player()
+		if pick:
+			label = "Bench #%d" % (pick.player_index + 1)
+	hud.set_sub_status(can_sub, label, bench.size())
 
 
 func _cancel_charge() -> void:
@@ -555,6 +742,13 @@ func _try_shoot_charged(held_s: float) -> void:
 	# Phase F: timed sweet window stacks a small bonus on top of height sweet.
 	if controlled_player.jump_shot_active:
 		impulse = ShotCraft.apply_window_bonus(impulse, jump_q, controlled_player.jump_shot_air_s)
+	# Phase G: low stamina softens accuracy (lateral scatter) and impulse slightly.
+	var acc := controlled_player.stamina_accuracy_mul()
+	if acc < 0.98:
+		var scatter := (1.0 - acc) * 0.22
+		aim += Vector3(randf_range(-scatter, scatter), randf_range(-scatter * 0.35, scatter * 0.2), randf_range(-scatter * 0.4, scatter * 0.4))
+		aim = aim.normalized()
+		impulse *= lerpf(0.88, 1.0, acc)
 	var up := ShotCraft.up_bias(lob)
 	# Jump shots naturally loft a touch more.
 	if jump_q >= 0:
@@ -567,6 +761,7 @@ func _try_shoot_charged(held_s: float) -> void:
 		"jump_shot": controlled_player.jump_shot_active,
 		"jump_air_s": controlled_player.jump_shot_air_s,
 		"jump_phase": controlled_player.jump_shot_phase,
+		"stamina": controlled_player.stamina_01(),
 	}
 	var from := controlled_player.global_position + Vector3(0, 1.2, 0)
 	if controlled_player.try_shoot(aim, impulse, ball, up, meta):
@@ -631,7 +826,7 @@ func _try_pass() -> void:
 func _best_pass_target(passer: Player, aim_hint: Vector3 = Vector3.ZERO) -> Player:
 	if passer == null:
 		return null
-	var roster := _home_players if passer.team_id == 0 else _away_players
+	var roster := _on_court_players(passer.team_id)
 	var aim := aim_hint
 	if aim.length_squared() < 0.01:
 		aim = passer.face_direction()
@@ -694,7 +889,7 @@ func _shot_path_contested(from: Vector3, aim: Vector3, shooter_team: int) -> boo
 func _nudge_defenders_to_block(shooter_team: int, from: Vector3, aim: Vector3) -> void:
 	var dir := aim.normalized()
 	for p in _all_players():
-		if p.team_id == shooter_team or p.is_goalkeeper:
+		if p.team_id == shooter_team or p.is_goalkeeper or p.on_bench or p.excluded:
 			continue
 		var to_p: Vector3 = p.global_position + Vector3(0, 1.2, 0) - from
 		var along := to_p.dot(dir)
@@ -878,7 +1073,9 @@ func _place_set_piece(code: String, awarding_team_id: int, spot: Vector3, taker:
 	for p in _all_players():
 		var place := Formations.set_piece_slot(p, code, awarding_team_id, spot, taker)
 		if p.excluded:
-			place = Court.bench_marker(p.team_id, maxi(0, p.player_index - 1))
+			place = Court.bench_marker(p.team_id, 2 + maxi(0, p.player_index % 4))
+		elif p.on_bench:
+			place = Court.bench_marker(p.team_id, maxi(0, p.bench_slot))
 		p.global_position = place
 		p.velocity = Vector3.ZERO
 		var face := 0.0 if p.team_id == 0 else PI
@@ -932,7 +1129,7 @@ func _goalkeeper_for(team_id: int) -> Player:
 
 
 func _nearest_outfield(team_id: int, spot: Vector3) -> Player:
-	var roster := _home_players if team_id == 0 else _away_players
+	var roster := _on_court_players(team_id)
 	var best: Player = null
 	var best_d := INF
 	for p in roster:
@@ -956,11 +1153,13 @@ func _begin_exclusion(fouler: Player) -> void:
 	fouler.has_ball = false
 	fouler.dribbling = false
 	fouler.velocity = Vector3.ZERO
-	fouler.global_position = Court.bench_marker(fouler.team_id, maxi(0, fouler.player_index - 1))
+	# Park beyond voluntary bench slots so exclusion doesn't stack on subs.
+	var excl_slot := 2 + maxi(0, fouler.player_index % 4)
+	fouler.global_position = Court.bench_marker(fouler.team_id, excl_slot)
 	if controlled_player == fouler:
 		var fallback := _nearest_outfield(fouler.team_id, fouler.global_position)
 		if fallback == null:
-			fallback = _first_outfield(_home_players if fouler.team_id == 0 else _away_players)
+			fallback = _first_outfield(_on_court_players(fouler.team_id))
 		if fallback:
 			_set_controlled(fallback)
 	_configure_ai()
@@ -977,9 +1176,9 @@ func _tick_exclusions(delta: float) -> void:
 		if not p.excluded:
 			continue
 		p.exclusion_remaining = maxf(0.0, p.exclusion_remaining - delta)
-		# Keep parked on the bench while the clock runs.
-		var bench := Court.bench_marker(p.team_id, maxi(0, p.player_index - 1))
-		p.global_position = bench
+		# Keep parked on the sideline while the clock runs.
+		var excl_slot := 2 + maxi(0, p.player_index % 4)
+		p.global_position = Court.bench_marker(p.team_id, excl_slot)
 		p.velocity = Vector3.ZERO
 		p.ai_enabled = false
 		if p.exclusion_remaining <= 0.0:
@@ -1107,7 +1306,7 @@ func _run_kickoff(kickoff_team_id: int, reason: String = "Kickoff") -> void:
 	_reset_players_and_ball()
 	# Phase 4: compact kickoff shape (wings + backcourt) instead of spawn freeze.
 	_place_kickoff_shape(kickoff_team_id)
-	var roster := _home_players if kickoff_team_id == 0 else _away_players
+	var roster := _on_court_players(kickoff_team_id)
 	var taker := _first_outfield(roster)
 	if taker == null and not roster.is_empty():
 		taker = roster[0]
@@ -1166,6 +1365,9 @@ func _resolve_player_overlaps(anchor: Player = null) -> void:
 				var a: Player = players[i]
 				var b: Player = players[j]
 				if a == null or b == null:
+					continue
+				# Bench / exclusion sit on the sideline — don't shove them onto court.
+				if a.on_bench or b.on_bench or a.excluded or b.excluded:
 					continue
 				var delta := Vector3(
 					b.global_position.x - a.global_position.x,
@@ -1237,7 +1439,7 @@ func _refresh_hud() -> void:
 
 func _first_outfield(roster: Array[Player]) -> Player:
 	for p in roster:
-		if not p.is_goalkeeper and not p.excluded:
+		if not p.is_goalkeeper and not p.excluded and not p.on_bench:
 			return p
 	return null
 

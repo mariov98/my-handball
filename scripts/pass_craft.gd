@@ -141,10 +141,12 @@ static func best_in_cone(
 			continue
 		if not (mate is CharacterBody3D):
 			continue
-		# Skip GK / frozen via duck typing used by Player.
+		# Skip GK / frozen / bench via duck typing used by Player.
 		if mate.get("is_goalkeeper") == true:
 			continue
 		if mate.get("match_frozen") == true:
+			continue
+		if mate.get("excluded") == true or mate.get("on_bench") == true:
 			continue
 		var score := score_in_cone(passer, mate, aim_dir, passer_team_id)
 		# Prefer uncontrolled receivers so the human can switch onto the catch.
@@ -175,6 +177,8 @@ static func best_outlet_wing(
 		if mate.get("is_goalkeeper") == true:
 			continue
 		if mate.get("match_frozen") == true or mate.get("excluded") == true:
+			continue
+		if mate.get("on_bench") == true:
 			continue
 		var pos: Vector3 = mate.global_position
 		var ahead := (pos.z - gk.global_position.z) * attack_sign

@@ -1,6 +1,6 @@
 # MyHandball
 
-Desktop handball prototype built with **Godot 4.3** (GDScript). Phases **0–5** are in: sandbox → mini match → rules → GK/shot craft → tactics → presentation. **Phase A** deepens soft pass circulation; **Phase B** adds **dribble** (hold V / R3) with procedural bounce, a **3-second hold** clock, step reset on dribble catch, and double-dribble lite; **Phase C** remounts **passive play** as an IHF-inspired hybrid (progress warn → pass-count); **Phase D** adds **contact lite** (bump → free throw, clear-chance heuristic → **7 m**, optional **2-min exclusion**); **Phase E** adds **attack/defense shape presets** on the 3+GK roster (Wide/Crash · Flat/OneUp); **Phase F** adds **movement craft** (jump-shot state, flat/bounce/lob passes, GK angle-cut + outlet, catch settle). Still engine primitives (polished capsules, no Mixamo).
+Desktop handball prototype built with **Godot 4.3** (GDScript). Phases **0–5** are in: sandbox → mini match → rules → GK/shot craft → tactics → presentation. **Phase A** deepens soft pass circulation; **Phase B** adds **dribble** (hold V / R3) with procedural bounce, a **3-second hold** clock, step reset on dribble catch, and double-dribble lite; **Phase C** remounts **passive play** as an IHF-inspired hybrid (progress warn → pass-count); **Phase D** adds **contact lite** (bump → free throw, clear-chance heuristic → **7 m**, optional **2-min exclusion**); **Phase E** adds **attack/defense shape presets** (Wide/Crash · Flat/OneUp); **Phase F** adds **movement craft** (jump-shot state, flat/bounce/lob passes, GK angle-cut + outlet, catch settle); **Phase G** expands to a **full 7** on court (LW/LB/CB/RB/RW/Pivot + GK) with **stamina** and **dead-ball substitutions** (+2 bench). Still engine primitives (polished capsules, no Mixamo).
 
 ## Requirements (Windows)
 
@@ -40,14 +40,19 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 | Toggle aim mode | **T** | Y / North |
 | **Toggle attack shape** (Wide ↔ Crash) | **1** | D-pad Up |
 | **Toggle defense shape** (Flat ↔ OneUp) | **2** | D-pad Down |
+| **Sprint** (drains stamina) | Hold **Shift** | Hold **Back** / Select |
+| **Cycle bench** (sub candidate) | **,** (comma) | D-pad Right |
+| **Confirm sub** (dead ball only) | **.** (period) | **Start** |
 
 **Movement** is relative to the **current camera**: W / stick-up walks into the screen along the camera forward projected onto the court. When possession flips and the camera yaws behind the new attack, the same stick direction keeps matching what you see.
 
 **Camera:** behind the team with (or last with) the ball. In the **center corridor** the frame is square with the goal (goal in the middle). When the ball drifts wide the rig adds only a **subtle yaw** about the ball — it does **not** recenter the ball on screen; the goal stays the visual anchor.
 
-**Team control:** **Q** cycles the Home roster in order. **R** jumps to the most useful teammate (nearest to a free ball, open receiver when attacking, best defender when covering).
+**Team control:** **Q** cycles the Home on-court roster in order (skips bench / exclusions). **R** jumps to the most useful on-court teammate (nearest to a free ball, open receiver when attacking, best defender when covering).
 
-**Shapes (Phase E):** **1** / D-pad↑ toggles Home **attack** Wide (3-3-ish) ↔ Crash (2-4-ish soft pivot). **2** / D-pad↓ toggles Home **defense** Flat (6-0-ish) ↔ OneUp (5-1-ish). Chosen so they do not fight Q/R/V/E/F/pass/shoot. Away AI picks shapes from score/time. HUD shows `Shape Atk … · Def …`; CB can read as LB/RB by ball side (cosmetic).
+**Shapes (Phase E, full 7):** **1** / D-pad↑ toggles Home **attack** Wide (3-3) ↔ Crash (2-4). **2** / D-pad↓ toggles Home **defense** Flat (6-0) ↔ OneUp (5-1). Roles are real **LW / LB / CB / RB / RW / Pivot**. Away AI picks shapes from score/time. HUD shows `Shape Atk … · Def …`.
+
+**Stamina / subs (Phase G):** Hold **Shift** to sprint (drains). Jump and shot also cost stamina; low stamina softens speed and shot accuracy; recovers off-ball (faster on the bench). Substitutions only on whistle / dead ball (kickoff, goal pause, period break, rule restart): **,** cycles the bench candidate, **.** swaps the controlled outfielder with that bench player. HUD shows stamina pips + sub hint.
 
 **Aim modes**
 
@@ -75,7 +80,23 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 - Jump plant is a short grounded stick, not full three-step drive animation.
 - Bounce pass = floor redirect hop (**approx**), not true spin/palm.
 - Outlet is AI-only after saves; human GK keeps distribution manual.
-- No roster expand (still 3+GK) — Phase G.
+- No career / season — later Phase G slices.
+
+## Phase G — sim depth (first playable slice)
+
+| Feature | How it feels in play |
+|---------|----------------------|
+| **Full 7** | On court: **GK + LW / LB / CB / RB / RW / Pivot**. Plus **2** bench outfielders per side. |
+| **Stamina** | Sprint / jump / shot drain; soft speed + accuracy when low; recover off-ball / faster on bench. |
+| **Subs** | Dead-ball only: **,** cycle bench · **.** confirm (controlled outfielder ↔ bench). |
+| **Shapes** | Wide/Crash and Flat/OneUp still work — now with real backs + line player. |
+
+### Intentional simplifications (Phase G)
+
+- No career / season / timeouts UI.
+- No GK sub; bench is outfield-only (2).
+- Subs blocked while LIVE (whistle windows only).
+- Sprint is hold-Shift lite — not full energy systems / fatigue injury.
 
 ## Phase B — dribble + 3-second hold
 
