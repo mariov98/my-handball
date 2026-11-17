@@ -151,27 +151,30 @@ func _spawn_roster() -> void:
 	if player_scene == null:
 		player_scene = load("res://scenes/actors/player.tscn") as PackedScene
 	# Home attacks +Z. Phase G: full 7 on court (GK+LW/LB/CB/RB/RW/P) + 2 bench.
+	# Spawn mirrors kickoff feel: Home offense pre-mid; Away defense on own 6 m wall.
 	var home_color := Color(0.12, 0.42, 0.92)
 	var away_color := Color(0.92, 0.16, 0.14)
 	var home_spots: Array = [
 		{"pos": Vector3(0, 0, -17.5), "yaw": 0.0, "gk": true, "idx": 0},
-		{"pos": Vector3(-6.2, 0, -7.0), "yaw": 0.0, "gk": false, "idx": 1}, # LW
-		{"pos": Vector3(-3.2, 0, -5.2), "yaw": 0.0, "gk": false, "idx": 2}, # LB
-		{"pos": Vector3(0.0, 0, -4.0), "yaw": 0.0, "gk": false, "idx": 3}, # CB
-		{"pos": Vector3(3.2, 0, -5.2), "yaw": 0.0, "gk": false, "idx": 4}, # RB
-		{"pos": Vector3(6.2, 0, -7.0), "yaw": 0.0, "gk": false, "idx": 5}, # RW
-		{"pos": Vector3(0.0, 0, -8.2), "yaw": 0.0, "gk": false, "idx": 6}, # Pivot
+		{"pos": Vector3(-6.8, 0, -5.8), "yaw": 0.0, "gk": false, "idx": 1}, # LW
+		{"pos": Vector3(-3.6, 0, -4.2), "yaw": 0.0, "gk": false, "idx": 2}, # LB
+		{"pos": Vector3(0.0, 0, -3.4), "yaw": 0.0, "gk": false, "idx": 3}, # CB
+		{"pos": Vector3(3.6, 0, -4.2), "yaw": 0.0, "gk": false, "idx": 4}, # RB
+		{"pos": Vector3(6.8, 0, -5.8), "yaw": 0.0, "gk": false, "idx": 5}, # RW
+		{"pos": Vector3(0.0, 0, -6.6), "yaw": 0.0, "gk": false, "idx": 6}, # Pivot
 		{"pos": Court.bench_marker(0, 0), "yaw": 0.0, "gk": false, "idx": 7, "bench": true, "slot": 0},
 		{"pos": Court.bench_marker(0, 1), "yaw": 0.0, "gk": false, "idx": 8, "bench": true, "slot": 1},
 	]
+	# Away default spawn = defensive wall just outside own 6 m (z≈+12.4).
+	# Lanes match Formations absolute X (LW negative, RW positive).
 	var away_spots: Array = [
 		{"pos": Vector3(0, 0, 17.5), "yaw": PI, "gk": true, "idx": 0},
-		{"pos": Vector3(6.2, 0, 7.0), "yaw": PI, "gk": false, "idx": 1}, # LW (mirrored)
-		{"pos": Vector3(3.2, 0, 5.2), "yaw": PI, "gk": false, "idx": 2}, # LB
-		{"pos": Vector3(0.0, 0, 4.0), "yaw": PI, "gk": false, "idx": 3}, # CB
-		{"pos": Vector3(-3.2, 0, 5.2), "yaw": PI, "gk": false, "idx": 4}, # RB
-		{"pos": Vector3(-6.2, 0, 7.0), "yaw": PI, "gk": false, "idx": 5}, # RW
-		{"pos": Vector3(0.0, 0, 8.2), "yaw": PI, "gk": false, "idx": 6}, # Pivot
+		{"pos": Vector3(-6.2, 0, 12.4), "yaw": PI, "gk": false, "idx": 1}, # LW
+		{"pos": Vector3(-3.6, 0, 12.4), "yaw": PI, "gk": false, "idx": 2}, # LB
+		{"pos": Vector3(-1.1, 0, 12.4), "yaw": PI, "gk": false, "idx": 3}, # CB
+		{"pos": Vector3(3.6, 0, 12.4), "yaw": PI, "gk": false, "idx": 4}, # RB
+		{"pos": Vector3(6.2, 0, 12.4), "yaw": PI, "gk": false, "idx": 5}, # RW
+		{"pos": Vector3(1.1, 0, 12.4), "yaw": PI, "gk": false, "idx": 6}, # Pivot
 		{"pos": Court.bench_marker(1, 0), "yaw": PI, "gk": false, "idx": 7, "bench": true, "slot": 0},
 		{"pos": Court.bench_marker(1, 1), "yaw": PI, "gk": false, "idx": 8, "bench": true, "slot": 1},
 	]
@@ -962,6 +965,11 @@ func _update_camera_attack_side() -> void:
 func _on_ball_picked_up(player: Player) -> void:
 	rules.on_pickup(player)
 	_attack_team_id = player.team_id
+	# Team control: while Home has the ball, always ride the carrier
+	# (pickup, catch, GK gather, restart give). Never force Away control.
+	if player != null and player.team_id == 0 and not player.on_bench and not player.excluded:
+		if controlled_player != player:
+			_set_controlled(player)
 	_update_rules_hud()
 
 
@@ -1323,12 +1331,16 @@ func _run_kickoff(kickoff_team_id: int, reason: String = "Kickoff") -> void:
 		_attack_team_id = kickoff_team_id
 		camera_rig.set_attack_direction(kickoff_team_id == 0)
 		rules.on_pickup(taker)
-	# Human always controls home (Phase 1); keep control on a home outfield.
-	var home_starter := _first_outfield(_home_players)
-	if home_starter:
-		_set_controlled(home_starter)
-	elif not _home_players.is_empty():
-		_set_controlled(_home_players[0])
+	# Human always controls Home. When Home kicks off, ride the taker;
+	# otherwise keep an on-court Home outfielder for defense.
+	if kickoff_team_id == 0 and taker != null and taker.team_id == 0:
+		_set_controlled(taker)
+	else:
+		var home_starter := _first_outfield(_home_players)
+		if home_starter:
+			_set_controlled(home_starter)
+		elif not _home_players.is_empty():
+			_set_controlled(_home_players[0])
 	_refresh_hud()
 	_update_rules_hud()
 	if hud and hud.has_method("flash_kickoff"):

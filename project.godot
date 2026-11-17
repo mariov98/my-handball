@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="MyHandball"
-config/description="MyHandball — Phase G sim depth (7+GK roster · stamina · dead-ball substitutions)."
+config/description="MyHandball — playability: auto-control carrier · real kickoff shape · IHF court lines."
 run/main_scene="res://scenes/match/match.tscn"
 config/features=PackedStringArray("4.3", "Forward Plus")
 config/icon="res://icon.svg"

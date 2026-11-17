@@ -31,21 +31,29 @@ static func bench_marker(team_id: int, slot: int = 0) -> Vector3:
 	return Vector3(side * (HALF_WIDTH - 0.55), 0.0, z_base + float(slot) * 1.35)
 
 
-## True if `pos` is inside the defending team's 6 m goal area (semicircle approx).
+## True if `pos` is inside the defending team's 6 m goal area.
+## IHF shape: 3 m straight parallel to the goal line + two 6 m quarter-circles
+## centered on the goal posts (stadium / capsule), court side of the end line.
 static func in_goal_area(pos: Vector3, defending_team_id: int) -> bool:
 	var end_z := -HALF_LENGTH if defending_team_id == 0 else HALF_LENGTH
-	var nearest_x := clampf(pos.x, -GOAL_WIDTH * 0.5, GOAL_WIDTH * 0.5)
+	var toward_mid := 1.0 if defending_team_id == 0 else -1.0
+	# Must be on the court side of the goal line.
+	if (pos.z - end_z) * toward_mid < 0.0:
+		return false
+	var half_goal := GOAL_WIDTH * 0.5
+	var nearest_x := clampf(pos.x, -half_goal, half_goal)
 	var dx := pos.x - nearest_x
 	var dz := pos.z - end_z
 	return dx * dx + dz * dz <= GOAL_AREA_RADIUS * GOAL_AREA_RADIUS
 
 
-## Push a court position just outside the 6 m arc (for AI / soft eject).
+## Push a court position just outside the 6 m goal-area boundary (AI / soft eject).
 static func eject_from_goal_area(pos: Vector3, defending_team_id: int, margin: float = 0.35) -> Vector3:
 	if not in_goal_area(pos, defending_team_id):
 		return pos
 	var end_z := -HALF_LENGTH if defending_team_id == 0 else HALF_LENGTH
-	var nearest_x := clampf(pos.x, -GOAL_WIDTH * 0.5, GOAL_WIDTH * 0.5)
+	var half_goal := GOAL_WIDTH * 0.5
+	var nearest_x := clampf(pos.x, -half_goal, half_goal)
 	var from := Vector3(pos.x - nearest_x, 0.0, pos.z - end_z)
 	if from.length_squared() < 0.0001:
 		# Dead center of goal line — push toward midfield.
@@ -116,23 +124,36 @@ func _build_floor() -> void:
 	col.position = Vector3(0, -0.1, 0)
 	body.add_child(col)
 
-	# Soft painted crease tints so the 6 m area reads at a glance.
-	_add_crease_tint(Vector3(0, 0.005, -HALF_LENGTH + 3.0), Color(0.22, 0.38, 0.72, 0.22))
-	_add_crease_tint(Vector3(0, 0.005, HALF_LENGTH - 3.0), Color(0.72, 0.28, 0.24, 0.22))
+	# Soft crease tints (mid rectangle + post wedges) so the D reads at a glance.
+	_add_crease_tint(0, Color(0.22, 0.38, 0.72, 0.20))
+	_add_crease_tint(1, Color(0.72, 0.28, 0.24, 0.20))
 
 
-func _add_crease_tint(pos: Vector3, color: Color) -> void:
-	var mi := MeshInstance3D.new()
-	var box := BoxMesh.new()
-	box.size = Vector3(GOAL_WIDTH + 6.2, 0.01, 6.0)
-	mi.mesh = box
-	mi.position = pos
+func _add_crease_tint(defending_team_id: int, color: Color) -> void:
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = color
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
 	mat.roughness = 1.0
-	mi.material_override = mat
-	add_child(mi)
+	var end_z := -HALF_LENGTH if defending_team_id == 0 else HALF_LENGTH
+	var toward_mid := 1.0 if defending_team_id == 0 else -1.0
+	var half_goal := GOAL_WIDTH * 0.5
+	# Center strip under the 3 m straight.
+	_add_line_box(
+		self,
+		Vector3(GOAL_WIDTH, 0.008, GOAL_AREA_RADIUS),
+		Vector3(0.0, 0.004, end_z + toward_mid * (GOAL_AREA_RADIUS * 0.5)),
+		mat
+	)
+	# Coarse quarter-circle wedges (visual only) matching the D outline.
+	var mid_angle := PI * 0.5 * toward_mid
+	for side in [-1.0, 1.0]:
+		var post := Vector3(side * half_goal, 0.0, end_z)
+		var goal_line_angle := 0.0 if side > 0.0 else PI
+		for i in range(5):
+			var t := (float(i) + 0.5) / 5.0
+			var ang := lerpf(mid_angle, goal_line_angle, t)
+			var mid := post + Vector3(cos(ang), 0.0, sin(ang)) * (GOAL_AREA_RADIUS * 0.55)
+			_add_line_box(self, Vector3(1.15, 0.008, 1.15), Vector3(mid.x, 0.004, mid.z), mat)
 
 
 func _build_lines() -> void:
@@ -146,33 +167,63 @@ func _build_lines() -> void:
 	line_mat.emission = Color(0.85, 0.85, 0.8)
 	line_mat.emission_energy_multiplier = 0.25
 
-	# Center line
-	_add_line_box(lines, Vector3(HALF_WIDTH * 2.0, 0.02, 0.1), Vector3(0, 0.01, 0), line_mat)
-	# Sidelines + end lines as thin raised strips (visual only; walls handle collision)
+	# Perimeter: sidelines + goal lines (visual; walls handle collision).
 	_add_line_box(lines, Vector3(0.1, 0.02, HALF_LENGTH * 2.0), Vector3(-HALF_WIDTH, 0.01, 0), line_mat)
 	_add_line_box(lines, Vector3(0.1, 0.02, HALF_LENGTH * 2.0), Vector3(HALF_WIDTH, 0.01, 0), line_mat)
 	_add_line_box(lines, Vector3(HALF_WIDTH * 2.0, 0.02, 0.1), Vector3(0, 0.01, -HALF_LENGTH), line_mat)
 	_add_line_box(lines, Vector3(HALF_WIDTH * 2.0, 0.02, 0.1), Vector3(0, 0.01, HALF_LENGTH), line_mat)
-	# 6 m goal-area arcs approximated as bars
-	_add_line_box(lines, Vector3(GOAL_WIDTH + 6.0, 0.02, 0.1), Vector3(0, 0.01, -HALF_LENGTH + 6.0), line_mat)
-	_add_line_box(lines, Vector3(GOAL_WIDTH + 6.0, 0.02, 0.1), Vector3(0, 0.01, HALF_LENGTH - 6.0), line_mat)
-	# 9 m free-throw lines (slightly thinner / dashed feel via narrower strip)
+	# Center line
+	_add_line_box(lines, Vector3(HALF_WIDTH * 2.0, 0.02, 0.1), Vector3(0, 0.01, 0), line_mat)
+	# Center circle (~1.5 m radius — throw-off reference).
+	_add_circle_line(lines, Vector3.ZERO, 1.5, 28, line_mat, 0.07, false)
+
+	# 6 m goal-area D (solid): 3 m straight + quarter-circles at posts.
+	_add_goal_area_marking(lines, 0, GOAL_AREA_RADIUS, line_mat, false, 0.09)
+	_add_goal_area_marking(lines, 1, GOAL_AREA_RADIUS, line_mat, false, 0.09)
+
+	# 9 m free-throw line (dashed): same IHF stadium geometry.
 	var dashed := line_mat.duplicate() as StandardMaterial3D
-	dashed.albedo_color = Color(0.92, 0.92, 0.9)
-	_add_line_box(lines, Vector3(GOAL_WIDTH + 9.0, 0.02, 0.07), Vector3(0, 0.01, -HALF_LENGTH + 9.0), dashed)
-	_add_line_box(lines, Vector3(GOAL_WIDTH + 9.0, 0.02, 0.07), Vector3(0, 0.01, HALF_LENGTH - 9.0), dashed)
-	# 7 m penalty marks (short cross at each end) — Phase D set piece.
+	dashed.albedo_color = Color(0.94, 0.94, 0.92)
+	_add_goal_area_marking(lines, 0, 9.0, dashed, true, 0.07)
+	_add_goal_area_marking(lines, 1, 9.0, dashed, true, 0.07)
+
+	# 7 m penalty marks (short cross at each end).
 	var seven_mat := line_mat.duplicate() as StandardMaterial3D
 	seven_mat.albedo_color = Color(1.0, 0.95, 0.75)
 	seven_mat.emission = Color(0.95, 0.85, 0.45)
 	seven_mat.emission_energy_multiplier = 0.35
 	_add_seven_meter_mark(lines, seven_meter_spot(0), seven_mat)
 	_add_seven_meter_mark(lines, seven_meter_spot(1), seven_mat)
-	# Center circle hint
-	_add_line_box(lines, Vector3(3.6, 0.015, 0.08), Vector3(0, 0.012, 1.8), line_mat)
-	_add_line_box(lines, Vector3(3.6, 0.015, 0.08), Vector3(0, 0.012, -1.8), line_mat)
-	_add_line_box(lines, Vector3(0.08, 0.015, 3.6), Vector3(1.8, 0.012, 0), line_mat)
-	_add_line_box(lines, Vector3(0.08, 0.015, 3.6), Vector3(-1.8, 0.012, 0), line_mat)
+
+
+## IHF goal-area / free-throw outline: straight between posts at `radius` + quarter-circles.
+func _add_goal_area_marking(
+	parent: Node3D,
+	defending_team_id: int,
+	radius: float,
+	mat: Material,
+	dashed: bool,
+	thickness: float
+) -> void:
+	var end_z := -HALF_LENGTH if defending_team_id == 0 else HALF_LENGTH
+	var toward_mid := 1.0 if defending_team_id == 0 else -1.0
+	var half_goal := GOAL_WIDTH * 0.5
+	var line_z := end_z + toward_mid * radius
+	# Straight 3 m segment parallel to the goal line.
+	_add_segment_line(
+		parent,
+		Vector3(-half_goal, 0.012, line_z),
+		Vector3(half_goal, 0.012, line_z),
+		mat,
+		thickness,
+		dashed
+	)
+	# Quarter-circles centered on each post, sweeping from goal line to the straight.
+	var mid_angle := PI * 0.5 * toward_mid
+	for side in [-1.0, 1.0]:
+		var post := Vector3(side * half_goal, 0.012, end_z)
+		var goal_line_angle := 0.0 if side > 0.0 else PI
+		_add_arc_line(parent, post, radius, mid_angle, goal_line_angle, 14, mat, thickness, dashed)
 
 
 func _add_seven_meter_mark(parent: Node3D, pos: Vector3, mat: Material) -> void:
@@ -189,6 +240,102 @@ func _add_line_box(parent: Node3D, size: Vector3, pos: Vector3, mat: Material) -
 	mi.position = pos
 	mi.material_override = mat
 	parent.add_child(mi)
+
+
+## Oriented strip between two XZ points (procedural line segment).
+func _add_segment_line(
+	parent: Node3D,
+	from: Vector3,
+	to: Vector3,
+	mat: Material,
+	thickness: float,
+	dashed: bool = false
+) -> void:
+	var delta := to - from
+	delta.y = 0.0
+	var length := delta.length()
+	if length < 0.001:
+		return
+	if dashed:
+		var dash := 0.55
+		var gap := 0.35
+		var dir := delta / length
+		var traveled := 0.0
+		var draw := true
+		while traveled < length - 0.001:
+			var chunk := minf(dash if draw else gap, length - traveled)
+			if draw and chunk > 0.04:
+				var a := from + dir * traveled
+				var b := from + dir * (traveled + chunk)
+				_add_solid_segment(parent, a, b, mat, thickness)
+			traveled += chunk
+			draw = not draw
+		return
+	_add_solid_segment(parent, from, to, mat, thickness)
+
+
+func _add_solid_segment(parent: Node3D, from: Vector3, to: Vector3, mat: Material, thickness: float) -> void:
+	var delta := to - from
+	delta.y = 0.0
+	var length := delta.length()
+	if length < 0.001:
+		return
+	var mid := (from + to) * 0.5
+	mid.y = 0.012
+	var mi := MeshInstance3D.new()
+	var box := BoxMesh.new()
+	box.size = Vector3(thickness, 0.02, length)
+	mi.mesh = box
+	mi.position = mid
+	mi.rotation.y = atan2(delta.x, delta.z)
+	mi.material_override = mat
+	parent.add_child(mi)
+
+
+func _add_arc_line(
+	parent: Node3D,
+	center: Vector3,
+	radius: float,
+	angle_a: float,
+	angle_b: float,
+	segments: int,
+	mat: Material,
+	thickness: float,
+	dashed: bool = false
+) -> void:
+	var segs := maxi(segments, 4)
+	for i in range(segs):
+		if dashed and (i % 2) == 1:
+			continue
+		var t0 := float(i) / float(segs)
+		var t1 := float(i + 1) / float(segs)
+		var a0 := lerpf(angle_a, angle_b, t0)
+		var a1 := lerpf(angle_a, angle_b, t1)
+		var p0 := center + Vector3(cos(a0) * radius, 0.0, sin(a0) * radius)
+		var p1 := center + Vector3(cos(a1) * radius, 0.0, sin(a1) * radius)
+		p0.y = 0.012
+		p1.y = 0.012
+		_add_solid_segment(parent, p0, p1, mat, thickness)
+
+
+func _add_circle_line(
+	parent: Node3D,
+	center: Vector3,
+	radius: float,
+	segments: int,
+	mat: Material,
+	thickness: float,
+	dashed: bool = false
+) -> void:
+	var segs := maxi(segments, 8)
+	for i in range(segs):
+		if dashed and (i % 2) == 1:
+			continue
+		var a0 := TAU * float(i) / float(segs)
+		var a1 := TAU * float(i + 1) / float(segs)
+		var p0 := center + Vector3(cos(a0) * radius, 0.012, sin(a0) * radius)
+		var p1 := center + Vector3(cos(a1) * radius, 0.012, sin(a1) * radius)
+		_add_solid_segment(parent, p0, p1, mat, thickness)
 
 
 func _build_walls() -> void:

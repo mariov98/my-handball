@@ -299,7 +299,9 @@ static func defense_slot(player: Player, ball_pos: Vector3, carrier: Player = nu
 	return _legalize_outfield(slot, player.team_id)
 
 
-## Kickoff / period restart shape (compact midfield).
+## Kickoff / period restart shape.
+## Offense: own half, approaching center (before midfield), ≥3 m from ball.
+## Defense: wall just outside own 6 m goal-area line (roles across).
 static func kickoff_slot(player: Player, kickoff_team_id: int) -> Vector3:
 	if player == null:
 		return Vector3.ZERO
@@ -309,24 +311,49 @@ static func kickoff_slot(player: Player, kickoff_team_id: int) -> Vector3:
 		return Court.bench_marker(player.team_id, maxi(0, player.bench_slot))
 	var role := role_for(player)
 	var on_ball := player.team_id == kickoff_team_id
-	var face := 1.0 if player.team_id == 0 else -1.0
-	var z_base := -3.5 * face if on_ball else 4.5 * face
+	var face := 1.0 if player.team_id == 0 else -1.0 # Home attacks +Z
 	var slot := Vector3.ZERO
-	match role:
-		Role.LEFT_WING:
-			slot = Vector3(-6.0, 0.0, z_base)
-		Role.RIGHT_WING:
-			slot = Vector3(6.0, 0.0, z_base)
-		Role.LEFT_BACK:
-			slot = Vector3(-3.2, 0.0, z_base + 0.4 * face)
-		Role.RIGHT_BACK:
-			slot = Vector3(3.2, 0.0, z_base + 0.4 * face)
-		Role.CENTER_BACK:
-			slot = Vector3(0.0, 0.0, z_base + (1.0 * face if on_ball else 0.0))
-		Role.PIVOT:
-			slot = Vector3(0.0, 0.0, z_base + (2.2 * face if on_ball else -0.6 * face))
-		_:
-			slot = Vector3(0.0, 0.0, z_base)
+	if on_ball:
+		# Attacking throw-off: stay in own half, stacked toward midfield.
+		# Taker is placed near center separately; others hold ≥3 m clearance.
+		match role:
+			Role.LEFT_WING:
+				slot = Vector3(-6.8, 0.0, -5.8 * face)
+			Role.RIGHT_WING:
+				slot = Vector3(6.8, 0.0, -5.8 * face)
+			Role.LEFT_BACK:
+				slot = Vector3(-3.6, 0.0, -4.2 * face)
+			Role.RIGHT_BACK:
+				slot = Vector3(3.6, 0.0, -4.2 * face)
+			Role.CENTER_BACK:
+				# Slightly deeper than the center taker so CB doesn't stack.
+				slot = Vector3(0.0, 0.0, -3.4 * face)
+			Role.PIVOT:
+				slot = Vector3(0.0, 0.0, -6.6 * face)
+			_:
+				slot = Vector3(0.0, 0.0, -4.0 * face)
+	else:
+		# Defending throw-off: flat wall just outside own 6 m (DEFENSE_LINE_M).
+		var own_goal_z := -Court.HALF_LENGTH if player.team_id == 0 else Court.HALF_LENGTH
+		var defend_sign := -1.0 if player.team_id == 0 else 1.0
+		var line_z := own_goal_z - defend_sign * DEFENSE_LINE_M
+		var lane_x := 0.0
+		match role:
+			Role.LEFT_WING:
+				lane_x = -6.2
+			Role.LEFT_BACK:
+				lane_x = -3.6
+			Role.CENTER_BACK:
+				lane_x = -1.1
+			Role.PIVOT:
+				lane_x = 1.1
+			Role.RIGHT_BACK:
+				lane_x = 3.6
+			Role.RIGHT_WING:
+				lane_x = 6.2
+			_:
+				lane_x = 0.0
+		slot = Vector3(lane_x, 0.0, line_z)
 	return _legalize_outfield(slot, player.team_id)
 
 
