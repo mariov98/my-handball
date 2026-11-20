@@ -2373,6 +2373,83 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 	print("Smoke IHF court lines + goal-area D OK (line meshes=", lines_node.get_child_count(), ")")
+
+	# Scale: 1 unit = 1 m, player ~1.90 m on a 20 m width, arcs are quarter-circles.
+	if absf(Court.METERS_PER_UNIT - 1.0) > 0.001:
+		push_error("Smoke: Court.METERS_PER_UNIT must be 1")
+		get_tree().quit(1)
+		return
+	if absf(Court.HALF_LENGTH - 20.0) > 0.001 or absf(Court.HALF_WIDTH - 10.0) > 0.001:
+		push_error("Smoke: court must be 40 x 20 m")
+		get_tree().quit(1)
+		return
+	var head := player.get_node("Head") as MeshInstance3D
+	var head_mesh := head.mesh as BoxMesh
+	var top := head.position.y + head_mesh.size.y * 0.5
+	if absf(top - Player.VISUAL_HEIGHT_M) > 0.05:
+		push_error("Smoke: standing height %.2f != %.2f" % [top, Player.VISUAL_HEIGHT_M])
+		get_tree().quit(1)
+		return
+	if Player.VISUAL_HEIGHT_M / (Court.HALF_WIDTH * 2.0) > 0.14:
+		push_error("Smoke: player is too tall relative to the 20 m court width")
+		get_tree().quit(1)
+		return
+	var cap_node := player.get_node("CollisionShape3D") as CollisionShape3D
+	var cap := cap_node.shape as CapsuleShape3D
+	if absf(cap.radius - Player.BODY_RADIUS) > 0.001:
+		push_error("Smoke: BODY_RADIUS must match the capsule")
+		get_tree().quit(1)
+		return
+	if absf(cap_node.position.y - cap.height * 0.5) > 0.04:
+		push_error("Smoke: capsule feet should sit on the floor")
+		get_tree().quit(1)
+		return
+	for team_id in [0, 1]:
+		for side in [-1.0, 1.0]:
+			var ang := Court.goal_arc_angles(team_id, side)
+			var sweep := absf(wrapf(ang.y - ang.x, -PI, PI))
+			if absf(sweep - PI * 0.5) > 0.02:
+				push_error("Smoke: goal arc must be a quarter circle (team %s side %s)" % [team_id, side])
+				get_tree().quit(1)
+				return
+		for slot in [0, 1, 5]:
+			var marker := Court.bench_marker(team_id, slot)
+			if absf(marker.x) <= Court.HALF_WIDTH + 0.6:
+				push_error("Smoke: bench marker is not outside the sideline")
+				get_tree().quit(1)
+				return
+			if absf(marker.z) >= Court.HALF_LENGTH - 0.4:
+				push_error("Smoke: bench marker should sit beside the court")
+				get_tree().quit(1)
+				return
+	if court_node.get_node_or_null("Hall") == null:
+		push_error("Smoke: hall shell missing")
+		get_tree().quit(1)
+		return
+	var bench_pose_ok := true
+	for p in match_node._all_players():
+		if not p.on_bench:
+			continue
+		p.global_position = Court.bench_marker(p.team_id, p.bench_slot)
+		p.rotation.y = Court.bench_yaw(p.team_id)
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	for p in match_node._all_players():
+		if not p.on_bench:
+			continue
+		if absf(p.global_position.x) <= Court.HALF_WIDTH + 0.4:
+			bench_pose_ok = false
+		if absf(p.global_position.y) > 0.45:
+			bench_pose_ok = false
+		var sit := p.get_node_or_null("BenchSit") as Node3D
+		var stand := p.get_node_or_null("MeshInstance3D") as Node3D
+		if sit == null or not sit.visible or (stand != null and stand.visible):
+			bench_pose_ok = false
+	print("Smoke scale/hall/bench pose=", bench_pose_ok, " height=", top)
+	if not bench_pose_ok:
+		push_error("Smoke: substitutes should sit on the bench, off the court, on the floor")
+		get_tree().quit(1)
+		return
 	print("Smoke playability auto-control / kickoff / court OK")
 
 	print("SMOKE_OK")
@@ -2388,6 +2465,14 @@ func _smoke_prepare_live(match_node: MatchController, _ball: Ball) -> void:
 	match_node.rules._area_timers.clear()
 	match_node._set_players_frozen(false)
 	for p in match_node._all_players():
+		if p.on_bench or p.excluded:
+			var slot := p.bench_slot
+			if p.excluded:
+				slot = 2 + maxi(0, p.player_index % 4)
+			p.global_position = Court.bench_marker(p.team_id, slot)
+			p.rotation.y = Court.bench_yaw(p.team_id)
+			p.velocity = Vector3.ZERO
+			continue
 		if p.is_goalkeeper:
 			p.global_position = p.start_position
 		else:

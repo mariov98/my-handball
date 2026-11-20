@@ -543,7 +543,7 @@ func _tick_oob(ball: Ball, carrier: Player) -> bool:
 
 func _tick_goal_areas(delta: float, players: Array[Player], carrier: Player) -> bool:
 	for p in players:
-		if p == null or p.is_goalkeeper:
+		if p == null or p.is_goalkeeper or p.on_bench or p.excluded:
 			_area_timers.erase(p.get_instance_id())
 			continue
 		var violated_team := -1
@@ -633,7 +633,7 @@ func _find_contact_fouler(carrier: Player, players: Array[Player]) -> Player:
 		if p.team_id == carrier.team_id:
 			continue
 		# Excluded defenders are off the court.
-		if p.excluded:
+		if p.excluded or p.on_bench:
 			continue
 		var d := _planar_distance(carrier.global_position, p.global_position)
 		if d > CONTACT_REACH_M:

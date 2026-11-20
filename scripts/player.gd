@@ -9,15 +9,20 @@ signal possession_changed(has_ball: bool)
 signal dive_started
 signal block_attempted(blocker: Player, ball: Ball, success: bool)
 
+## Metres per second. 1 unit = 1 m (see Court.METERS_PER_UNIT).
+## ~9.6 m/s is a fast handball sprint; sprint multiplier pushes a short burst.
 const SPEED := 9.6
 const AIR_CONTROL := 0.58
-const JUMP_VELOCITY := 7.8
+## Feet rise ~1.2 m (g = 18). Hand finishes near the 2 m crossbar on a jump shot.
+const JUMP_VELOCITY := 6.6
 const FACE_THRESHOLD := 0.12
 const BOB_AMOUNT := 0.04
 const BOB_SPEED := 13.0
 const PICKUP_COOLDOWN := 0.22
 ## Matches CapsuleShape3D radius in player.tscn — used for soft depenetration.
-const BODY_RADIUS := 0.35
+const BODY_RADIUS := 0.32
+## Standing capsule + head, metres. Court is 20 m wide, so a player is ~9.5% of the width.
+const VISUAL_HEIGHT_M := 1.90
 ## Soft push when capsules nest (teleport residue / AI stack). Not a hard lock.
 const SEPARATION_PUSH := 16.0
 ## Physics layers: 1=court, 2=player (see project.godot layer_names).
@@ -126,6 +131,7 @@ var _save_area: Area3D
 var _block_area: Area3D
 var _body_mat: StandardMaterial3D
 var _kit_nodes_ready: bool = false
+var _bench_visual: Node3D
 ## Phase F catch settle + jump plant + GK outlet.
 var _catch_settle_t: float = 0.0
 var _js_plant_t: float = 0.0
@@ -147,7 +153,9 @@ func _ready() -> void:
 	add_to_group("players")
 	_ensure_craft_nodes()
 	_ensure_kit_nodes()
+	_ensure_bench_visual()
 	_apply_team_material()
+	_apply_bench_visual()
 	pickup_area.body_entered.connect(_on_pickup_body_entered)
 	if _save_area:
 		_save_area.body_entered.connect(_on_save_body_entered)
@@ -190,7 +198,7 @@ func _physics_process(delta: float) -> void:
 	var wish := Vector3.ZERO
 	sprinting = false
 	if excluded or on_bench:
-		# Sit on the bench marker — no movement / AI while benched or excluded.
+		# Seated on the sideline bench — no movement / AI.
 		wish = Vector3.ZERO
 		velocity.x = 0.0
 		velocity.z = 0.0
@@ -268,8 +276,14 @@ func _physics_process(delta: float) -> void:
 		var target_yaw := atan2(planar.x, planar.z)
 		rotation.y = lerp_angle(rotation.y, target_yaw, 1.0 - exp(-12.0 * delta))
 
+	if on_bench or excluded:
+		rotation.y = Court.bench_yaw(team_id)
+		if global_position.y < -0.15:
+			global_position.y = 0.0
+			velocity.y = 0.0
 	_update_bob(delta, planar.length())
 	_update_arm_pose(delta)
+	_apply_bench_visual()
 	_try_sticky_pass_catch()
 
 
@@ -1160,9 +1174,9 @@ func _ensure_craft_nodes() -> void:
 	_arm_l = get_node_or_null("ArmL") as MeshInstance3D
 	_arm_r = get_node_or_null("ArmR") as MeshInstance3D
 	if _arm_l == null:
-		_arm_l = _make_arm("ArmL", Vector3(-0.55, 1.15, 0.0))
+		_arm_l = _make_arm("ArmL", Vector3(-0.42, 1.10, 0.02))
 	if _arm_r == null:
-		_arm_r = _make_arm("ArmR", Vector3(0.55, 1.15, 0.0))
+		_arm_r = _make_arm("ArmR", Vector3(0.42, 1.10, 0.02))
 
 	_save_area = get_node_or_null("SaveArea") as Area3D
 	if _save_area == null and is_goalkeeper:
@@ -1228,8 +1242,8 @@ func _set_dive_pose(active: bool) -> void:
 			_arm_l.position = Vector3(-0.7, 1.2, 0.05)
 			_arm_r.position = Vector3(0.7, 1.2, 0.05)
 		else:
-			_arm_l.position = Vector3(-0.45, 1.05, 0.0)
-			_arm_r.position = Vector3(0.45, 1.05, 0.0)
+			_arm_l.position = Vector3(-0.42, 1.08, 0.02)
+			_arm_r.position = Vector3(0.42, 1.08, 0.02)
 		_arm_l.rotation_degrees = Vector3.ZERO
 		_arm_r.rotation_degrees = Vector3.ZERO
 		if _save_area and _save_area.get_child_count() > 0:
@@ -1245,8 +1259,8 @@ func _update_arm_pose(_delta: float) -> void:
 		_arm_l.position = Vector3(-0.55, 1.45, 0.25)
 		_arm_r.position = Vector3(0.55, 1.45, 0.25)
 	elif not is_goalkeeper:
-		_arm_l.position = Vector3(-0.45, 1.05, 0.0)
-		_arm_r.position = Vector3(0.45, 1.05, 0.0)
+		_arm_l.position = Vector3(-0.42, 1.08, 0.02)
+		_arm_r.position = Vector3(0.42, 1.08, 0.02)
 
 
 func _ensure_kit_nodes() -> void:
@@ -1258,9 +1272,9 @@ func _ensure_kit_nodes() -> void:
 		var stripe := MeshInstance3D.new()
 		stripe.name = "ChestStripe"
 		var box := BoxMesh.new()
-		box.size = Vector3(0.72, 0.14, 0.38)
+		box.size = Vector3(0.58, 0.12, 0.34)
 		stripe.mesh = box
-		stripe.position = Vector3(0.0, 1.15, 0.02)
+		stripe.position = Vector3(0.0, 1.16, 0.02)
 		add_child(stripe)
 	if get_node_or_null("SockL") == null:
 		_make_kit_box("SockL", Vector3(0.16, 0.28, 0.16), Vector3(-0.14, 0.22, 0.0))
@@ -1269,8 +1283,8 @@ func _ensure_kit_nodes() -> void:
 		_make_kit_box("ShoeR", Vector3(0.2, 0.08, 0.32), Vector3(0.14, 0.04, 0.04))
 	# Soft shoulder pads for a slightly more humanoid silhouette (still boxes).
 	if get_node_or_null("ShoulderL") == null:
-		_make_kit_box("ShoulderL", Vector3(0.22, 0.16, 0.22), Vector3(-0.38, 1.55, 0.0))
-		_make_kit_box("ShoulderR", Vector3(0.22, 0.16, 0.22), Vector3(0.38, 1.55, 0.0))
+		_make_kit_box("ShoulderL", Vector3(0.18, 0.14, 0.18), Vector3(-0.34, 1.50, 0.0))
+		_make_kit_box("ShoulderR", Vector3(0.18, 0.14, 0.18), Vector3(0.34, 1.50, 0.0))
 
 
 func _make_kit_box(node_name: String, size: Vector3, pos: Vector3) -> MeshInstance3D:
@@ -1312,8 +1326,9 @@ func _apply_team_material() -> void:
 	_body_mat.emission_energy_multiplier = 0.12 if is_goalkeeper else 0.05
 	_mesh.material_override = _body_mat
 	var head := get_node_or_null("Head") as MeshInstance3D
+	var head_mat: StandardMaterial3D = null
 	if head:
-		var head_mat := StandardMaterial3D.new()
+		head_mat = StandardMaterial3D.new()
 		# Skin-ish head so the kit/body contrast reads (darker so it isn't washed to white).
 		head_mat.albedo_color = Color(0.72, 0.52, 0.38)
 		head_mat.roughness = 0.7
@@ -1347,7 +1362,73 @@ func _apply_team_material() -> void:
 		var shoe := get_node_or_null(shoe_name) as MeshInstance3D
 		if shoe:
 			shoe.material_override = shoe_mat
+	_tint_bench_visual(head_mat, shoe_mat, sock_mat)
 	set_selection_highlight(controlled)
+
+
+func _ensure_bench_visual() -> void:
+	if _bench_visual != null:
+		return
+	var root := Node3D.new()
+	root.name = "BenchSit"
+	root.visible = false
+	add_child(root)
+	_bench_visual = root
+	# Seated figure in metres, facing local +Z (toward the court once yaw is set).
+	# Hips on the 0.44 m seat, head top ~1.28 — a 1.90 m adult sitting, not a fallen capsule.
+	_sit_box(root, "SitTorso", Vector3(0.38, 0.52, 0.24), Vector3(0.0, 0.82, 0.06))
+	_sit_box(root, "SitHead", Vector3(0.24, 0.24, 0.24), Vector3(0.0, 1.16, 0.08))
+	_sit_box(root, "SitThighL", Vector3(0.14, 0.12, 0.42), Vector3(-0.11, 0.50, 0.22))
+	_sit_box(root, "SitThighR", Vector3(0.14, 0.12, 0.42), Vector3(0.11, 0.50, 0.22))
+	_sit_box(root, "SitShinL", Vector3(0.12, 0.42, 0.12), Vector3(-0.11, 0.24, 0.42))
+	_sit_box(root, "SitShinR", Vector3(0.12, 0.42, 0.12), Vector3(0.11, 0.24, 0.42))
+	_sit_box(root, "SitFootL", Vector3(0.12, 0.06, 0.22), Vector3(-0.11, 0.05, 0.54))
+	_sit_box(root, "SitFootR", Vector3(0.12, 0.06, 0.22), Vector3(0.11, 0.05, 0.54))
+	_sit_box(root, "SitArmL", Vector3(0.10, 0.32, 0.10), Vector3(-0.24, 0.78, 0.08))
+	_sit_box(root, "SitArmR", Vector3(0.10, 0.32, 0.10), Vector3(0.24, 0.78, 0.08))
+	_sit_box(root, "SitForeL", Vector3(0.10, 0.10, 0.30), Vector3(-0.22, 0.58, 0.22))
+	_sit_box(root, "SitForeR", Vector3(0.10, 0.10, 0.30), Vector3(0.22, 0.58, 0.22))
+
+
+func _sit_box(parent: Node3D, node_name: String, size: Vector3, pos: Vector3) -> void:
+	var mi := MeshInstance3D.new()
+	mi.name = node_name
+	var box := BoxMesh.new()
+	box.size = size
+	mi.mesh = box
+	mi.position = pos
+	parent.add_child(mi)
+
+
+func _tint_bench_visual(head_mat: Material, shoe_mat: Material, sock_mat: Material) -> void:
+	if _bench_visual == null:
+		return
+	for child in _bench_visual.get_children():
+		var mi := child as MeshInstance3D
+		if mi == null:
+			continue
+		if mi.name == "SitHead" and head_mat:
+			mi.material_override = head_mat
+		elif mi.name.begins_with("SitFoot") and shoe_mat:
+			mi.material_override = shoe_mat
+		elif mi.name.begins_with("SitShin") and sock_mat:
+			mi.material_override = sock_mat
+		elif _body_mat:
+			mi.material_override = _body_mat
+
+
+func _apply_bench_visual() -> void:
+	var seated := on_bench or excluded
+	if _bench_visual:
+		_bench_visual.visible = seated
+	for node_name in [
+		"MeshInstance3D", "Head", "ChestStripe",
+		"SockL", "SockR", "ShoeL", "ShoeR",
+		"ShoulderL", "ShoulderR", "ArmL", "ArmR",
+	]:
+		var node := get_node_or_null(node_name) as Node3D
+		if node:
+			node.visible = not seated
 
 
 func _update_bob(delta: float, speed: float) -> void:

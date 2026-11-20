@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="MyHandball"
-config/description="MyHandball — playability: auto-control carrier · real kickoff shape · IHF court lines."
+config/description="MyHandball — 1 unit = 1 m court, hall, benches, IHF lines."
 run/main_scene="res://scenes/match/match.tscn"
 config/features=PackedStringArray("4.3", "Forward Plus")
 config/icon="res://icon.svg"

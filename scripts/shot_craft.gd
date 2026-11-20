@@ -17,8 +17,8 @@ const JUMP_EARLY_SCALE := 0.88
 const JUMP_LATE_SCALE := 0.92
 const JUMP_SCATTER_BAD := 0.12
 const JUMP_SCATTER_GOOD := 0.02
-## Approximate jump apex from JUMP_VELOCITY / gravity (Player.JUMP_VELOCITY≈7.8, g=18).
-const JUMP_APEX_Y := 1.56
+## Approximate jump apex from JUMP_VELOCITY / gravity (Player.JUMP_VELOCITY≈6.6, g=18).
+const JUMP_APEX_Y := 1.21
 
 ## Phase F jump-shot state machine (approach plant → jump → release window).
 enum JumpPhase { NONE = 0, APPROACH = 1, PLANTED = 2, AIRBORNE = 3, WINDOW = 4 }
