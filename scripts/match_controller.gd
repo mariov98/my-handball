@@ -204,6 +204,8 @@ func _spawn_player(parent: Node, team_id: int, color: Color, spot: Dictionary) -
 	p.start_position = spot["pos"]
 	p.start_yaw = spot["yaw"]
 	if p.on_bench:
+		p.rotation.y = Court.bench_yaw(team_id)
+		p.start_yaw = p.rotation.y
 		p.ai_enabled = false
 		p.visible = true
 
@@ -655,6 +657,7 @@ func _swap_players_for_sub(outgoing: Player, incoming: Player) -> void:
 	outgoing.controlled = false
 	outgoing.velocity = Vector3.ZERO
 	outgoing.global_position = Court.bench_marker(outgoing.team_id, in_slot)
+	outgoing.rotation.y = Court.bench_yaw(outgoing.team_id)
 	outgoing.start_position = outgoing.global_position
 	outgoing.start_yaw = outgoing.rotation.y
 
@@ -682,6 +685,7 @@ func _park_bench_players() -> void:
 		if p.excluded:
 			continue
 		p.global_position = Court.bench_marker(p.team_id, maxi(0, p.bench_slot))
+		p.rotation.y = Court.bench_yaw(p.team_id)
 		p.velocity = Vector3.ZERO
 		p.ai_enabled = false
 		p.has_ball = false
@@ -1106,6 +1110,8 @@ func _place_set_piece(code: String, awarding_team_id: int, spot: Vector3, taker:
 				var to_spot2 := spot - p.global_position
 				if to_spot2.length_squared() > 0.01:
 					face = atan2(to_spot2.x, to_spot2.z)
+		if p.on_bench or p.excluded:
+			face = Court.bench_yaw(p.team_id)
 		p.rotation.y = face
 	# Teleports skip physics — nudge any stacked capsules apart.
 	_resolve_player_overlaps(taker)

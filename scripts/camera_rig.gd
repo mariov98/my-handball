@@ -6,8 +6,9 @@ class_name CameraRig
 ## Side ball = subtle yaw about the ball — does NOT recenter the ball on screen;
 ## the far goal stays the visual anchor.
 
-@export var follow_height: float = 14.0
-@export var follow_distance: float = 17.5
+## Metres. Pulled in so a 1.90 m player reads on the 40×20 without becoming a giant.
+@export var follow_height: float = 11.6
+@export var follow_distance: float = 15.2
 ## Soft 3/4 bias that only grows as the ball leaves the center corridor.
 @export var side_bias: float = 2.4
 ## |ball.x| half-width treated as "center" (square attack view).
@@ -116,4 +117,4 @@ func _look_target(ball_pos: Vector3) -> Vector3:
 	var goal_z := attack_sign * goal_depth
 	var near_lead_z := ball_pos.z + attack_sign * 2.2
 	var look_z := lerpf(near_lead_z, goal_z, look_goal_blend)
-	return Vector3(look_x, 0.85, look_z)
+	return Vector3(look_x, 1.05, look_z)
