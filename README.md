@@ -1,6 +1,6 @@
 # MyHandball
 
-Desktop handball prototype built with **Godot 4.3** (GDScript). Phases **0–5** are in: sandbox → mini match → rules → GK/shot craft → tactics → presentation. **Phase A** deepens soft pass circulation; **Phase B** adds **dribble** (hold V / R3) with procedural bounce, a **3-second hold** clock, step reset on dribble catch, and double-dribble lite; **Phase C** remounts **passive play** as an IHF-inspired hybrid (progress warn → pass-count); **Phase D** adds **contact lite** (bump → free throw, clear-chance heuristic → **7 m**, optional **2-min exclusion**); **Phase E** adds **attack/defense shape presets** (Wide/Crash · Flat/OneUp); **Phase F** adds **movement craft** (jump-shot state, flat/bounce/lob passes, GK angle-cut + outlet, catch settle); **Phase G** expands to a **full 7** on court (LW/LB/CB/RB/RW/Pivot + GK) with **stamina** and **dead-ball substitutions** (+2 bench). Still engine primitives (polished capsules, no Mixamo).
+Desktop handball prototype built with **Godot 4.3** (GDScript). Phases **0–5** are in: sandbox → mini match → rules → GK/shot craft → tactics → presentation. **Phase A** deepens soft pass circulation; **Phase B** adds **dribble** (hold V / R3) with procedural bounce, a **3-second hold** clock, step reset on dribble catch, and double-dribble lite; **Phase C** remounts **passive play** as an IHF-inspired hybrid (progress warn → pass-count); **Phase D** adds **contact lite** (bump → free throw, clear-chance heuristic → **7 m**, optional **2-min exclusion**); **Phase E** adds **attack/defense shape presets** (Wide/Crash · Flat/OneUp); **Phase F** adds **movement craft** (jump-shot state, flat/bounce/lob passes, GK angle-cut + outlet, catch settle); **Phase G** expands to a **full 7** on court (LW/LB/CB/RB/RW/Pivot + GK) with **stamina** and **dead-ball substitutions** (+2 bench). Playability pass: **auto-control** the Home ball carrier, **realistic kickoff** (defense on 6 m / offense pre-mid), and **IHF court lines** (6 m D, dashed 9 m, 7 m, center circle). Still engine primitives (polished capsules, no Mixamo).
 
 ## Requirements (Windows)
 
@@ -48,7 +48,7 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 
 **Camera:** behind the team with (or last with) the ball. In the **center corridor** the frame is square with the goal (goal in the middle). When the ball drifts wide the rig adds only a **subtle yaw** about the ball — it does **not** recenter the ball on screen; the goal stays the visual anchor.
 
-**Team control:** **Q** cycles the Home on-court roster in order (skips bench / exclusions). **R** jumps to the most useful on-court teammate (nearest to a free ball, open receiver when attacking, best defender when covering).
+**Team control:** While **Home** has the ball, control follows the **carrier** automatically (pickup, catch, GK gather, restart). **Q** still cycles the Home on-court roster (skips bench / exclusions) for off-ball work. **R** jumps to the most useful on-court teammate (nearest to a free ball, open receiver when attacking, best defender when covering). Away possession never forces Away control.
 
 **Shapes (Phase E, full 7):** **1** / D-pad↑ toggles Home **attack** Wide (3-3) ↔ Crash (2-4). **2** / D-pad↓ toggles Home **defense** Flat (6-0) ↔ OneUp (5-1). Roles are real **LW / LB / CB / RB / RW / Pivot**. Away AI picks shapes from score/time. HUD shows `Shape Atk … · Def …`.
 
@@ -207,7 +207,7 @@ Team-play primitives for **3 outfield + GK**. Spacing is handball-recognizable (
 | Feature | How it feels in play |
 |---------|----------------------|
 | **Formations** | Outfield roles: **LW / CB / RW**. Attack: wings wide near the ~9 m arc, CB in backcourt (tucks pivot-ish when the ball is deep). Defense: 3-across wall outside own 6 m with ball-side slide. Away AI uses the same slots. |
-| **Set pieces lite** | Phase 2 restarts now place both teams. Free throws (traveling / passive / 6 m) → taker on the spot + teammates in attack lanes + defenders in a **9 m-style wall**. Throw-in / goal throw get lane / receive shapes. Kickoff uses a compact midfield shape. |
+| **Set pieces lite** | Phase 2 restarts now place both teams. Free throws (traveling / passive / 6 m) → taker on the spot + teammates in attack lanes + defenders in a **9 m-style wall**. Throw-in / goal throw get lane / receive shapes. Kickoff: offense in own half approaching midfield; defense walls just outside own **6 m**. |
 | **Auto off-ball** | Uncontrolled Home teammates (and Away) hold formation slots — no more frozen statues. Free ball: nearest presses, others keep shape. |
 | **Switch-to-best** | **R** / X picks ball-nearest, open receiver, or best defender. **Q** remains a simple roster cycle. HUD shows role tags (LW/CB/RW/GK). |
 
@@ -248,7 +248,7 @@ These are **handball-informed approximations** for a playable prototype — reco
 | **3-second hold / dribble** | Hold ≤ **3 s** without dribble / pass / shot → free throw. Hold **V** / **R3** to bounce (pauses the clock). Catch the dribble → new 3 s + steps; a second stream after gather → **double dribble**. |
 | **Passive play (lite)** | **IHF-inspired hybrid (Phase C):** stall without progress ~**7 s** → **Passive (lite)** warn. After warn, same-team receives count; **5th receive** without a shot → free throw. Meaningful progress (~1.5 m closer) resets/delays the *warn* only. Shot attempt clears; GK possession exempt. |
 | **Out of bounds** | Soft sideline / end-line bounds inside the walls. Sideline → **throw-in** for the other team. End line outside the goal mouth: attack last touch → **goal throw** (defending GK); defense last touch → corner-style **throw-in**. |
-| **Goal area (6 m)** | Semicircle approx from the goal posts. Outfield players may not stand in either crease; **airborne attackers** can enter for a jump shot. Grounded illegal presence (brief grace) → free throw. Away AI steers outside both arcs. |
+| **Goal area (6 m)** | IHF stadium shape (3 m straight + quarter-circles at the posts) for collision and painted lines; dashed **9 m** free-throw arcs; **7 m** marks; center line + circle. Outfield players may not stand in either crease; **airborne attackers** can enter for a jump shot. Grounded illegal presence (brief grace) → free throw. Away AI steers outside both arcs. |
 | **Restarts** | Throw-in / goal throw / free throw (traveling, passive, 6 m, foul) / **7 m** with short freeze + banner + set-piece placement. **Kickoff after goals** (and period starts) from Phase 1 is unchanged in timing. |
 | **Contact / 7 m (Phase D)** | Defender reach-in during shoot/pass windup near 6–9 m → foul FT; clear-chance heuristic → 7 m (+ optional 2-min exclusion). |
 
@@ -275,7 +275,7 @@ Defaults are short for feel-testing. In the Match scene inspector (or in `script
 
 ## Phase 0 foundation (still in)
 
-- IHF-ish court (40×20 m units): floor, lines, walls, dual goals with mouth triggers
+- IHF court (40×20 m units): floor, 6 m D / dashed 9 m / 7 m / center circle, walls, dual goals (3×2) with mouth triggers
 - **3 outfield + 1 GK** capsules per side
 - Ball: pickup on contact, follow attach point, impulse shot
 - Move / jump / possess / shoot / team switch / camera-relative controls

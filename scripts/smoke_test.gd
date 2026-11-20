@@ -1950,6 +1950,12 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 	home_gk_f.has_ball = true
+	# Auto-control rides Home carriers (incl. GK). Park control on an outfielder
+	# so the AI outlet path can fire for this assert.
+	if home_cb_f:
+		match_node._set_controlled(home_cb_f)
+	home_gk_f.controlled = false
+	home_gk_f.ai_enabled = true
 	home_gk_f.arm_outlet_pass()
 	home_gk_f._outlet_timer = 0.0
 	home_gk_f._outlet_cd = 0.0
@@ -2181,6 +2187,193 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 	print("Smoke Phase G roster/stamina/sub OK")
+
+	# --- Playability: auto-control carrier / kickoff shape / IHF court lines ---
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	var auto_lw: Player = null
+	var auto_cb: Player = null
+	var auto_rw: Player = null
+	for p in match_node._home_players:
+		if p.is_goalkeeper or p.on_bench:
+			continue
+		match Formations.role_for(p):
+			Formations.Role.LEFT_WING:
+				auto_lw = p
+			Formations.Role.CENTER_BACK:
+				auto_cb = p
+			Formations.Role.RIGHT_WING:
+				auto_rw = p
+	if auto_lw == null or auto_cb == null or auto_rw == null:
+		push_error("Smoke: missing LW/CB/RW for auto-control")
+		get_tree().quit(1)
+		return
+	_smoke_park_unused_outfield(match_node, [auto_lw, auto_cb, auto_rw])
+	match_node._set_controlled(auto_lw)
+	auto_cb.global_position = Vector3(0.0, 0.0, 4.0)
+	auto_cb.velocity = Vector3.ZERO
+	auto_cb.ai_enabled = false
+	ball.global_position = auto_cb.global_position + Vector3(0.2, 1.1, 0.0)
+	if not ball.try_pickup(auto_cb):
+		push_error("Smoke: auto-control pickup failed")
+		get_tree().quit(1)
+		return
+	auto_cb.has_ball = true
+	await get_tree().process_frame
+	print(
+		"Smoke auto-control after Home pickup: controlled=",
+		match_node.controlled_player.name if match_node.controlled_player else "null",
+		" carrier=", ball.carrier.name if ball.carrier else "null"
+	)
+	if match_node.controlled_player != auto_cb:
+		push_error("Smoke: Home pickup should auto-control the ball carrier")
+		get_tree().quit(1)
+		return
+	# Away possession must NOT steal control onto Away.
+	_smoke_clear_ball(ball)
+	var away_hold := match_node._first_outfield(match_node._away_players)
+	away_hold.global_position = Vector3(1.0, 0.0, 2.0)
+	match_node._set_controlled(auto_lw)
+	if not ball.try_pickup(away_hold):
+		push_error("Smoke: away hold pickup failed")
+		get_tree().quit(1)
+		return
+	away_hold.has_ball = true
+	await get_tree().process_frame
+	if match_node.controlled_player != auto_lw or match_node.controlled_player.team_id != 0:
+		push_error("Smoke: Away pickup must not force Away control")
+		get_tree().quit(1)
+		return
+	print("Smoke auto-control Home carrier / ignore Away OK")
+
+	# Pass catch should ride the receiver.
+	_smoke_clear_ball(ball)
+	for p in match_node._away_players:
+		p.match_frozen = true
+		p.ai_enabled = false
+	_smoke_lock_pass_bots(match_node, [auto_lw, auto_cb, auto_rw])
+	_smoke_park_unused_outfield(match_node, [auto_lw, auto_cb, auto_rw])
+	auto_lw.global_position = Vector3(-2.0, 0.0, 0.0)
+	auto_cb.global_position = Vector3(0.0, 0.0, 5.0)
+	auto_rw.global_position = Vector3(7.5, 0.0, -2.0)
+	match_node._set_controlled(auto_lw)
+	_smoke_lock_pass_bots(match_node, [auto_lw, auto_cb, auto_rw])
+	ball.global_position = auto_lw.global_position + Vector3(0.3, 1.1, 0.0)
+	if not ball.try_pickup(auto_lw):
+		push_error("Smoke: auto-control pass setup pickup failed")
+		get_tree().quit(1)
+		return
+	auto_lw.has_ball = true
+	if match_node.controlled_player != auto_lw:
+		push_error("Smoke: passer should be controlled after Home pickup")
+		get_tree().quit(1)
+		return
+	match_node._try_pass()
+	var catch_ok := await _smoke_await_carrier(ball, auto_cb, 2.2)
+	print(
+		"Smoke auto-control after catch: caught=", catch_ok,
+		" controlled=", match_node.controlled_player.name if match_node.controlled_player else "null"
+	)
+	if not catch_ok:
+		push_error("Smoke: CB catch failed for auto-control check")
+		get_tree().quit(1)
+		return
+	if match_node.controlled_player != auto_cb:
+		push_error("Smoke: catch should auto-control the Home receiver")
+		get_tree().quit(1)
+		return
+
+	# Kickoff shape: Home offense pre-mid; Away defense near own 6 m wall.
+	match_node._place_kickoff_shape(0)
+	var home_atk_ok := true
+	var away_def_ok := true
+	var away_goal_z := Court.HALF_LENGTH
+	var def_line_z := away_goal_z - Formations.DEFENSE_LINE_M
+	for p in match_node._home_players:
+		if p.is_goalkeeper or p.on_bench:
+			continue
+		# Own half, approaching center (before midfield).
+		if p.global_position.z >= -0.05 or p.global_position.z < -10.0:
+			home_atk_ok = false
+		if absf(p.global_position.z) < 0.4 and absf(p.global_position.x) < 0.4:
+			# Only the separate taker placement sits on center; kickoff_slot CB is deeper.
+			pass
+	for p in match_node._away_players:
+		if p.is_goalkeeper or p.on_bench:
+			continue
+		if absf(p.global_position.z - def_line_z) > 1.25:
+			away_def_ok = false
+		if Court.in_goal_area(p.global_position, 1):
+			away_def_ok = false
+	print(
+		"Smoke kickoff Home atk pre-mid=", home_atk_ok,
+		" Away def≈6m=", away_def_ok, " def_line_z=", def_line_z
+	)
+	if not home_atk_ok:
+		push_error("Smoke: Home kickoff offense should sit in own half before midfield")
+		get_tree().quit(1)
+		return
+	if not away_def_ok:
+		push_error("Smoke: Away kickoff defense should wall near own 6 m")
+		get_tree().quit(1)
+		return
+	# Mirror: Away kickoff → Home on own 6 m wall.
+	match_node._place_kickoff_shape(1)
+	var home_def_line := -Court.HALF_LENGTH + Formations.DEFENSE_LINE_M
+	var home_def_ok := true
+	var away_atk_ok := true
+	for p in match_node._home_players:
+		if p.is_goalkeeper or p.on_bench:
+			continue
+		if absf(p.global_position.z - home_def_line) > 1.25:
+			home_def_ok = false
+		if Court.in_goal_area(p.global_position, 0):
+			home_def_ok = false
+	for p in match_node._away_players:
+		if p.is_goalkeeper or p.on_bench:
+			continue
+		if p.global_position.z <= 0.05 or p.global_position.z > 10.0:
+			away_atk_ok = false
+	print("Smoke kickoff Away atk=", away_atk_ok, " Home def≈6m=", home_def_ok)
+	if not home_def_ok or not away_atk_ok:
+		push_error("Smoke: Away kickoff should put Home on 6 m and Away pre-mid")
+		get_tree().quit(1)
+		return
+
+	# Court lines: IHF D geometry helpers + Lines node with goal-area arcs.
+	if not Court.in_goal_area(Vector3(0.0, 0.0, -14.0), 0):
+		push_error("Smoke: (0,-14) should be on/inside home 6 m straight")
+		get_tree().quit(1)
+		return
+	if Court.in_goal_area(Vector3(0.0, 0.0, -13.5), 0):
+		push_error("Smoke: (0,-13.5) should be outside home 6 m")
+		get_tree().quit(1)
+		return
+	# Outside the posts: quarter-circle reaches x≈-1.5-6 at the goal line.
+	if not Court.in_goal_area(Vector3(-5.0, 0.0, -19.0), 0):
+		push_error("Smoke: near-post quarter-circle should cover (-5,-19)")
+		get_tree().quit(1)
+		return
+	if Court.in_goal_area(Vector3(-8.0, 0.0, -14.0), 0):
+		push_error("Smoke: far corner outside D should not be in goal area")
+		get_tree().quit(1)
+		return
+	var court_node: Node3D = null
+	for child in match_node.get_children():
+		if child is Court:
+			court_node = child
+			break
+	if court_node == null:
+		push_error("Smoke: Court node missing")
+		get_tree().quit(1)
+		return
+	var lines_node := court_node.get_node_or_null("Lines")
+	if lines_node == null or lines_node.get_child_count() < 40:
+		push_error("Smoke: Court Lines should include IHF arc/segment meshes")
+		get_tree().quit(1)
+		return
+	print("Smoke IHF court lines + goal-area D OK (line meshes=", lines_node.get_child_count(), ")")
+	print("Smoke playability auto-control / kickoff / court OK")
 
 	print("SMOKE_OK")
 	get_tree().quit(0)
