@@ -34,17 +34,21 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 | **PASS** bounce (hold + pass) | Hold **B** + pass | Hold D-pad Left + RB |
 | **PASS** lob (hold + pass) | Hold **F** + pass | Hold **LT / L2** + RB |
 | **Lob shot** (while charging shoot) | Hold **F** | Hold **LT / L2** |
-| **Dive** (GK only) | **C** or Ctrl | B / East |
+| **Dive** (GK) / **Shot fake** (outfield w/ ball) | **C** or Ctrl (**X** also shot fake) | B / East |
+| **Pass fake** | **Z** | D-pad Right while LIVE with ball |
+| **Jab / body fake** | **N** | **L3** (left stick click) |
 | **Cycle** teammate | **Q** or Tab | LB (left bumper) |
 | **Switch-to-best** | **R** | X / West |
 | Toggle aim mode | **T** | Y / North |
 | **Toggle attack shape** (Wide ↔ Crash) | **1** | D-pad Up |
 | **Toggle defense shape** (Flat ↔ OneUp) | **2** | D-pad Down |
 | **Sprint** (drains stamina) | Hold **Shift** | Hold **Back** / Select |
-| **Cycle bench** (sub candidate) | **,** (comma) | D-pad Right |
+| **Cycle bench** (sub candidate) | **,** (comma) | D-pad Right (dead ball / no ball) |
 | **Confirm sub** (dead ball only) | **.** (period) | **Start** |
 
 **Binding notes (Wave 0):** Shoot is the **RT axis** (not L3). Lob is **LT only** so it does not share **Back/Select** with sprint. Pass (RB) always cancels a shoot charge and never fires the shot. Dribble stays on **V / R3** so it does not fight shoot, pass, jump, or lob.
+
+**Binding notes (Wave 3 fakes):** **X** / **C** (outfield) / pad **B** = shot fake; **Z** / D-pad Right (LIVE+ball) = pass fake; **N** / **L3** = jab. Fakes **keep the ball**, cancel any shoot charge, and never fire a shot or pass. They do not share shoot (LMB/E/RT), pass (RMB/G/RB), dribble (V/R3), or shape toggles (1/2). On dead ball, D-pad Right / **,** still cycles the bench.
 
 **Movement** is relative to the **current camera**: W / stick-up walks into the screen along the camera forward projected onto the court. When possession flips and the camera yaws behind the new attack, the same stick direction keeps matching what you see.
 
@@ -64,6 +68,10 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 **Pass vs shoot:** Hold **LMB/E/RT** to charge a shot (HUD shows `SHOOT · FLAT/LOB`). Tap **RMB/G/RB** for an instant **PASS** — it cancels any charge and never fires the shot. Pass types share that pass button: **flat** alone, **bounce** with **B** / D-pad Left, **lob** with **F** / LT (same lob key as lob-shot while charging). Passes use a light lead in your aim cone (not a heavy magnet). HUD shows `PASS · FLAT/BOUNCE/LOB · RMB/G/RB`.
 
 **Jump-shot craft (Phase F):** With the ball, approach and press **Space** / A → brief **plant** → jump. Release the charged shot inside the timed **window** near apex for sweet timing (feels different from a standing charge). HUD shows plant / rise / window / early·sweet·late.
+
+**Fakes (Wave 3):** Shot fake threatens a release then pulls back; pass fake look-off / pump; jab steps the lead foot + hips. Nearby markers can freeze briefly then recover (lite). AI may fake sparingly under pressure. HUD flashes `Fake · SHOT/PASS/JAB`.
+
+**GK vocabulary (Wave 3):** Set / angle-cut ready stance, lateral shuffle pose, dive **L/R** × **low/high** with matching save volumes, catch/smother vs deflect, outlet windup after a gather. On **7 m**, defending GK starts on the **4 m** line and is restrained from leaving early.
 
 **Dribble vs shoot/pass/jump:** Hold **V** (keyboard) or **R3** (gamepad) to bounce while moving. Chosen so it does not fight shoot (LMB/E/RT), pass (RMB/G/RB), jump (Space/A), or lob (F/LT). Release gathers the ball (new 3 steps + fresh 3 s). Starting a second bounce stream after gather = **double dribble**. Pass and shot clear the 3 s clock. Charging a shot ends an active dribble.
 

@@ -383,8 +383,11 @@ static func set_piece_slot(
 	if player.is_goalkeeper:
 		if code == "goal_throw" and player.team_id == awarding_team_id:
 			return player.start_position
+		# 7 m: defending GK stands on the 4 m restraining line (R2.7).
 		if is_seven_meter_code(code) and player.team_id != awarding_team_id:
-			return player.start_position
+			var four := Court.four_meter_spot(player.team_id)
+			four.y = 0.0
+			return four
 		return player.start_position
 
 	var is_award := player.team_id == awarding_team_id

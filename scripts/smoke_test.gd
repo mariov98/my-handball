@@ -3055,6 +3055,278 @@ func _ready() -> void:
 	)
 	print("Smoke Wave2 throw and jump motion OK")
 
+	# --- Wave 3: fakes + GK motion vocabulary ---
+	_smoke_prepare_live(match_node, ball)
+	player = match_node.controlled_player
+	if player == null or player.on_bench or player.is_goalkeeper:
+		player = match_node._first_outfield(match_node._home_players)
+		if player:
+			match_node._set_controlled(player)
+	if player == null:
+		push_error("Smoke Wave3: missing outfield player")
+		get_tree().quit(1)
+		return
+	player.clear_fake_motion()
+	player.clear_throw_motion()
+	player.global_position = Vector3(0.0, 0.0, 4.0)
+	player.velocity = Vector3.ZERO
+	player._pickup_block = 0.0
+	if ball.carrier and is_instance_valid(ball.carrier):
+		ball.carrier.has_ball = false
+	ball.carrier = player
+	player.has_ball = true
+	ball.linear_velocity = Vector3.ZERO
+	ball.last_shot_meta = {}
+	ball.global_position = player.ball_attach.global_position
+
+	# Bindings present and do not steal shoot/pass/dribble.
+	for action_name in ["fake_shot", "fake_pass", "fake_jab"]:
+		if not InputMap.has_action(action_name):
+			push_error("Smoke Wave3: missing input action %s" % action_name)
+			get_tree().quit(1)
+			return
+	var shoot_has_x := false
+	for ev in InputMap.action_get_events("shoot"):
+		if ev is InputEventKey and (ev as InputEventKey).physical_keycode == KEY_X:
+			shoot_has_x = true
+	if shoot_has_x:
+		push_error("Smoke Wave3: shoot must not use X (shot fake)")
+		get_tree().quit(1)
+		return
+
+	# R2.5 / R4.9: three fakes keep the ball and never release.
+	var marker: Player = null
+	for p in match_node._away_players:
+		if not p.is_goalkeeper and not p.on_bench:
+			marker = p
+			break
+	if marker == null:
+		push_error("Smoke Wave3: need an away marker for sell test")
+		get_tree().quit(1)
+		return
+	for kind in [FakeMotion.Kind.SHOT, FakeMotion.Kind.PASS, FakeMotion.Kind.JAB]:
+		player.clear_fake_motion()
+		player._fake_cd = 0.0
+		player.has_ball = true
+		ball.carrier = player
+		ball.global_position = player.ball_attach.global_position
+		marker.global_position = player.global_position + Vector3(1.2, 0.0, 0.8)
+		marker.fake_sold_t = 0.0
+		marker.fake_recover_t = 0.0
+		marker.velocity = Vector3.ZERO
+		var started := player.try_fake(kind, Vector3(0.2, 0.0, 1.0))
+		if not started or not player.fake_active:
+			push_error("Smoke Wave3: fake kind %d failed to start" % kind)
+			get_tree().quit(1)
+			return
+		if player.fake_kind != kind:
+			push_error("Smoke Wave3: fake kind mismatch")
+			get_tree().quit(1)
+			return
+		if ball.carrier != player or not player.has_ball:
+			push_error("Smoke Wave3: fake must keep possession")
+			get_tree().quit(1)
+			return
+		# Charge abort + release blocked while faking.
+		player.set_shot_charge_motion(0.8, false, Vector3(0, 0.1, 1))
+		if player.throw_phase == ThrowMotion.Phase.CHARGE and player.fake_active:
+			# try_fake clears charge when starting; mid-fake charge should not release.
+			pass
+		# Read poses before any charge probe (charge would steal the arm/leg overlay).
+		player.clear_throw_motion()
+		player._apply_fake_pose(1.0)
+		var arm_r := player.find_child("ArmR", true, false) as Node3D
+		var leg_r := player.get_node_or_null("LegR") as Node3D
+		var leg_l := player.get_node_or_null("LegL") as Node3D
+		if kind == FakeMotion.Kind.SHOT and arm_r and absf(arm_r.rotation_degrees.x) < 20.0:
+			push_error("Smoke Wave3: shot fake should cock ArmR")
+			get_tree().quit(1)
+			return
+		if kind == FakeMotion.Kind.JAB:
+			var jab_plant := 0.0
+			if leg_r:
+				jab_plant = maxf(jab_plant, absf(leg_r.rotation.x))
+			if leg_l:
+				jab_plant = maxf(jab_plant, absf(leg_l.rotation.x))
+			if jab_plant < 0.15:
+				push_error("Smoke Wave3: jab fake should plant a leg (plant=%.3f)" % jab_plant)
+				get_tree().quit(1)
+				return
+		if marker.fake_sold_t <= 0.0:
+			push_error("Smoke Wave3: nearby marker should be sold (lite)")
+			get_tree().quit(1)
+			return
+		# Charge abort + release blocked while faking.
+		player.set_shot_charge_motion(0.8, false, Vector3(0, 0.1, 1))
+		if player.try_shoot(Vector3(0, 0.1, 1), 14.0, ball):
+			push_error("Smoke Wave3: try_shoot must fail while faking")
+			get_tree().quit(1)
+			return
+		if ball.carrier != player:
+			push_error("Smoke Wave3: shot must not fire during fake")
+			get_tree().quit(1)
+			return
+		player.clear_throw_motion()
+		# Advance through threaten → recover → done; ball still held.
+		for _step in range(30):
+			player._tick_fake_motion(0.05)
+			player._apply_fake_pose(0.05)
+		if player.fake_active:
+			push_error("Smoke Wave3: fake should finish recover")
+			get_tree().quit(1)
+			return
+		if ball.carrier != player or not player.has_ball:
+			push_error("Smoke Wave3: possession must survive fake recover")
+			get_tree().quit(1)
+			return
+		print("Smoke Wave3 fake ", FakeMotion.kind_name(kind), " OK sold=", marker.fake_sold_t)
+
+	# Mid-charge fake cancels charge and keeps ball.
+	player.clear_fake_motion()
+	player._fake_cd = 0.0
+	player.has_ball = true
+	ball.carrier = player
+	match_node._charging = true
+	match_node._charge_held_s = 0.6
+	player.set_shot_charge_motion(0.6, false, Vector3(0, 0.1, 1))
+	match_node._try_fake(FakeMotion.Kind.SHOT)
+	if match_node._charging:
+		push_error("Smoke Wave3: fake should cancel shoot charge")
+		get_tree().quit(1)
+		return
+	if ball.carrier != player:
+		push_error("Smoke Wave3: charge cancel via fake must not release")
+		get_tree().quit(1)
+		return
+	print("Smoke Wave3 charge-cancel fake OK")
+
+	# R2.7 GK vocabulary: set / shuffle / dive L-R low-high / catch vs deflect / outlet / 4 m.
+	var gk := match_node._goalkeeper_for(0)
+	if gk == null:
+		push_error("Smoke Wave3: missing home GK")
+		get_tree().quit(1)
+		return
+	gk.match_frozen = false
+	gk.ai_enabled = true
+	gk.controlled = false
+	gk.has_ball = false
+	gk.diving = false
+	gk._dive_cd = 0.0
+	gk.global_position = gk.start_position
+	gk.velocity = Vector3.ZERO
+	gk._update_gk_stance(Vector3.ZERO, 0.0)
+	if gk.gk_stance != GkMotion.Stance.SET:
+		push_error("Smoke Wave3: idle GK should be SET stance")
+		get_tree().quit(1)
+		return
+	gk._apply_gk_pose(1.0)
+	var set_arm := gk.find_child("ArmL", true, false) as Node3D
+	var set_wide := set_arm.position.x if set_arm else 0.0
+	gk._update_gk_stance(Vector3(1.0, 0.0, 0.0), 4.0)
+	if gk.gk_stance != GkMotion.Stance.SHUFFLE:
+		push_error("Smoke Wave3: lateral wish should be SHUFFLE")
+		get_tree().quit(1)
+		return
+	gk._dive_cd = 0.0
+	var low_left := gk.try_dive(Vector3(-1.0, 0.0, 0.0))
+	# Force low classification via ball height.
+	gk.diving = false
+	gk._dive_cd = 0.0
+	ball.global_position = gk.global_position + Vector3(-1.5, 0.45, 1.0)
+	gk.match_ball = ball
+	low_left = gk.try_dive(Vector3(-1.0, 0.0, 0.2))
+	if not low_left or not gk.diving:
+		push_error("Smoke Wave3: low-left dive failed")
+		get_tree().quit(1)
+		return
+	if gk.dive_side != GkMotion.DiveSide.LEFT:
+		push_error("Smoke Wave3: dive side should be LEFT")
+		get_tree().quit(1)
+		return
+	if gk.dive_height != GkMotion.DiveHeight.LOW:
+		push_error("Smoke Wave3: low ball should be LOW dive")
+		get_tree().quit(1)
+		return
+	var dive_pose_low := GkMotion.pose_dive(gk.dive_side, gk.dive_height)
+	var low_hand_y := float((dive_pose_low["hand_l_pos"] as Vector3).y)
+	gk.diving = false
+	gk._dive_cd = 0.0
+	gk._set_dive_pose(false)
+	ball.global_position = gk.global_position + Vector3(1.5, 1.8, 1.0)
+	var high_right := gk.try_dive(Vector3(1.0, 0.0, 0.2))
+	if not high_right or gk.dive_side != GkMotion.DiveSide.RIGHT:
+		push_error("Smoke Wave3: high-right dive side failed")
+		get_tree().quit(1)
+		return
+	if gk.dive_height != GkMotion.DiveHeight.HIGH:
+		push_error("Smoke Wave3: high ball should be HIGH dive")
+		get_tree().quit(1)
+		return
+	var dive_pose_high := GkMotion.pose_dive(gk.dive_side, gk.dive_height)
+	var high_hand_y := float((dive_pose_high["hand_r_pos"] as Vector3).y)
+	if high_hand_y <= low_hand_y + 0.2:
+		push_error("Smoke Wave3: high dive hands should be above low dive")
+		get_tree().quit(1)
+		return
+	# Save volume grows on dive.
+	if gk._save_area and gk._save_area.get_child_count() > 0:
+		var save_shape := gk._save_area.get_child(0) as CollisionShape3D
+		if save_shape and save_shape.shape is BoxShape3D:
+			var box_sz := (save_shape.shape as BoxShape3D).size
+			if box_sz.x < 2.2:
+				push_error("Smoke Wave3: dive should enlarge SaveArea")
+				get_tree().quit(1)
+				return
+	gk.diving = false
+	gk._dive_cd = 0.0
+	gk._set_dive_pose(false)
+	# Catch vs deflect distinction.
+	gk._begin_gk_catch_pose()
+	if gk.gk_stance != GkMotion.Stance.CATCH or not gk.last_save_caught:
+		push_error("Smoke Wave3: catch pose missing")
+		get_tree().quit(1)
+		return
+	gk._begin_gk_deflect_pose()
+	if gk.gk_stance != GkMotion.Stance.DEFLECT or gk.last_save_caught:
+		push_error("Smoke Wave3: deflect pose missing")
+		get_tree().quit(1)
+		return
+	# Outlet pose after arming.
+	gk.has_ball = true
+	ball.carrier = gk
+	gk.arm_outlet_pass()
+	if gk.gk_stance != GkMotion.Stance.OUTLET:
+		push_error("Smoke Wave3: outlet arm should set OUTLET stance")
+		get_tree().quit(1)
+		return
+	# 7 m → GK on 4 m restraining line + lock.
+	var w3_seven := Court.seven_meter_spot(1)
+	var w3_four := Court.four_meter_spot(0)
+	var defend_gk_slot := Formations.set_piece_slot(
+		gk, "seven_m", 1, w3_seven, match_node._first_outfield(match_node._away_players)
+	)
+	if absf(defend_gk_slot.z - w3_four.z) > 0.15:
+		push_error("Smoke Wave3: defending GK 7m slot should be on 4m line")
+		get_tree().quit(1)
+		return
+	match_node._place_set_piece("seven_m", 1, w3_seven, match_node._first_outfield(match_node._away_players))
+	if not gk._seven_m_lock:
+		push_error("Smoke Wave3: defending GK should lock to 4m on 7m")
+		get_tree().quit(1)
+		return
+	gk.global_position = w3_four + Vector3(0.0, 0.0, 1.2)
+	gk._enforce_gk_four_meter()
+	if gk.global_position.z > w3_four.z + 0.05:
+		push_error("Smoke Wave3: 4m enforce should pull GK back")
+		get_tree().quit(1)
+		return
+	print(
+		"Smoke Wave3 GK set_wide=", set_wide,
+		" low_hand=", low_hand_y, " high_hand=", high_hand_y,
+		" four_z=", w3_four.z
+	)
+	print("Smoke Wave3 fakes and GK motion OK")
+
 	print("SMOKE_OK")
 	get_tree().quit(0)
 
