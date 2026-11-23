@@ -118,6 +118,18 @@ var defense_shape: int = 0
 var jump_shot_active: bool = false
 var jump_shot_air_s: float = 0.0
 var jump_shot_phase: int = 0  # ShotCraft.JumpPhase
+## Wave 2 throw / jump motion (procedural poses on modular body parts).
+var throw_action: int = 0  # ThrowMotion.Action
+var throw_phase: int = 0  # ThrowMotion.Phase
+var throw_t: float = 0.0
+var throw_pass_type: int = 0
+var throw_charge: float = 0.0
+var throw_lob: bool = false
+var throw_wing: bool = false
+var throw_aim_dir: Vector3 = Vector3.FORWARD
+## True while a one-shot throw sequence owns arms/torso (not charge-only).
+var throw_motion_active: bool = false
+var _throw_pose_cache: Dictionary = {}
 
 var _bob_phase: float = 0.0
 var _idle_phase: float = 0.0
@@ -306,8 +318,10 @@ func _physics_process(delta: float) -> void:
 		if global_position.y < -0.15:
 			global_position.y = 0.0
 			velocity.y = 0.0
+	_tick_throw_motion(delta)
 	_update_locomotion_anim(delta, planar.length())
 	_update_arm_pose(delta)
+	_apply_throw_pose(delta)
 	_apply_torso_yaw(delta)
 	_apply_bench_visual()
 	_try_sticky_pass_catch()
@@ -333,6 +347,11 @@ func try_shoot(
 		shot_meta["jump_shot"] = true
 		shot_meta["jump_air_s"] = jump_shot_air_s
 		shot_meta["jump_phase"] = jump_shot_phase
+	var is_pass := bool(shot_meta.get("pass", false))
+	var wing := bool(shot_meta.get("wing_shot", false)) or ThrowMotion.is_wing_finish_context(self)
+	if wing and not is_pass:
+		shot_meta["wing_shot"] = true
+	_begin_throw_from_release(aim_dir, shot_meta, is_pass, wing)
 	possession_changed.emit(false)
 	ball.release_and_shoot(aim_dir, impulse_strength, up_bias, shot_meta)
 	return true
@@ -408,10 +427,14 @@ func _begin_jump_from_input(wish: Vector3) -> void:
 	var craft := has_ball and approach >= ShotCraft.APPROACH_MIN_SPEED
 	if craft:
 		jump_shot_active = true
-		jump_shot_phase = ShotCraft.JumpPhase.PLANTED
+		# Approach steps feed the plant so takeoff reads (R2.4).
+		jump_shot_phase = ShotCraft.JumpPhase.APPROACH
 		jump_shot_air_s = 0.0
 		_js_plant_t = ShotCraft.PLANT_HOLD_S
 		_js_was_airborne = false
+		throw_wing = ThrowMotion.is_wing_finish_context(self)
+		throw_aim_dir = opponent_goal_point() - global_position
+		_torso_yaw_offset = ThrowMotion.torso_yaw_toward(face_direction(), throw_aim_dir)
 	else:
 		# Standing hop / no-ball jump — height heuristic only if somehow shooting mid-air.
 		if has_ball:
@@ -424,7 +447,11 @@ func _begin_jump_from_input(wish: Vector3) -> void:
 func _tick_jump_shot_craft(delta: float) -> void:
 	if _js_plant_t > 0.0:
 		_js_plant_t = maxf(0.0, _js_plant_t - delta)
-		jump_shot_phase = ShotCraft.JumpPhase.PLANTED
+		# First half of plant hold = approach gather; second half = plant load.
+		if _js_plant_t > ShotCraft.PLANT_HOLD_S * 0.45:
+			jump_shot_phase = ShotCraft.JumpPhase.APPROACH
+		else:
+			jump_shot_phase = ShotCraft.JumpPhase.PLANTED
 		if _js_plant_t <= 0.0 and is_on_floor():
 			velocity.y = JUMP_VELOCITY
 			_js_was_airborne = false
@@ -438,11 +465,13 @@ func _tick_jump_shot_craft(delta: float) -> void:
 		return
 	if is_on_floor():
 		if _js_was_airborne:
-			# Landed — craft complete.
+			# Landed — craft complete; optional land pose if no throw sequence owns it.
 			jump_shot_active = false
 			jump_shot_phase = ShotCraft.JumpPhase.NONE
 			jump_shot_air_s = 0.0
 			_js_was_airborne = false
+			if not throw_motion_active or throw_phase == ThrowMotion.Phase.CHARGE:
+				_begin_land_pose()
 		return
 	_js_was_airborne = true
 	jump_shot_air_s += delta
@@ -571,6 +600,7 @@ func reset_to_start() -> void:
 	_outlet_pending = false
 	_outlet_timer = 0.0
 	_outlet_cd = 0.0
+	clear_throw_motion()
 	_set_dive_pose(false)
 	_torso_yaw_offset = 0.0
 	if on_bench or excluded:
@@ -1232,6 +1262,183 @@ func get_torso_yaw_offset() -> float:
 	return _torso_yaw_offset
 
 
+## MatchController drives charge pose while shoot is held.
+func set_shot_charge_motion(charge: float, lob: bool, aim: Vector3 = Vector3.ZERO) -> void:
+	if on_bench or excluded or diving:
+		return
+	throw_charge = clampf(charge, 0.0, 1.0)
+	throw_lob = lob
+	throw_wing = ThrowMotion.is_wing_finish_context(self)
+	if aim.length_squared() > 0.01:
+		throw_aim_dir = aim
+	elif throw_aim_dir.length_squared() < 0.01:
+		throw_aim_dir = opponent_goal_point() - global_position
+	_torso_yaw_offset = ThrowMotion.torso_yaw_toward(face_direction(), throw_aim_dir)
+	if throw_wing and not is_on_floor():
+		throw_action = ThrowMotion.Action.WING_SHOT
+	elif jump_shot_active or not is_on_floor():
+		throw_action = ThrowMotion.Action.JUMP_SHOT if not throw_wing else ThrowMotion.Action.WING_SHOT
+	elif throw_wing:
+		throw_action = ThrowMotion.Action.WING_SHOT
+	else:
+		throw_action = ThrowMotion.Action.SHOOT
+	throw_phase = ThrowMotion.Phase.CHARGE
+	throw_t = 0.0
+	throw_motion_active = true
+	_throw_pose_cache = ThrowMotion.pose_shot_charge(
+		throw_charge, throw_lob, _torso_yaw_offset, throw_wing
+	)
+
+
+func clear_shot_charge_motion() -> void:
+	if throw_phase == ThrowMotion.Phase.CHARGE:
+		clear_throw_motion()
+
+
+func clear_throw_motion() -> void:
+	throw_action = ThrowMotion.Action.NONE
+	throw_phase = ThrowMotion.Phase.IDLE
+	throw_t = 0.0
+	throw_pass_type = PassCraft.PassType.FLAT
+	throw_charge = 0.0
+	throw_lob = false
+	throw_wing = false
+	throw_motion_active = false
+	_throw_pose_cache = {}
+	_torso_yaw_offset = 0.0
+
+
+func _begin_land_pose() -> void:
+	throw_action = ThrowMotion.Action.JUMP_SHOT
+	throw_phase = ThrowMotion.Phase.LAND
+	throw_t = 0.0
+	throw_motion_active = true
+	_throw_pose_cache = ThrowMotion.pose_land(_torso_yaw_offset)
+
+
+func _begin_throw_from_release(
+	aim_dir: Vector3,
+	shot_meta: Dictionary,
+	is_pass: bool,
+	wing: bool
+) -> void:
+	throw_aim_dir = aim_dir
+	throw_lob = bool(shot_meta.get("lob", false))
+	throw_charge = float(shot_meta.get("charge", throw_charge))
+	throw_pass_type = int(shot_meta.get("pass_type", PassCraft.PassType.FLAT))
+	throw_wing = wing
+	_torso_yaw_offset = ThrowMotion.torso_yaw_toward(face_direction(), aim_dir)
+	var airborne := (not is_on_floor()) or jump_shot_active
+	if is_pass:
+		throw_action = ThrowMotion.Action.JUMP_PASS if airborne else ThrowMotion.Action.PASS
+		throw_phase = ThrowMotion.Phase.WINDUP
+		# Jump pass leaves jump-shot craft; land is owned by the throw sequence.
+		if airborne:
+			jump_shot_active = false
+			_js_plant_t = 0.0
+	elif wing:
+		throw_action = ThrowMotion.Action.WING_SHOT
+		throw_phase = ThrowMotion.Phase.RELEASE
+		if airborne:
+			jump_shot_active = false
+			_js_plant_t = 0.0
+	elif airborne:
+		throw_action = ThrowMotion.Action.JUMP_SHOT
+		throw_phase = ThrowMotion.Phase.RELEASE
+		jump_shot_active = false
+		_js_plant_t = 0.0
+	else:
+		throw_action = ThrowMotion.Action.SHOOT
+		throw_phase = ThrowMotion.Phase.RELEASE
+	throw_t = 0.0
+	throw_motion_active = true
+	# Seed first pose so the same frame reads as windup / release.
+	var seeded := ThrowMotion.tick_throw_sequence(
+		throw_action, throw_phase, 0.0, 0.0,
+		throw_pass_type, throw_charge, throw_lob, throw_wing, _torso_yaw_offset
+	)
+	_throw_pose_cache = seeded["pose"]
+
+
+func _tick_throw_motion(delta: float) -> void:
+	if not throw_motion_active or on_bench or excluded or diving:
+		return
+	if throw_phase == ThrowMotion.Phase.CHARGE:
+		# Held charge — pose refreshed in apply from charge fields.
+		_throw_pose_cache = ThrowMotion.pose_shot_charge(
+			throw_charge, throw_lob,
+			ThrowMotion.torso_yaw_toward(face_direction(), throw_aim_dir),
+			throw_wing
+		)
+		return
+	var yaw := ThrowMotion.torso_yaw_toward(face_direction(), throw_aim_dir)
+	_torso_yaw_offset = yaw
+	var stepped := ThrowMotion.tick_throw_sequence(
+		throw_action,
+		throw_phase,
+		throw_t,
+		delta,
+		throw_pass_type,
+		throw_charge,
+		throw_lob,
+		throw_wing,
+		yaw
+	)
+	throw_phase = int(stepped["phase"])
+	throw_t = float(stepped["t"])
+	_throw_pose_cache = stepped["pose"]
+	if bool(stepped["done"]):
+		_apply_pose_dict(stepped["pose"] as Dictionary, 1.0)
+		clear_throw_motion()
+
+
+func _apply_throw_pose(delta: float) -> void:
+	if on_bench or excluded or diving or _arm_r == null:
+		return
+	var blend := 1.0 - exp(-16.0 * delta)
+	if throw_motion_active and not _throw_pose_cache.is_empty():
+		_apply_pose_dict(_throw_pose_cache, blend)
+		return
+	if jump_shot_active and has_ball:
+		# Pre-release jump craft: approach / plant / air cock.
+		throw_wing = throw_wing or ThrowMotion.is_wing_finish_context(self)
+		var pose := ThrowMotion.pose_for_jump_craft(
+			jump_shot_phase,
+			ThrowMotion.torso_yaw_toward(face_direction(), opponent_goal_point() - global_position),
+			throw_wing,
+			false
+		)
+		_torso_yaw_offset = float(pose.get("torso_yaw", 0.0))
+		_apply_pose_dict(pose, blend)
+
+
+func _apply_pose_dict(pose: Dictionary, blend: float) -> void:
+	if _arm_l == null or _arm_r == null:
+		return
+	_arm_l.position = _arm_l.position.lerp(pose["arm_l_pos"] as Vector3, blend)
+	_arm_r.position = _arm_r.position.lerp(pose["arm_r_pos"] as Vector3, blend)
+	var al_rot := pose["arm_l_rot"] as Vector3
+	var ar_rot := pose["arm_r_rot"] as Vector3
+	_arm_l.rotation_degrees = _arm_l.rotation_degrees.lerp(al_rot, blend)
+	_arm_r.rotation_degrees = _arm_r.rotation_degrees.lerp(ar_rot, blend)
+	if _hand_l and _hand_r:
+		_hand_l.position = _hand_l.position.lerp(pose["hand_l_pos"] as Vector3, blend)
+		_hand_r.position = _hand_r.position.lerp(pose["hand_r_pos"] as Vector3, blend)
+	_torso_yaw_offset = float(pose.get("torso_yaw", _torso_yaw_offset))
+	if _upper_body:
+		var pitch := float(pose.get("torso_pitch", 0.0))
+		_upper_body.rotation.x = lerpf(_upper_body.rotation.x, pitch, blend)
+		var y_off := float(pose.get("upper_y_off", 0.0))
+		_upper_body.position.y = lerpf(_upper_body.position.y, _upper_base_y + y_off, blend)
+	if _leg_l and _leg_r and pose.has("leg_l_x"):
+		_leg_l.rotation.x = lerpf(_leg_l.rotation.x, float(pose["leg_l_x"]), blend)
+		_leg_r.rotation.x = lerpf(_leg_r.rotation.x, float(pose["leg_r_x"]), blend)
+
+
+func is_throw_motion_busy() -> bool:
+	return throw_motion_active and throw_phase != ThrowMotion.Phase.IDLE
+
+
 func _ensure_body_parts() -> void:
 	if _body_parts_ready:
 		_cache_body_refs()
@@ -1546,6 +1753,9 @@ func _pose_arms_rest() -> void:
 func _update_arm_pose(_delta: float) -> void:
 	if diving or _arm_l == null or on_bench or excluded:
 		return
+	# Wave 2 throw / jump craft owns the arms while active.
+	if throw_motion_active or (jump_shot_active and has_ball):
+		return
 	if not is_goalkeeper and block_ready:
 		_arm_l.position = Vector3(-0.50, 1.48, 0.22)
 		_arm_r.position = Vector3(0.50, 1.48, 0.22)
@@ -1744,6 +1954,9 @@ func _update_locomotion_anim(delta: float, speed: float) -> void:
 	if diving:
 		if _upper_body:
 			_upper_body.position.y = lerpf(_upper_body.position.y, _upper_base_y - 0.2, 1.0 - exp(-10.0 * delta))
+		return
+	# Throw / jump craft owns arms, torso settle, and plant legs.
+	if throw_motion_active or (jump_shot_active and has_ball):
 		return
 
 	var blend := 1.0 - exp(-12.0 * delta)

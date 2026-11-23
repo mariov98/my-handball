@@ -376,6 +376,10 @@ func _update_shot_charge(delta: float) -> void:
 	# Keep charging while the shoot action is held (mouse / E / RT).
 	if Input.is_action_pressed("shoot"):
 		_charge_held_s += delta
+		var lob_held := Input.is_action_pressed("lob")
+		var charge_01 := ShotCraft.charge_01(_charge_held_s)
+		var aim := _compute_aim(lob_held)
+		controlled_player.set_shot_charge_motion(charge_01, lob_held, aim)
 	else:
 		# Released outside _unhandled_input (e.g. focus loss) — still fire.
 		_release_charged_shot()
@@ -717,6 +721,8 @@ func _update_sub_hud() -> void:
 func _cancel_charge() -> void:
 	_charging = false
 	_charge_held_s = 0.0
+	if controlled_player:
+		controlled_player.clear_shot_charge_motion()
 	if hud and hud.has_method("set_shot_status"):
 		hud.set_shot_status(0.0, false, "", false)
 
@@ -741,6 +747,9 @@ func _try_shoot_charged(held_s: float) -> void:
 	var charge := ShotCraft.charge_01(held_s)
 	var lob := Input.is_action_pressed("lob")
 	var aim := _compute_aim(lob)
+	var wing := ThrowMotion.is_wing_finish_context(controlled_player)
+	if wing:
+		aim = ThrowMotion.wing_aim_assist(controlled_player, aim)
 	var jump_q := ShotCraft.jump_shot_quality(controlled_player)
 	var impulse := ShotCraft.impulse_for_charge(charge, lob)
 	var timed := ShotCraft.apply_jump_timing(aim, impulse, jump_q)
@@ -769,6 +778,7 @@ func _try_shoot_charged(held_s: float) -> void:
 		"jump_air_s": controlled_player.jump_shot_air_s,
 		"jump_phase": controlled_player.jump_shot_phase,
 		"stamina": controlled_player.stamina_01(),
+		"wing_shot": wing,
 	}
 	var from := controlled_player.global_position + Vector3(0, 1.2, 0)
 	if controlled_player.try_shoot(aim, impulse, ball, up, meta):

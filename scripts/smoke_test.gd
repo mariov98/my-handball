@@ -1779,7 +1779,14 @@ func _ready() -> void:
 	player.global_position = Vector3(0.0, 0.0, 8.0)
 	player.velocity = Vector3(0.0, 0.0, 5.0)
 	player._begin_jump_from_input(Vector3(0.0, 0.0, 1.0))
-	if not player.jump_shot_active or player.jump_shot_phase != ShotCraft.JumpPhase.PLANTED:
+	# Wave 2: approach feeds into plant during the hold; either phase is valid on begin.
+	if (
+		not player.jump_shot_active
+		or (
+			player.jump_shot_phase != ShotCraft.JumpPhase.PLANTED
+			and player.jump_shot_phase != ShotCraft.JumpPhase.APPROACH
+		)
+	):
 		push_error("Smoke: approach jump with ball should plant jump-shot craft")
 		get_tree().quit(1)
 		return
@@ -2729,6 +2736,324 @@ func _ready() -> void:
 		" head_top=", player.standing_head_top(),
 		" hand_dist=", hand_dist
 	)
+
+	# --- Wave 2: throw & jump motion (pass / shoot / jump pass / jump shot / wing) ---
+	_smoke_prepare_live(match_node, ball)
+	player = match_node.controlled_player
+	if player == null or player.on_bench:
+		player = match_node._first_outfield(match_node._home_players)
+		if player:
+			match_node._set_controlled(player)
+	if player == null:
+		push_error("Smoke Wave2: missing outfield player")
+		get_tree().quit(1)
+		return
+	player.on_bench = false
+	player.excluded = false
+	player.clear_throw_motion()
+	player._pose_standing_rest()
+	player.global_position = Vector3(0.0, 0.0, 0.0)
+	player.velocity = Vector3.ZERO
+	player.rotation.y = 0.0
+	# R2.1 flat / bounce / lob pass windup → follow + torso toward target.
+	var pass_mate: Player = match_node._first_outfield(match_node._home_players)
+	for p in match_node._home_players:
+		if p != player and not p.is_goalkeeper and not p.on_bench:
+			pass_mate = p
+			break
+	for pass_type in [PassCraft.PassType.FLAT, PassCraft.PassType.BOUNCE, PassCraft.PassType.LOB]:
+		player.clear_throw_motion()
+		player.has_ball = true
+		if ball.carrier and ball.carrier != player:
+			ball.carrier.has_ball = false
+		ball.carrier = player
+		ball.global_position = player.ball_attach.global_position
+		pass_mate.global_position = Vector3(2.0, 0.0, 6.0)
+		if not player.try_pass_to(pass_mate, ball, -1.0, Vector3(0, 0, 1), pass_type):
+			push_error("Smoke Wave2: pass type %d failed to release" % pass_type)
+			get_tree().quit(1)
+			return
+		if player.throw_action != ThrowMotion.Action.PASS:
+			push_error("Smoke Wave2: standing pass should start PASS action (got %d)" % player.throw_action)
+			get_tree().quit(1)
+			return
+		if player.throw_phase != ThrowMotion.Phase.WINDUP:
+			push_error("Smoke Wave2: pass should start in WINDUP")
+			get_tree().quit(1)
+			return
+		var yaw0 := absf(player.get_torso_yaw_offset())
+		var arm_r0 := player.find_child("ArmR", true, false) as Node3D
+		player._apply_throw_pose(1.0)
+		var windup_rot := absf(arm_r0.rotation_degrees.x) if arm_r0 else 0.0
+		# Advance through windup → release → follow.
+		for _step in range(24):
+			player._tick_throw_motion(0.05)
+			player._apply_throw_pose(0.05)
+		print(
+			"Smoke Wave2 pass type=", pass_type,
+			" yaw=", yaw0, " windup_arm=", windup_rot,
+			" busy=", player.throw_motion_active
+		)
+		if yaw0 < 0.05 and pass_type == PassCraft.PassType.FLAT:
+			# Target is ahead (+Z) while facing +Z — yaw may be near 0; force a side target once.
+			player.clear_throw_motion()
+			player.has_ball = true
+			ball.carrier = player
+			pass_mate.global_position = Vector3(8.0, 0.0, 4.0)
+			player.try_pass_to(pass_mate, ball, -1.0, Vector3(1, 0, 0.2), PassCraft.PassType.FLAT)
+			if absf(player.get_torso_yaw_offset()) < 0.12:
+				push_error("Smoke Wave2: pass should yaw torso toward target")
+				get_tree().quit(1)
+				return
+		if windup_rot < 20.0:
+			push_error("Smoke Wave2: pass windup should cock ArmR (rot=%.1f)" % windup_rot)
+			get_tree().quit(1)
+			return
+		# Ball must still leave HandR attach (Wave 0 playability).
+		if ball.carrier == player:
+			push_error("Smoke Wave2: pass must release ball from HandR carrier")
+			get_tree().quit(1)
+			return
+
+	# R2.2 charge pose scales; release + follow; lob variant.
+	_smoke_prepare_live(match_node, ball)
+	player = match_node.controlled_player
+	player.clear_throw_motion()
+	player.global_position = Vector3(0.0, 0.0, 5.0)
+	player.velocity = Vector3.ZERO
+	player._pickup_block = 0.0
+	if ball.carrier and is_instance_valid(ball.carrier):
+		ball.carrier.has_ball = false
+		ball.carrier._pickup_block = 0.0
+	ball.carrier = null
+	ball.linear_velocity = Vector3.ZERO
+	ball.angular_velocity = Vector3.ZERO
+	ball.last_shot_meta = {}
+	ball.global_position = player.ball_attach.global_position
+	ball.freeze = true
+	if not ball.try_pickup(player):
+		# Force possess if Area pickup is sticky after prior releases.
+		ball.carrier = player
+		player.has_ball = true
+		ball.global_position = player.ball_attach.global_position
+	if ball.carrier != player:
+		push_error("Smoke Wave2: charge pickup failed")
+		get_tree().quit(1)
+		return
+	player.has_ball = true
+	ball.freeze = false
+	player.set_shot_charge_motion(0.2, false, Vector3(0, 0.1, 1))
+	player._apply_throw_pose(1.0)
+	var arm_low := player.find_child("ArmR", true, false) as Node3D
+	var charge_low_y := arm_low.position.y if arm_low else 0.0
+	player.set_shot_charge_motion(1.0, false, Vector3(0, 0.1, 1))
+	player._apply_throw_pose(1.0)
+	var charge_high_y := arm_low.position.y if arm_low else 0.0
+	player.set_shot_charge_motion(1.0, true, Vector3(0, 0.4, 1))
+	player._apply_throw_pose(1.0)
+	var charge_lob_y := arm_low.position.y if arm_low else 0.0
+	print(
+		"Smoke Wave2 charge y low=", charge_low_y,
+		" high=", charge_high_y, " lob=", charge_lob_y
+	)
+	if charge_high_y <= charge_low_y + 0.05:
+		push_error("Smoke Wave2: charge pose should raise ArmR with hold")
+		get_tree().quit(1)
+		return
+	if charge_lob_y < charge_high_y - 0.02:
+		push_error("Smoke Wave2: lob charge should lift arm path")
+		get_tree().quit(1)
+		return
+	match_node._try_shoot_charged(ShotCraft.CHARGE_TIME_S)
+	if player.throw_action != ThrowMotion.Action.SHOOT and player.throw_action != ThrowMotion.Action.WING_SHOT:
+		push_error("Smoke Wave2: grounded shot should start SHOOT/WING action")
+		get_tree().quit(1)
+		return
+	if player.throw_phase != ThrowMotion.Phase.RELEASE:
+		push_error("Smoke Wave2: shot release should enter RELEASE phase")
+		get_tree().quit(1)
+		return
+	for _s in range(20):
+		player._tick_throw_motion(0.05)
+		player._apply_throw_pose(0.05)
+	print("Smoke Wave2 shoot charge/release OK")
+
+	# R2.3 jump pass: airborne pass action distinct from jump shot.
+	_smoke_prepare_live(match_node, ball)
+	player = match_node.controlled_player
+	player.clear_throw_motion()
+	player.global_position = Vector3(0.0, 0.0, 2.0)
+	player._pickup_block = 0.0
+	if ball.carrier and is_instance_valid(ball.carrier):
+		ball.carrier.has_ball = false
+	ball.carrier = player
+	player.has_ball = true
+	ball.linear_velocity = Vector3.ZERO
+	ball.last_shot_meta = {}
+	ball.global_position = player.ball_attach.global_position
+	player.jump_shot_active = true
+	player.jump_shot_phase = ShotCraft.JumpPhase.WINDOW
+	player.jump_shot_air_s = 0.35
+	player.velocity = Vector3(0.0, 2.0, 0.0)
+	# Force airborne read for motion (is_on_floor may still be true after teleport).
+	player.global_position.y = 0.9
+	var jp_mate: Player = null
+	for p in match_node._home_players:
+		if p != player and not p.is_goalkeeper and not p.on_bench:
+			jp_mate = p
+			break
+	if jp_mate == null:
+		push_error("Smoke Wave2: need teammate for jump pass")
+		get_tree().quit(1)
+		return
+	jp_mate.global_position = Vector3(3.0, 0.0, 8.0)
+	if not player.try_pass_to(jp_mate, ball, -1.0, Vector3(0, 0, 1), PassCraft.PassType.FLAT):
+		push_error("Smoke Wave2: jump pass failed")
+		get_tree().quit(1)
+		return
+	if player.throw_action != ThrowMotion.Action.JUMP_PASS:
+		push_error("Smoke Wave2: airborne pass should be JUMP_PASS (got %d)" % player.throw_action)
+		get_tree().quit(1)
+		return
+	if player.jump_shot_active:
+		push_error("Smoke Wave2: jump pass should clear jump-shot craft")
+		get_tree().quit(1)
+		return
+	print("Smoke Wave2 jump pass OK")
+
+	# R2.4 jump shot: approach → plant → air → release window; sweet/early/late still differ.
+	_smoke_prepare_live(match_node, ball)
+	player = match_node.controlled_player
+	player.clear_throw_motion()
+	player.global_position = Vector3(0.0, 0.0, 8.0)
+	player.velocity = Vector3(0.0, 0.0, 5.0)
+	if ball.carrier and is_instance_valid(ball.carrier):
+		ball.carrier.has_ball = false
+	ball.carrier = null
+	ball.global_position = player.ball_attach.global_position
+	ball.try_pickup(player)
+	player.has_ball = true
+	player._pickup_block = 0.0
+	ball.carrier = player
+	player.has_ball = true
+	ball.global_position = player.ball_attach.global_position
+	player._begin_jump_from_input(Vector3(0, 0, 1))
+	if player.jump_shot_phase != ShotCraft.JumpPhase.APPROACH and player.jump_shot_phase != ShotCraft.JumpPhase.PLANTED:
+		push_error("Smoke Wave2: jump shot should enter approach/plant")
+		get_tree().quit(1)
+		return
+	# Force plant pose read (second half of plant hold).
+	player.jump_shot_phase = ShotCraft.JumpPhase.PLANTED
+	player._apply_throw_pose(1.0)
+	var plant_leg := player.get_node_or_null("LegR") as Node3D
+	var plant_x := absf(plant_leg.rotation.x) if plant_leg else 0.0
+	# Airborne cock without relying on physics floor contact.
+	player._js_plant_t = 0.0
+	player.jump_shot_active = true
+	player.has_ball = true
+	player.jump_shot_phase = ShotCraft.JumpPhase.WINDOW
+	player.jump_shot_air_s = 0.35
+	player.global_position.y = 0.9
+	player.velocity.y = 3.0
+	player._apply_throw_pose(1.0)
+	var air_arm := player.find_child("ArmR", true, false) as Node3D
+	var air_cock := absf(air_arm.rotation_degrees.x) if air_arm else 0.0
+	var sweet := ShotCraft.apply_jump_timing(Vector3(0, 0.1, 1), 14.0, 1)
+	var early := ShotCraft.apply_jump_timing(Vector3(0, 0.1, 1), 14.0, 0)
+	var late := ShotCraft.apply_jump_timing(Vector3(0, 0.1, 1), 14.0, 2)
+	print(
+		"Smoke Wave2 jump shot plant_leg=", plant_x, " air_cock=", air_cock,
+		" sweet=", sweet["impulse"], " early=", early["impulse"], " late=", late["impulse"]
+	)
+	if plant_x < 0.15:
+		push_error("Smoke Wave2: plant pose should load a leg")
+		get_tree().quit(1)
+		return
+	if air_cock < 40.0:
+		push_error("Smoke Wave2: airborne jump shot should cock ArmR")
+		get_tree().quit(1)
+		return
+	if float(sweet["impulse"]) <= float(early["impulse"]):
+		push_error("Smoke Wave2: sweet release must still beat early")
+		get_tree().quit(1)
+		return
+	if float(sweet["impulse"]) <= float(late["impulse"]):
+		push_error("Smoke Wave2: sweet release must still beat late")
+		get_tree().quit(1)
+		return
+	# Release while airborne → JUMP_SHOT action.
+	player.clear_throw_motion()
+	player.jump_shot_active = true
+	player.has_ball = true
+	ball.carrier = player
+	ball.global_position = player.ball_attach.global_position
+	player.global_position.y = 0.9
+	if not player.try_shoot(Vector3(0, 0.15, 1), 16.0, ball, 0.1, {"charge": 0.7, "jump_shot": true}):
+		push_error("Smoke Wave2: jump shot release failed")
+		get_tree().quit(1)
+		return
+	if player.throw_action != ThrowMotion.Action.JUMP_SHOT and player.throw_action != ThrowMotion.Action.WING_SHOT:
+		push_error("Smoke Wave2: airborne shot should be JUMP_SHOT/WING (got %d)" % player.throw_action)
+		get_tree().quit(1)
+		return
+	print("Smoke Wave2 jump shot approach/plant/air/release OK")
+
+	# R2.6 wing shot: wide approach, open body, wing finish + aim assist.
+	_smoke_prepare_live(match_node, ball)
+	player = match_node.controlled_player
+	# Prefer a real wing role when available.
+	for p in match_node._home_players:
+		if Formations.is_wing(Formations.role_for(p)) and not p.on_bench:
+			player = p
+			match_node._set_controlled(player)
+			break
+	player.clear_throw_motion()
+	player.global_position = Vector3(7.2, 0.0, 12.0)
+	player.velocity = Vector3.ZERO
+	player.rotation.y = 0.0
+	if not ThrowMotion.is_wing_finish_context(player):
+		push_error("Smoke Wave2: wide near-goal spot should read as wing finish")
+		get_tree().quit(1)
+		return
+	var raw_aim := Vector3(0.0, 0.15, 1.0).normalized()
+	var assisted := ThrowMotion.wing_aim_assist(player, raw_aim)
+	if assisted.distance_to(raw_aim) < 0.02:
+		push_error("Smoke Wave2: wing aim assist should nudge toward goal mouth")
+		get_tree().quit(1)
+		return
+	if ball.carrier and is_instance_valid(ball.carrier):
+		ball.carrier.has_ball = false
+	ball.carrier = null
+	ball.global_position = player.ball_attach.global_position
+	ball.try_pickup(player)
+	player.has_ball = true
+	player.set_shot_charge_motion(0.85, false, assisted)
+	player._apply_throw_pose(1.0)
+	var wing_yaw := absf(player.get_torso_yaw_offset())
+	if not player.try_shoot(assisted, 15.0, ball, 0.08, {"charge": 0.85, "wing_shot": true}):
+		push_error("Smoke Wave2: wing shot release failed")
+		get_tree().quit(1)
+		return
+	if player.throw_action != ThrowMotion.Action.WING_SHOT:
+		push_error("Smoke Wave2: wing finish should use WING_SHOT action (got %d)" % player.throw_action)
+		get_tree().quit(1)
+		return
+	if not bool(ball.last_shot_meta.get("wing_shot", false)):
+		push_error("Smoke Wave2: wing_shot meta missing on release")
+		get_tree().quit(1)
+		return
+	# Ball attach still under HandR after Wave 2 poses.
+	var hand_r2 := player.find_child("HandR", true, false) as Node3D
+	if hand_r2 == null or player.ball_attach.get_parent() != hand_r2:
+		push_error("Smoke Wave2: BallAttach must stay under HandR")
+		get_tree().quit(1)
+		return
+	print(
+		"Smoke Wave2 wing shot OK yaw=", wing_yaw,
+		" assist_delta=", assisted.distance_to(raw_aim),
+		" action=", ThrowMotion.action_name(player.throw_action)
+	)
+	print("Smoke Wave2 throw and jump motion OK")
 
 	print("SMOKE_OK")
 	get_tree().quit(0)
