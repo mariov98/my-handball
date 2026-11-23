@@ -1050,9 +1050,7 @@ func _run_rule_restart(code: String, _message: String, awarding_team_id: int, sp
 			face_yaw = Formations.free_throw_taker_yaw(awarding_team_id, spot)
 		taker.rotation.y = face_yaw
 		taker.velocity = Vector3.ZERO
-		ball.global_position = taker.ball_attach.global_position
-		if ball.try_pickup(taker):
-			taker.has_ball = true
+		_give_ball_to(taker)
 		_attack_team_id = awarding_team_id
 		camera_rig.set_attack_direction(awarding_team_id == 0)
 		rules.on_pickup(taker)
@@ -1075,6 +1073,10 @@ func _run_rule_restart(code: String, _message: String, awarding_team_id: int, sp
 	await get_tree().create_timer(RESTART_FREEZE).timeout
 	if match_state == MatchState.MATCH_OVER:
 		return
+	# Soft-lock guard: never leave RULE_RESTART without a live ball + unfrozen roster.
+	if taker != null and (ball.carrier != taker or not taker.has_ball):
+		_give_ball_to(taker)
+		rules.on_pickup(taker)
 	rules.end_lockout()
 	_set_players_frozen(false)
 	match_state = MatchState.LIVE
@@ -1132,6 +1134,32 @@ func _clear_possession() -> void:
 	for p in _all_players():
 		p.has_ball = false
 		p.dribbling = false
+
+
+## Reliable restart/kickoff possession — never leave a free ball after a whistle.
+func _give_ball_to(taker: Player) -> void:
+	if taker == null or ball == null:
+		return
+	if ball.carrier and ball.carrier != taker:
+		ball.carrier.has_ball = false
+		ball.carrier.dribbling = false
+	ball.carrier = null
+	ball._last_carrier = null
+	ball._ignore_carrier_until = 0.0
+	ball.freeze = false
+	ball.linear_velocity = Vector3.ZERO
+	ball.angular_velocity = Vector3.ZERO
+	ball.global_position = taker.ball_attach.global_position
+	if not ball.try_pickup(taker):
+		# Force attach if Area/ignore timing races under load.
+		ball.carrier = taker
+		ball.freeze = true
+		ball.collision_layer = 0
+		ball.collision_mask = 0
+		ball.global_position = taker.ball_attach.global_position
+		ball.picked_up.emit(taker)
+	taker.has_ball = true
+	taker.dribbling = false
 
 
 func _goalkeeper_for(team_id: int) -> Player:
@@ -1331,9 +1359,7 @@ func _run_kickoff(kickoff_team_id: int, reason: String = "Kickoff") -> void:
 		taker.rotation.y = face_yaw
 		taker.velocity = Vector3.ZERO
 		_resolve_player_overlaps(taker)
-		ball.global_position = taker.ball_attach.global_position
-		if ball.try_pickup(taker):
-			taker.has_ball = true
+		_give_ball_to(taker)
 		_attack_team_id = kickoff_team_id
 		camera_rig.set_attack_direction(kickoff_team_id == 0)
 		rules.on_pickup(taker)

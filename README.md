@@ -29,11 +29,11 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 | Move (camera-relative) | WASD | Left stick |
 | Jump | Space | A / South |
 | **Dribble (hold)** | Hold **V** | Hold **R3** (right stick click) |
-| **Shoot (hold for power)** | Hold Left mouse / **E** | Hold RT / R2 |
+| **Shoot (hold for power)** | Hold Left mouse / **E** | Hold **RT / R2** (trigger axis) |
 | **PASS** flat (instant; cancels charge) | Right mouse / **G** | RB (right bumper) |
 | **PASS** bounce (hold + pass) | Hold **B** + pass | Hold D-pad Left + RB |
-| **PASS** lob (hold + pass) | Hold **F** + pass | Hold LT / L2 + RB |
-| **Lob shot** (while charging shoot) | Hold **F** | Hold LT / L2 |
+| **PASS** lob (hold + pass) | Hold **F** + pass | Hold **LT / L2** + RB |
+| **Lob shot** (while charging shoot) | Hold **F** | Hold **LT / L2** |
 | **Dive** (GK only) | **C** or Ctrl | B / East |
 | **Cycle** teammate | **Q** or Tab | LB (left bumper) |
 | **Switch-to-best** | **R** | X / West |
@@ -43,6 +43,8 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 | **Sprint** (drains stamina) | Hold **Shift** | Hold **Back** / Select |
 | **Cycle bench** (sub candidate) | **,** (comma) | D-pad Right |
 | **Confirm sub** (dead ball only) | **.** (period) | **Start** |
+
+**Binding notes (Wave 0):** Shoot is the **RT axis** (not L3). Lob is **LT only** so it does not share **Back/Select** with sprint. Pass (RB) always cancels a shoot charge and never fires the shot. Dribble stays on **V / R3** so it does not fight shoot, pass, jump, or lob.
 
 **Movement** is relative to the **current camera**: W / stick-up walks into the screen along the camera forward projected onto the court. When possession flips and the camera yaws behind the new attack, the same stick direction keeps matching what you see.
 

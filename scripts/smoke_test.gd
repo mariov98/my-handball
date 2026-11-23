@@ -2452,6 +2452,138 @@ func _ready() -> void:
 		return
 	print("Smoke playability auto-control / kickoff / court OK")
 
+	# --- Wave 0: camera after scale, bindings, ball rescue, period resume ---
+	if cam.follow_height < 10.0 or cam.follow_height > 13.5:
+		push_error("Smoke: camera follow_height should stay elevated 3/4 after court scale")
+		get_tree().quit(1)
+		return
+	if cam.follow_distance < 13.0 or cam.follow_distance > 17.0:
+		push_error("Smoke: camera follow_distance should read the 40×20 hall")
+		get_tree().quit(1)
+		return
+	# Side yaw still orbits the ball pivot (regression guard after hall/scale).
+	var w0_ball := Vector3(5.5, 0.9, 1.0)
+	cam.set_attack_direction(true)
+	cam.attack_sign = 1.0
+	var w0_desired := cam._desired_position(w0_ball)
+	var w0_pivot := cam.pivot_point(w0_ball)
+	var w0_yaw := cam.ball_yaw(w0_ball)
+	var w0_flat := Vector3(w0_desired.x, 0.0, w0_desired.z) - w0_pivot
+	var w0_uny := w0_flat.rotated(Vector3.UP, -w0_yaw)
+	print(
+		"Smoke Wave0 cam: h=", cam.follow_height,
+		" d=", cam.follow_distance,
+		" yaw=", w0_yaw,
+		" unyaw_z=", w0_uny.z
+	)
+	if w0_yaw <= 0.0:
+		push_error("Smoke: Wave0 side ball should apply positive yaw about the ball")
+		get_tree().quit(1)
+		return
+	if absf(w0_uny.z - (-cam.follow_distance)) > 0.3:
+		push_error("Smoke: Wave0 yaw pivot should stay ball-centered")
+		get_tree().quit(1)
+		return
+
+	# Bindings: shoot = RT axis (not L3); lob must not share Back with sprint.
+	var shoot_has_rt := false
+	var shoot_has_l3 := false
+	for ev in InputMap.action_get_events("shoot"):
+		if ev is InputEventJoypadMotion and (ev as InputEventJoypadMotion).axis == 5:
+			shoot_has_rt = true
+		if ev is InputEventJoypadButton and (ev as InputEventJoypadButton).button_index == 7:
+			shoot_has_l3 = true
+	var lob_has_back := false
+	var sprint_has_back := false
+	for ev in InputMap.action_get_events("lob"):
+		if ev is InputEventJoypadButton and (ev as InputEventJoypadButton).button_index == 4:
+			lob_has_back = true
+	for ev in InputMap.action_get_events("sprint"):
+		if ev is InputEventJoypadButton and (ev as InputEventJoypadButton).button_index == 4:
+			sprint_has_back = true
+	print(
+		"Smoke Wave0 bindings: shoot_rt=", shoot_has_rt,
+		" shoot_l3=", shoot_has_l3,
+		" lob_back=", lob_has_back,
+		" sprint_back=", sprint_has_back
+	)
+	if not shoot_has_rt or shoot_has_l3:
+		push_error("Smoke: shoot must use RT (axis 5), not L3 (button 7)")
+		get_tree().quit(1)
+		return
+	if lob_has_back or not sprint_has_back:
+		push_error("Smoke: lob must not share Back/Select with sprint")
+		get_tree().quit(1)
+		return
+
+	# Ball under-floor rescue → back in play.
+	_smoke_clear_ball(ball)
+	ball.global_position = Vector3(2.0, -2.5, 3.0)
+	ball.linear_velocity = Vector3(0.0, -4.0, 0.0)
+	ball._rescue_if_lost()
+	print("Smoke Wave0 ball rescue y=", ball.global_position.y, " pos=", ball.global_position)
+	if ball.global_position.y < 0.5:
+		push_error("Smoke: ball under floor should be rescued above the court")
+		get_tree().quit(1)
+		return
+	if absf(ball.global_position.x) > Court.HALF_WIDTH or absf(ball.global_position.z) > Court.HALF_LENGTH:
+		push_error("Smoke: rescued ball should stay inside the court")
+		get_tree().quit(1)
+		return
+
+	# Restart always resumes LIVE with a carrier (soft-lock guard).
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	var w0_spot := Vector3(1.0, 0.0, 4.0)
+	await match_node._run_rule_restart("traveling", "Wave0 traveling", 1, w0_spot)
+	print(
+		"Smoke Wave0 restart: state=", match_node.match_state,
+		" carrier=", ball.carrier.name if ball.carrier else "null",
+		" team=", ball.carrier.team_id if ball.carrier else -1
+	)
+	if match_node.match_state != MatchController.MatchState.LIVE:
+		push_error("Smoke: rule restart must return to LIVE")
+		get_tree().quit(1)
+		return
+	if ball.carrier == null or ball.carrier.team_id != 1 or not ball.carrier.has_ball:
+		push_error("Smoke: rule restart must leave Away with the ball")
+		get_tree().quit(1)
+		return
+
+	# Period expire → next period kickoff LIVE (clock/goals keep working).
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	match_node.current_period = 1
+	match_node.periods_total = 2
+	match_node.clock_remaining = 0.0
+	match_node.score_home = 1
+	match_node.score_away = 0
+	match_node.match_state = MatchController.MatchState.LIVE
+	await match_node._on_period_expired()
+	print(
+		"Smoke Wave0 period: state=", match_node.match_state,
+		" period=", match_node.current_period,
+		" clock=", match_node.clock_remaining,
+		" carrier_team=", ball.carrier.team_id if ball.carrier else -1
+	)
+	if match_node.match_state != MatchController.MatchState.LIVE:
+		push_error("Smoke: period break should resume LIVE for period 2")
+		get_tree().quit(1)
+		return
+	if match_node.current_period != 2:
+		push_error("Smoke: expected period 2 after first expire")
+		get_tree().quit(1)
+		return
+	if match_node.clock_remaining <= 0.0:
+		push_error("Smoke: period 2 clock should reset")
+		get_tree().quit(1)
+		return
+	if ball.carrier == null:
+		push_error("Smoke: period kickoff must give someone the ball")
+		get_tree().quit(1)
+		return
+	print("Smoke Wave0 playability rescue OK")
+
 	print("SMOKE_OK")
 	get_tree().quit(0)
 
