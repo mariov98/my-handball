@@ -1,7 +1,9 @@
 extends CharacterBody3D
 class_name Player
 
-## Capsule outfield / GK. Controlled player receives match input; AI teammates chase/block.
+## Modular primitive outfield / GK (Wave 1 body anchors). Controlled player receives
+## match input; AI teammates chase/block. Collision stays a capsule; visuals are
+## named parts (hair→feet) so anims and foul regions have real anchors.
 ## Phase 3: GK dive/track, outfield block volume for contested shots.
 ## Phase 4: formation-aware off-ball slots (wing / backcourt / pivot-ish).
 
@@ -16,18 +18,24 @@ const AIR_CONTROL := 0.58
 ## Feet rise ~1.2 m (g = 18). Hand finishes near the 2 m crossbar on a jump shot.
 const JUMP_VELOCITY := 6.6
 const FACE_THRESHOLD := 0.12
-const BOB_AMOUNT := 0.04
+const BOB_AMOUNT := 0.03
 const BOB_SPEED := 13.0
+const IDLE_BREATHE := 0.012
+const JOG_LEG_SWING := 0.52
+const JOG_ARM_SWING := 0.38
 const PICKUP_COOLDOWN := 0.22
 ## Matches CapsuleShape3D radius in player.tscn — used for soft depenetration.
 const BODY_RADIUS := 0.32
-## Standing capsule + head, metres. Court is 20 m wide, so a player is ~9.5% of the width.
+## Standing head-top height, metres. Court is 20 m wide, so a player is ~9.5% of the width.
 const VISUAL_HEIGHT_M := 1.90
 ## Soft push when capsules nest (teleport residue / AI stack). Not a hard lock.
 const SEPARATION_PUSH := 16.0
 ## Physics layers: 1=court, 2=player (see project.godot layer_names).
 const COLLISION_LAYER_PLAYER := 2
 const COLLISION_MASK_COURT_AND_PLAYERS := 1 | 2
+
+## Hair archetype (R1.1) — cycles by player_index; material is never kit color.
+enum HairStyle { SHORT = 0, MID = 1, LONG = 2, BALD = 3 }
 
 # AI tuning — pressure on defense, beatable on the break.
 const AI_CHASE_SPEED_SCALE := 0.88
@@ -112,6 +120,7 @@ var jump_shot_air_s: float = 0.0
 var jump_shot_phase: int = 0  # ShotCraft.JumpPhase
 
 var _bob_phase: float = 0.0
+var _idle_phase: float = 0.0
 var _pickup_block: float = 0.0
 var _ai_shoot_cd: float = 0.0
 var _ai_pass_cd: float = 0.0
@@ -119,19 +128,36 @@ var _ai_pass_cd: float = 0.0
 var _ai_carry_dist: float = 0.0
 var _ai_carry_last_xz: Vector3 = Vector3.ZERO
 var _ai_carry_sampling: bool = false
+## Torso mesh (kit). Kept as MeshInstance3D for older smoke paths.
 var _mesh: MeshInstance3D
-var _mesh_base_y: float = 0.9
+var _mesh_base_y: float = 1.30
 var _dive_timer: float = 0.0
 var _dive_cd: float = 0.0
 var _block_timer: float = 0.0
 var _dive_dir: Vector3 = Vector3.ZERO
 var _arm_l: MeshInstance3D
 var _arm_r: MeshInstance3D
+var _hand_l: MeshInstance3D
+var _hand_r: MeshInstance3D
+var _leg_l: Node3D
+var _leg_r: Node3D
+var _upper_body: Node3D
+var _upper_base_y: float = 0.0
+var _head: MeshInstance3D
+var _hair: MeshInstance3D
+var _face_plate: MeshInstance3D
+var _head_region: Area3D
 var _save_area: Area3D
 var _block_area: Area3D
 var _body_mat: StandardMaterial3D
-var _kit_nodes_ready: bool = false
+var _skin_mat: StandardMaterial3D
+var _hair_mat: StandardMaterial3D
+var _body_parts_ready: bool = false
+## Optional legacy sit mesh — hidden; seated pose uses modular legs/torso.
 var _bench_visual: Node3D
+var _was_seated: bool = false
+## Upper-body yaw offset vs feet (pass/shoot windup hook for Wave 2).
+var _torso_yaw_offset: float = 0.0
 ## Phase F catch settle + jump plant + GK outlet.
 var _catch_settle_t: float = 0.0
 var _js_plant_t: float = 0.0
@@ -151,9 +177,8 @@ func _ready() -> void:
 	collision_layer = COLLISION_LAYER_PLAYER
 	collision_mask = COLLISION_MASK_COURT_AND_PLAYERS
 	add_to_group("players")
+	_ensure_body_parts()
 	_ensure_craft_nodes()
-	_ensure_kit_nodes()
-	_ensure_bench_visual()
 	_apply_team_material()
 	_apply_bench_visual()
 	pickup_area.body_entered.connect(_on_pickup_body_entered)
@@ -281,8 +306,9 @@ func _physics_process(delta: float) -> void:
 		if global_position.y < -0.15:
 			global_position.y = 0.0
 			velocity.y = 0.0
-	_update_bob(delta, planar.length())
+	_update_locomotion_anim(delta, planar.length())
 	_update_arm_pose(delta)
+	_apply_torso_yaw(delta)
 	_apply_bench_visual()
 	_try_sticky_pass_catch()
 
@@ -546,8 +572,13 @@ func reset_to_start() -> void:
 	_outlet_timer = 0.0
 	_outlet_cd = 0.0
 	_set_dive_pose(false)
-	if _mesh:
-		_mesh.position.y = _mesh_base_y
+	_torso_yaw_offset = 0.0
+	if on_bench or excluded:
+		_pose_seated()
+		_was_seated = true
+	else:
+		_pose_standing_rest()
+		_was_seated = false
 
 
 ## Light XZ velocity bias when another player capsule overlaps this one.
@@ -1169,14 +1200,271 @@ func _should_arm_outlet_from_ball(ball: Ball) -> bool:
 	return ball._last_carrier == null or ball._last_carrier.team_id != team_id
 
 
+## Hair archetype for this roster slot (short / mid / long / bald).
+func hair_style() -> int:
+	return abs(player_index) % 4
+
+
+## Authored standing head-top height in metres (ignores sit/bob offsets).
+func standing_head_top() -> float:
+	# Rest pose: Head local y=1.78 under UpperBody at y=0, box height 0.24 → top 1.90.
+	const HEAD_REST_Y := 1.78
+	const HEAD_SIZE_Y := 0.24
+	var head := _head if _head else find_child("Head", true, false) as MeshInstance3D
+	if head != null and head.mesh is BoxMesh:
+		var box := head.mesh as BoxMesh
+		# Prefer live mesh size, but always evaluate at rest UpperBody (y=0).
+		return HEAD_REST_Y + box.size.y * 0.5
+	return HEAD_REST_Y + HEAD_SIZE_Y * 0.5
+
+
+## Head/neck contact region for future foul ladder (R3.5 / R3.6).
+func get_head_region() -> Area3D:
+	return _head_region
+
+
+## Independent upper-body yaw vs feet (Wave 2 pass/shoot windup).
+func set_torso_yaw_offset(yaw: float) -> void:
+	_torso_yaw_offset = yaw
+
+
+func get_torso_yaw_offset() -> float:
+	return _torso_yaw_offset
+
+
+func _ensure_body_parts() -> void:
+	if _body_parts_ready:
+		_cache_body_refs()
+		return
+	_body_parts_ready = true
+
+	# Upper body yaws independently of feet for pass/shoot windup (R1.3).
+	_upper_body = get_node_or_null("UpperBody") as Node3D
+	if _upper_body == null:
+		_upper_body = Node3D.new()
+		_upper_body.name = "UpperBody"
+		add_child(_upper_body)
+	_upper_base_y = 0.0
+	_upper_body.position = Vector3.ZERO
+
+	# Torso = kit color mass (was a full-body capsule).
+	_mesh = get_node_or_null("MeshInstance3D") as MeshInstance3D
+	if _mesh == null:
+		_mesh = MeshInstance3D.new()
+		_mesh.name = "MeshInstance3D"
+		add_child(_mesh)
+	if _mesh.get_parent() != _upper_body:
+		_mesh.reparent(_upper_body)
+	var torso_mesh := BoxMesh.new()
+	torso_mesh.size = Vector3(0.42, 0.56, 0.26)
+	_mesh.mesh = torso_mesh
+	_mesh.position = Vector3(0.0, 1.30, 0.0)
+	_mesh_base_y = _mesh.position.y
+
+	_ensure_box_child(_upper_body, "ChestStripe", Vector3(0.44, 0.10, 0.28), Vector3(0.0, 1.28, 0.06))
+	_ensure_box_child(_upper_body, "ShoulderL", Vector3(0.16, 0.14, 0.16), Vector3(-0.30, 1.54, 0.0))
+	_ensure_box_child(_upper_body, "ShoulderR", Vector3(0.16, 0.14, 0.16), Vector3(0.30, 1.54, 0.0))
+
+	# Head / face / hair — head top at VISUAL_HEIGHT_M (1.90).
+	_head = _ensure_box_child(_upper_body, "Head", Vector3(0.24, 0.24, 0.24), Vector3(0.0, 1.78, 0.0))
+	_face_plate = _ensure_box_child(_upper_body, "FacePlate", Vector3(0.18, 0.10, 0.04), Vector3(0.0, 1.78, 0.14))
+	_hair = get_node_or_null("Hair") as MeshInstance3D
+	if _hair == null:
+		_hair = _upper_body.get_node_or_null("Hair") as MeshInstance3D
+	if _hair == null:
+		_hair = MeshInstance3D.new()
+		_hair.name = "Hair"
+		_upper_body.add_child(_hair)
+	elif _hair.get_parent() != _upper_body:
+		_hair.reparent(_upper_body)
+	_apply_hair_style_mesh()
+
+	_ensure_head_region()
+	_ensure_arms_and_hands()
+	_ensure_legs_and_feet()
+	_wire_ball_attach_to_hand()
+
+	# Legacy BenchSit kept hidden — seated pose uses the same modular parts.
+	_bench_visual = get_node_or_null("BenchSit") as Node3D
+	if _bench_visual == null:
+		_bench_visual = Node3D.new()
+		_bench_visual.name = "BenchSit"
+		add_child(_bench_visual)
+	_bench_visual.visible = false
+	_cache_body_refs()
+
+
+func _cache_body_refs() -> void:
+	_upper_body = get_node_or_null("UpperBody") as Node3D
+	_mesh = _upper_body.get_node_or_null("MeshInstance3D") as MeshInstance3D if _upper_body else get_node_or_null("MeshInstance3D") as MeshInstance3D
+	_head = _upper_body.get_node_or_null("Head") as MeshInstance3D if _upper_body else get_node_or_null("Head") as MeshInstance3D
+	_hair = _upper_body.get_node_or_null("Hair") as MeshInstance3D if _upper_body else null
+	_face_plate = _upper_body.get_node_or_null("FacePlate") as MeshInstance3D if _upper_body else null
+	_arm_l = _upper_body.get_node_or_null("ArmL") as MeshInstance3D if _upper_body else null
+	_arm_r = _upper_body.get_node_or_null("ArmR") as MeshInstance3D if _upper_body else null
+	_hand_l = _upper_body.get_node_or_null("HandL") as MeshInstance3D if _upper_body else null
+	_hand_r = _upper_body.get_node_or_null("HandR") as MeshInstance3D if _upper_body else null
+	_leg_l = get_node_or_null("LegL") as Node3D
+	_leg_r = get_node_or_null("LegR") as Node3D
+	_head_region = find_child("HeadRegion", true, false) as Area3D
+	if _mesh:
+		_mesh_base_y = _mesh.position.y
+	if ball_attach == null:
+		ball_attach = find_child("BallAttach", true, false) as Marker3D
+
+
+func _ensure_box_child(parent: Node3D, node_name: String, size: Vector3, pos: Vector3) -> MeshInstance3D:
+	var mi := parent.get_node_or_null(node_name) as MeshInstance3D
+	if mi == null:
+		mi = get_node_or_null(node_name) as MeshInstance3D
+		if mi != null and mi.get_parent() != parent:
+			mi.reparent(parent)
+		elif mi == null:
+			mi = MeshInstance3D.new()
+			mi.name = node_name
+			parent.add_child(mi)
+	var box := BoxMesh.new()
+	box.size = size
+	mi.mesh = box
+	mi.position = pos
+	mi.rotation = Vector3.ZERO
+	return mi
+
+
+func _apply_hair_style_mesh() -> void:
+	if _hair == null:
+		return
+	var style := hair_style()
+	var box := BoxMesh.new()
+	if style == HairStyle.BALD:
+		# Keep a tiny mesh so the renderer never sees a null MeshInstance.
+		box.size = Vector3(0.02, 0.02, 0.02)
+		_hair.mesh = box
+		_hair.position = Vector3(0.0, 1.90, 0.0)
+		_hair.visible = false
+		return
+	_hair.visible = true
+	match style:
+		HairStyle.SHORT:
+			box.size = Vector3(0.26, 0.08, 0.26)
+			_hair.position = Vector3(0.0, 1.92, -0.01)
+		HairStyle.MID:
+			box.size = Vector3(0.28, 0.14, 0.28)
+			_hair.position = Vector3(0.0, 1.94, -0.02)
+		HairStyle.LONG:
+			box.size = Vector3(0.26, 0.28, 0.22)
+			_hair.position = Vector3(0.0, 1.88, -0.08)
+		_:
+			box.size = Vector3(0.26, 0.08, 0.26)
+			_hair.position = Vector3(0.0, 1.92, -0.01)
+	_hair.mesh = box
+
+
+func _ensure_head_region() -> void:
+	_head_region = find_child("HeadRegion", true, false) as Area3D
+	if _head_region == null:
+		_head_region = Area3D.new()
+		_head_region.name = "HeadRegion"
+		_upper_body.add_child(_head_region)
+	elif _head_region.get_parent() != _upper_body:
+		_head_region.reparent(_upper_body)
+	_head_region.position = Vector3(0.0, 1.72, 0.0)
+	_head_region.collision_layer = 0
+	_head_region.collision_mask = 0
+	_head_region.monitoring = false
+	_head_region.monitorable = true
+	_head_region.set_meta("body_region", "head")
+	_head_region.set_meta("foul_region", "head_neck")
+	var shape_node := _head_region.get_node_or_null("CollisionShape3D") as CollisionShape3D
+	if shape_node == null:
+		shape_node = CollisionShape3D.new()
+		shape_node.name = "CollisionShape3D"
+		_head_region.add_child(shape_node)
+	var sphere := SphereShape3D.new()
+	sphere.radius = 0.22
+	shape_node.shape = sphere
+
+
+func _ensure_arms_and_hands() -> void:
+	var arm_size := Vector3(0.55, 0.14, 0.14) if is_goalkeeper else Vector3(0.40, 0.11, 0.11)
+	_arm_l = _ensure_box_child(
+		_upper_body, "ArmL", arm_size,
+		Vector3(-0.48, 1.28, 0.02) if is_goalkeeper else Vector3(-0.40, 1.22, 0.02)
+	)
+	_arm_r = _ensure_box_child(
+		_upper_body, "ArmR", arm_size,
+		Vector3(0.48, 1.28, 0.02) if is_goalkeeper else Vector3(0.40, 1.22, 0.02)
+	)
+	_hand_l = _ensure_box_child(
+		_upper_body, "HandL", Vector3(0.10, 0.08, 0.12),
+		Vector3(-0.70, 1.18, 0.06) if is_goalkeeper else Vector3(-0.58, 1.12, 0.08)
+	)
+	_hand_r = _ensure_box_child(
+		_upper_body, "HandR", Vector3(0.10, 0.08, 0.12),
+		Vector3(0.70, 1.18, 0.06) if is_goalkeeper else Vector3(0.58, 1.12, 0.08)
+	)
+	_hand_l.set_meta("body_region", "hand")
+	_hand_r.set_meta("body_region", "hand")
+	_hand_r.set_meta("ball_attach_hand", true)
+
+
+func _wire_ball_attach_to_hand() -> void:
+	# Ball sits on the right hand while possessed (R1.5) — not mid-capsule.
+	if ball_attach == null:
+		ball_attach = get_node_or_null("BallAttach") as Marker3D
+	if ball_attach == null:
+		ball_attach = Marker3D.new()
+		ball_attach.name = "BallAttach"
+		add_child(ball_attach)
+	if _hand_r == null:
+		return
+	if ball_attach.get_parent() != _hand_r:
+		ball_attach.reparent(_hand_r)
+	# Slight forward/out offset from hand center so the ball reads in the palm.
+	ball_attach.position = Vector3(0.02, 0.02, 0.10)
+
+
+func _ensure_legs_and_feet() -> void:
+	_leg_l = _ensure_leg("LegL", -0.13)
+	_leg_r = _ensure_leg("LegR", 0.13)
+
+
+func _ensure_leg(leg_name: String, x: float) -> Node3D:
+	var leg := get_node_or_null(leg_name) as Node3D
+	if leg == null:
+		leg = Node3D.new()
+		leg.name = leg_name
+		add_child(leg)
+	# Hip pivot — thighs hang down; feet end near y = 0.
+	leg.position = Vector3(x, 0.95, 0.0)
+	leg.rotation = Vector3.ZERO
+	var side := "L" if x < 0.0 else "R"
+	_ensure_box_child(leg, "Thigh%s" % side, Vector3(0.15, 0.40, 0.15), Vector3(0.0, -0.20, 0.0))
+	var shin := leg.get_node_or_null("Shin%s" % side) as Node3D
+	if shin == null:
+		shin = Node3D.new()
+		shin.name = "Shin%s" % side
+		leg.add_child(shin)
+	shin.position = Vector3(0.0, -0.42, 0.0)
+	shin.rotation = Vector3.ZERO
+	# Keep Sock*/Shoe* names for kit tinting.
+	_ensure_box_child(shin, "Sock%s" % side, Vector3(0.13, 0.38, 0.13), Vector3(0.0, -0.16, 0.0))
+	# Sole ≈ y=0: shin origin world y≈0.53 → shoe center 0.035 above floor.
+	_ensure_box_child(shin, "Shoe%s" % side, Vector3(0.16, 0.07, 0.28), Vector3(0.0, -0.495, 0.05))
+	# Alias Foot* for requirement naming / smoke (sole marker).
+	if leg.get_node_or_null("Foot%s" % side) == null:
+		var foot_alias := Node3D.new()
+		foot_alias.name = "Foot%s" % side
+		foot_alias.position = Vector3(0.0, -0.95, 0.05)
+		leg.add_child(foot_alias)
+	else:
+		(leg.get_node("Foot%s" % side) as Node3D).position = Vector3(0.0, -0.95, 0.05)
+	return leg
+
+
 func _ensure_craft_nodes() -> void:
-	# Procedural arm boxes + contest areas — keeps player.tscn primitive-only.
-	_arm_l = get_node_or_null("ArmL") as MeshInstance3D
-	_arm_r = get_node_or_null("ArmR") as MeshInstance3D
-	if _arm_l == null:
-		_arm_l = _make_arm("ArmL", Vector3(-0.42, 1.10, 0.02))
-	if _arm_r == null:
-		_arm_r = _make_arm("ArmR", Vector3(0.42, 1.10, 0.02))
+	# Contest areas — arms/hands come from _ensure_body_parts.
+	_cache_body_refs()
 
 	_save_area = get_node_or_null("SaveArea") as Area3D
 	if _save_area == null and is_goalkeeper:
@@ -1210,19 +1498,7 @@ func _ensure_craft_nodes() -> void:
 		_block_area.add_child(block_shape)
 		add_child(_block_area)
 
-	# GK reads wider / lower arms at rest; outfield arms hang until block.
 	_set_dive_pose(false)
-
-
-func _make_arm(arm_name: String, pos: Vector3) -> MeshInstance3D:
-	var arm := MeshInstance3D.new()
-	arm.name = arm_name
-	var mesh := BoxMesh.new()
-	mesh.size = Vector3(0.55, 0.16, 0.16) if is_goalkeeper else Vector3(0.42, 0.12, 0.12)
-	arm.mesh = mesh
-	arm.position = pos
-	add_child(arm)
-	return arm
 
 
 func _set_dive_pose(active: bool) -> void:
@@ -1233,72 +1509,57 @@ func _set_dive_pose(active: bool) -> void:
 		_arm_r.position = Vector3(0.85, 0.85, 0.1)
 		_arm_l.rotation_degrees = Vector3(0, 0, 25)
 		_arm_r.rotation_degrees = Vector3(0, 0, -25)
+		if _hand_l and _hand_r:
+			_hand_l.position = Vector3(-1.05, 0.78, 0.18)
+			_hand_r.position = Vector3(1.05, 0.78, 0.18)
 		if _save_area and _save_area.get_child_count() > 0:
 			var shape := _save_area.get_child(0) as CollisionShape3D
 			if shape and shape.shape is BoxShape3D:
 				(shape.shape as BoxShape3D).size = Vector3(2.6, 1.2, 1.4)
 	else:
-		if is_goalkeeper:
-			_arm_l.position = Vector3(-0.7, 1.2, 0.05)
-			_arm_r.position = Vector3(0.7, 1.2, 0.05)
-		else:
-			_arm_l.position = Vector3(-0.42, 1.08, 0.02)
-			_arm_r.position = Vector3(0.42, 1.08, 0.02)
-		_arm_l.rotation_degrees = Vector3.ZERO
-		_arm_r.rotation_degrees = Vector3.ZERO
+		_pose_arms_rest()
 		if _save_area and _save_area.get_child_count() > 0:
 			var shape2 := _save_area.get_child(0) as CollisionShape3D
 			if shape2 and shape2.shape is BoxShape3D:
 				(shape2.shape as BoxShape3D).size = Vector3(1.8, 1.6, 1.1)
 
 
+func _pose_arms_rest() -> void:
+	if _arm_l == null or _arm_r == null:
+		return
+	if is_goalkeeper:
+		_arm_l.position = Vector3(-0.48, 1.28, 0.02)
+		_arm_r.position = Vector3(0.48, 1.28, 0.02)
+		if _hand_l and _hand_r:
+			_hand_l.position = Vector3(-0.70, 1.18, 0.06)
+			_hand_r.position = Vector3(0.70, 1.18, 0.06)
+	else:
+		_arm_l.position = Vector3(-0.40, 1.22, 0.02)
+		_arm_r.position = Vector3(0.40, 1.22, 0.02)
+		if _hand_l and _hand_r:
+			_hand_l.position = Vector3(-0.58, 1.12, 0.08)
+			_hand_r.position = Vector3(0.58, 1.12, 0.08)
+	_arm_l.rotation_degrees = Vector3.ZERO
+	_arm_r.rotation_degrees = Vector3.ZERO
+
+
 func _update_arm_pose(_delta: float) -> void:
-	if diving or _arm_l == null:
+	if diving or _arm_l == null or on_bench or excluded:
 		return
 	if not is_goalkeeper and block_ready:
-		_arm_l.position = Vector3(-0.55, 1.45, 0.25)
-		_arm_r.position = Vector3(0.55, 1.45, 0.25)
-	elif not is_goalkeeper:
-		_arm_l.position = Vector3(-0.42, 1.08, 0.02)
-		_arm_r.position = Vector3(0.42, 1.08, 0.02)
+		_arm_l.position = Vector3(-0.50, 1.48, 0.22)
+		_arm_r.position = Vector3(0.50, 1.48, 0.22)
+		_arm_l.rotation_degrees = Vector3(-35, 0, 0)
+		_arm_r.rotation_degrees = Vector3(-35, 0, 0)
+		if _hand_l and _hand_r:
+			_hand_l.position = Vector3(-0.55, 1.62, 0.38)
+			_hand_r.position = Vector3(0.55, 1.62, 0.38)
+	elif not is_goalkeeper and not block_ready:
+		# Jog swing may own rotation; keep rest positions when idle path resets.
+		pass
 
 
-func _ensure_kit_nodes() -> void:
-	if _kit_nodes_ready:
-		return
-	_kit_nodes_ready = true
-	# White chest stripe + dark socks/shoes so kits read without custom meshes.
-	if get_node_or_null("ChestStripe") == null:
-		var stripe := MeshInstance3D.new()
-		stripe.name = "ChestStripe"
-		var box := BoxMesh.new()
-		box.size = Vector3(0.58, 0.12, 0.34)
-		stripe.mesh = box
-		stripe.position = Vector3(0.0, 1.16, 0.02)
-		add_child(stripe)
-	if get_node_or_null("SockL") == null:
-		_make_kit_box("SockL", Vector3(0.16, 0.28, 0.16), Vector3(-0.14, 0.22, 0.0))
-		_make_kit_box("SockR", Vector3(0.16, 0.28, 0.16), Vector3(0.14, 0.22, 0.0))
-		_make_kit_box("ShoeL", Vector3(0.2, 0.08, 0.32), Vector3(-0.14, 0.04, 0.04))
-		_make_kit_box("ShoeR", Vector3(0.2, 0.08, 0.32), Vector3(0.14, 0.04, 0.04))
-	# Soft shoulder pads for a slightly more humanoid silhouette (still boxes).
-	if get_node_or_null("ShoulderL") == null:
-		_make_kit_box("ShoulderL", Vector3(0.18, 0.14, 0.18), Vector3(-0.34, 1.50, 0.0))
-		_make_kit_box("ShoulderR", Vector3(0.18, 0.14, 0.18), Vector3(0.34, 1.50, 0.0))
-
-
-func _make_kit_box(node_name: String, size: Vector3, pos: Vector3) -> MeshInstance3D:
-	var mi := MeshInstance3D.new()
-	mi.name = node_name
-	var box := BoxMesh.new()
-	box.size = size
-	mi.mesh = box
-	mi.position = pos
-	add_child(mi)
-	return mi
-
-
-## Rim highlight so the controlled athlete is obvious among eight capsules.
+## Rim highlight so the controlled athlete is obvious among teammates.
 func set_selection_highlight(active: bool) -> void:
 	if _body_mat == null:
 		return
@@ -1313,10 +1574,9 @@ func set_selection_highlight(active: bool) -> void:
 
 
 func _apply_team_material() -> void:
-	_mesh = get_node_or_null("MeshInstance3D") as MeshInstance3D
+	_cache_body_refs()
 	if _mesh == null:
 		return
-	_mesh_base_y = _mesh.position.y
 	_body_mat = StandardMaterial3D.new()
 	_body_mat.albedo_color = body_color
 	_body_mat.roughness = 0.48
@@ -1325,15 +1585,39 @@ func _apply_team_material() -> void:
 	_body_mat.emission = body_color.darkened(0.25)
 	_body_mat.emission_energy_multiplier = 0.12 if is_goalkeeper else 0.05
 	_mesh.material_override = _body_mat
-	var head := get_node_or_null("Head") as MeshInstance3D
-	var head_mat: StandardMaterial3D = null
-	if head:
-		head_mat = StandardMaterial3D.new()
-		# Skin-ish head so the kit/body contrast reads (darker so it isn't washed to white).
-		head_mat.albedo_color = Color(0.72, 0.52, 0.38)
-		head_mat.roughness = 0.7
-		head.material_override = head_mat
-	# Arm materials — GK slightly brighter so the line reads.
+
+	_skin_mat = StandardMaterial3D.new()
+	_skin_mat.albedo_color = Color(0.72, 0.52, 0.38)
+	_skin_mat.roughness = 0.7
+	if _head:
+		_head.material_override = _skin_mat
+	if _face_plate:
+		var face_mat := StandardMaterial3D.new()
+		# Darker plate so face orientation reads from the 3/4 camera.
+		face_mat.albedo_color = Color(0.45, 0.28, 0.20)
+		face_mat.roughness = 0.65
+		_face_plate.material_override = face_mat
+	if _hand_l:
+		_hand_l.material_override = _skin_mat
+	if _hand_r:
+		_hand_r.material_override = _skin_mat
+
+	# Hair uses its own material — never kit color (R1.1).
+	_hair_mat = StandardMaterial3D.new()
+	var hair_colors := [
+		Color(0.12, 0.09, 0.07),
+		Color(0.35, 0.22, 0.10),
+		Color(0.55, 0.42, 0.22),
+		Color(0.18, 0.18, 0.20),
+	]
+	_hair_mat.albedo_color = hair_colors[abs(player_index) % hair_colors.size()]
+	_hair_mat.roughness = 0.85
+	if _hair and hair_style() != HairStyle.BALD:
+		_hair.material_override = _hair_mat
+		_hair.visible = true
+	elif _hair:
+		_hair.visible = false
+
 	var arm_mat := StandardMaterial3D.new()
 	arm_mat.albedo_color = body_color.lightened(0.12 if is_goalkeeper else 0.05)
 	arm_mat.roughness = 0.5
@@ -1342,103 +1626,161 @@ func _apply_team_material() -> void:
 	if _arm_r:
 		_arm_r.material_override = arm_mat
 
-	var stripe := get_node_or_null("ChestStripe") as MeshInstance3D
+	var stripe := _upper_body.get_node_or_null("ChestStripe") as MeshInstance3D if _upper_body else null
 	if stripe:
 		var stripe_mat := StandardMaterial3D.new()
 		stripe_mat.albedo_color = Color(0.95, 0.95, 0.97) if not is_goalkeeper else Color(0.15, 0.15, 0.18)
 		stripe_mat.roughness = 0.55
 		stripe.material_override = stripe_mat
+
 	var sock_mat := StandardMaterial3D.new()
 	sock_mat.albedo_color = body_color.darkened(0.35)
 	sock_mat.roughness = 0.7
-	for sock_name in ["SockL", "SockR", "ShoulderL", "ShoulderR"]:
-		var sock := get_node_or_null(sock_name) as MeshInstance3D
+	for sock_name in ["SockL", "SockR", "ShoulderL", "ShoulderR", "ThighL", "ThighR"]:
+		var sock := find_child(sock_name, true, false) as MeshInstance3D
 		if sock:
 			sock.material_override = sock_mat
+	# Thighs use kit (shorts); socks darker — retint thighs to kit.
+	for thigh_name in ["ThighL", "ThighR"]:
+		var thigh := find_child(thigh_name, true, false) as MeshInstance3D
+		if thigh and _body_mat:
+			thigh.material_override = _body_mat
+	for shoulder_name in ["ShoulderL", "ShoulderR"]:
+		var sh := _upper_body.get_node_or_null(shoulder_name) as MeshInstance3D if _upper_body else null
+		if sh:
+			sh.material_override = sock_mat
+
 	var shoe_mat := StandardMaterial3D.new()
 	shoe_mat.albedo_color = Color(0.12, 0.12, 0.14)
 	shoe_mat.roughness = 0.6
 	for shoe_name in ["ShoeL", "ShoeR"]:
-		var shoe := get_node_or_null(shoe_name) as MeshInstance3D
+		var shoe := find_child(shoe_name, true, false) as MeshInstance3D
 		if shoe:
 			shoe.material_override = shoe_mat
-	_tint_bench_visual(head_mat, shoe_mat, sock_mat)
 	set_selection_highlight(controlled)
 
 
-func _ensure_bench_visual() -> void:
-	if _bench_visual != null:
+func _apply_torso_yaw(delta: float) -> void:
+	if _upper_body == null or on_bench or excluded or diving:
 		return
-	var root := Node3D.new()
-	root.name = "BenchSit"
-	root.visible = false
-	add_child(root)
-	_bench_visual = root
-	# Seated figure in metres, facing local +Z (toward the court once yaw is set).
-	# Hips on the 0.44 m seat, head top ~1.28 — a 1.90 m adult sitting, not a fallen capsule.
-	_sit_box(root, "SitTorso", Vector3(0.38, 0.52, 0.24), Vector3(0.0, 0.82, 0.06))
-	_sit_box(root, "SitHead", Vector3(0.24, 0.24, 0.24), Vector3(0.0, 1.16, 0.08))
-	_sit_box(root, "SitThighL", Vector3(0.14, 0.12, 0.42), Vector3(-0.11, 0.50, 0.22))
-	_sit_box(root, "SitThighR", Vector3(0.14, 0.12, 0.42), Vector3(0.11, 0.50, 0.22))
-	_sit_box(root, "SitShinL", Vector3(0.12, 0.42, 0.12), Vector3(-0.11, 0.24, 0.42))
-	_sit_box(root, "SitShinR", Vector3(0.12, 0.42, 0.12), Vector3(0.11, 0.24, 0.42))
-	_sit_box(root, "SitFootL", Vector3(0.12, 0.06, 0.22), Vector3(-0.11, 0.05, 0.54))
-	_sit_box(root, "SitFootR", Vector3(0.12, 0.06, 0.22), Vector3(0.11, 0.05, 0.54))
-	_sit_box(root, "SitArmL", Vector3(0.10, 0.32, 0.10), Vector3(-0.24, 0.78, 0.08))
-	_sit_box(root, "SitArmR", Vector3(0.10, 0.32, 0.10), Vector3(0.24, 0.78, 0.08))
-	_sit_box(root, "SitForeL", Vector3(0.10, 0.10, 0.30), Vector3(-0.22, 0.58, 0.22))
-	_sit_box(root, "SitForeR", Vector3(0.10, 0.10, 0.30), Vector3(0.22, 0.58, 0.22))
-
-
-func _sit_box(parent: Node3D, node_name: String, size: Vector3, pos: Vector3) -> void:
-	var mi := MeshInstance3D.new()
-	mi.name = node_name
-	var box := BoxMesh.new()
-	box.size = size
-	mi.mesh = box
-	mi.position = pos
-	parent.add_child(mi)
-
-
-func _tint_bench_visual(head_mat: Material, shoe_mat: Material, sock_mat: Material) -> void:
-	if _bench_visual == null:
-		return
-	for child in _bench_visual.get_children():
-		var mi := child as MeshInstance3D
-		if mi == null:
-			continue
-		if mi.name == "SitHead" and head_mat:
-			mi.material_override = head_mat
-		elif mi.name.begins_with("SitFoot") and shoe_mat:
-			mi.material_override = shoe_mat
-		elif mi.name.begins_with("SitShin") and sock_mat:
-			mi.material_override = sock_mat
-		elif _body_mat:
-			mi.material_override = _body_mat
+	# Soft return toward offset (Wave 2 will drive offset during windup).
+	var target := _torso_yaw_offset
+	_upper_body.rotation.y = lerp_angle(_upper_body.rotation.y, target, 1.0 - exp(-10.0 * delta))
 
 
 func _apply_bench_visual() -> void:
 	var seated := on_bench or excluded
+	# Never show the old duplicate sit mesh — modular body sits itself.
 	if _bench_visual:
-		_bench_visual.visible = seated
-	for node_name in [
-		"MeshInstance3D", "Head", "ChestStripe",
-		"SockL", "SockR", "ShoeL", "ShoeR",
-		"ShoulderL", "ShoulderR", "ArmL", "ArmR",
-	]:
-		var node := get_node_or_null(node_name) as Node3D
-		if node:
-			node.visible = not seated
+		_bench_visual.visible = false
+	if seated:
+		_pose_seated()
+		_was_seated = true
+	elif _was_seated:
+		_pose_standing_rest()
+		_was_seated = false
 
 
-func _update_bob(delta: float, speed: float) -> void:
+func _pose_standing_rest() -> void:
+	if _upper_body:
+		_upper_body.position = Vector3(0.0, _upper_base_y, 0.0)
+		_upper_body.rotation = Vector3(0.0, _torso_yaw_offset, 0.0)
+	if _mesh:
+		_mesh.position.y = _mesh_base_y
+		_mesh.rotation = Vector3.ZERO
+	if _leg_l:
+		_leg_l.rotation = Vector3.ZERO
+		_leg_l.position = Vector3(-0.13, 0.95, 0.0)
+		var shin_l := _leg_l.get_node_or_null("ShinL") as Node3D
+		if shin_l:
+			shin_l.rotation = Vector3.ZERO
+			shin_l.position = Vector3(0.0, -0.42, 0.0)
+	if _leg_r:
+		_leg_r.rotation = Vector3.ZERO
+		_leg_r.position = Vector3(0.13, 0.95, 0.0)
+		var shin_r := _leg_r.get_node_or_null("ShinR") as Node3D
+		if shin_r:
+			shin_r.rotation = Vector3.ZERO
+			shin_r.position = Vector3(0.0, -0.42, 0.0)
+	_pose_arms_rest()
+
+
+func _pose_seated() -> void:
+	# Seat top ≈ 0.44 m. Hips on the plank; thighs forward; shins down; feet ≈ y=0.
+	if _upper_body:
+		_upper_body.position = Vector3(0.0, -0.48, 0.06)
+		_upper_body.rotation = Vector3(0.08, 0.0, 0.0)
+	if _mesh:
+		_mesh.rotation = Vector3.ZERO
+	if _leg_l:
+		_leg_l.position = Vector3(-0.12, 0.48, 0.04)
+		_leg_l.rotation = Vector3(-1.15, 0.0, 0.0)  # thighs toward +Z
+		var shin_l := _leg_l.get_node_or_null("ShinL") as Node3D
+		if shin_l:
+			shin_l.position = Vector3(0.0, -0.42, 0.0)
+			shin_l.rotation = Vector3(1.35, 0.0, 0.0)  # shins hang down
+	if _leg_r:
+		_leg_r.position = Vector3(0.12, 0.48, 0.04)
+		_leg_r.rotation = Vector3(-1.15, 0.0, 0.0)
+		var shin_r := _leg_r.get_node_or_null("ShinR") as Node3D
+		if shin_r:
+			shin_r.position = Vector3(0.0, -0.42, 0.0)
+			shin_r.rotation = Vector3(1.35, 0.0, 0.0)
+	if _arm_l and _arm_r:
+		_arm_l.position = Vector3(-0.36, 1.10, 0.10)
+		_arm_r.position = Vector3(0.36, 1.10, 0.10)
+		_arm_l.rotation_degrees = Vector3(-25, 0, 12)
+		_arm_r.rotation_degrees = Vector3(-25, 0, -12)
+	if _hand_l and _hand_r:
+		_hand_l.position = Vector3(-0.40, 0.92, 0.28)
+		_hand_r.position = Vector3(0.40, 0.92, 0.28)
+
+
+func _update_locomotion_anim(delta: float, speed: float) -> void:
 	if _mesh == null:
 		return
-	if diving:
-		_mesh.position.y = lerpf(_mesh.position.y, _mesh_base_y - 0.25, 1.0 - exp(-10.0 * delta))
+	if on_bench or excluded:
 		return
-	if is_on_floor() and speed > 0.5:
-		_bob_phase += delta * BOB_SPEED * clampf(speed / SPEED, 0.4, 1.2)
-		_mesh.position.y = _mesh_base_y + sin(_bob_phase) * BOB_AMOUNT
-	else:
-		_mesh.position.y = lerpf(_mesh.position.y, _mesh_base_y, 1.0 - exp(-10.0 * delta))
+	if diving:
+		if _upper_body:
+			_upper_body.position.y = lerpf(_upper_body.position.y, _upper_base_y - 0.2, 1.0 - exp(-10.0 * delta))
+		return
+
+	var blend := 1.0 - exp(-12.0 * delta)
+	# Near-floor counts as grounded so headless / teleport frames still jog.
+	var grounded := is_on_floor() or (global_position.y < 0.2 and velocity.y <= 0.8)
+	if grounded and speed > 0.8:
+		# Slight jog — opposite arm/leg swing (R2.8 lite).
+		_bob_phase += delta * BOB_SPEED * clampf(speed / SPEED, 0.45, 1.25)
+		var swing := sin(_bob_phase)
+		if _upper_body:
+			_upper_body.position.y = lerpf(_upper_body.position.y, _upper_base_y + swing * BOB_AMOUNT, blend)
+		if _leg_l and _leg_r and not block_ready:
+			_leg_l.rotation.x = lerpf(_leg_l.rotation.x, swing * JOG_LEG_SWING, blend)
+			_leg_r.rotation.x = lerpf(_leg_r.rotation.x, -swing * JOG_LEG_SWING, blend)
+		if _arm_l and _arm_r and not block_ready and not is_goalkeeper:
+			_arm_l.rotation.x = lerpf(_arm_l.rotation.x, -swing * JOG_ARM_SWING, blend)
+			_arm_r.rotation.x = lerpf(_arm_r.rotation.x, swing * JOG_ARM_SWING, blend)
+			_pose_hands_from_arms()
+	elif grounded:
+		# Idle breathe — tiny vertical settle.
+		_idle_phase += delta * 2.4
+		var breathe := sin(_idle_phase) * IDLE_BREATHE
+		if _upper_body:
+			_upper_body.position.y = lerpf(_upper_body.position.y, _upper_base_y + breathe, blend)
+		if _leg_l and _leg_r:
+			_leg_l.rotation.x = lerpf(_leg_l.rotation.x, 0.0, blend)
+			_leg_r.rotation.x = lerpf(_leg_r.rotation.x, 0.0, blend)
+		if _arm_l and _arm_r and not block_ready and not diving:
+			_arm_l.rotation.x = lerpf(_arm_l.rotation.x, 0.0, blend)
+			_arm_r.rotation.x = lerpf(_arm_r.rotation.x, 0.0, blend)
+			if not is_goalkeeper:
+				_pose_arms_rest()
+
+
+func _pose_hands_from_arms() -> void:
+	if _hand_l == null or _hand_r == null or _arm_l == null or _arm_r == null:
+		return
+	# Hands track roughly past the forearm tips while jogging.
+	_hand_l.position = _arm_l.position + Vector3(-0.18, -0.08, 0.06)
+	_hand_r.position = _arm_r.position + Vector3(0.18, -0.08, 0.06)

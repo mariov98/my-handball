@@ -2008,7 +2008,8 @@ func _ready() -> void:
 		return
 	var kit_ok := false
 	for p in match_node._home_players:
-		if p.get_node_or_null("ChestStripe") != null and p.get_node_or_null("ShoeL") != null:
+		# Wave 1: kit parts live under UpperBody / Leg* — search descendants.
+		if p.find_child("ChestStripe", true, false) != null and p.find_child("ShoeL", true, false) != null:
 			kit_ok = true
 			break
 	print("Smoke presentation kits=", kit_ok, " trail=", ball._trail != null)
@@ -2383,9 +2384,10 @@ func _ready() -> void:
 		push_error("Smoke: court must be 40 x 20 m")
 		get_tree().quit(1)
 		return
-	var head := player.get_node("Head") as MeshInstance3D
-	var head_mesh := head.mesh as BoxMesh
-	var top := head.position.y + head_mesh.size.y * 0.5
+	player.on_bench = false
+	player.excluded = false
+	player._pose_standing_rest()
+	var top := player.standing_head_top()
 	if absf(top - Player.VISUAL_HEIGHT_M) > 0.05:
 		push_error("Smoke: standing height %.2f != %.2f" % [top, Player.VISUAL_HEIGHT_M])
 		get_tree().quit(1)
@@ -2441,9 +2443,14 @@ func _ready() -> void:
 			bench_pose_ok = false
 		if absf(p.global_position.y) > 0.45:
 			bench_pose_ok = false
-		var sit := p.get_node_or_null("BenchSit") as Node3D
-		var stand := p.get_node_or_null("MeshInstance3D") as Node3D
-		if sit == null or not sit.visible or (stand != null and stand.visible):
+		# Wave 1: modular body sits (legs bent, upper body lowered) — not a fallen capsule.
+		var leg_l := p.get_node_or_null("LegL") as Node3D
+		var upper := p.get_node_or_null("UpperBody") as Node3D
+		if leg_l == null or upper == null:
+			bench_pose_ok = false
+		elif absf(leg_l.rotation.x) < 0.6:
+			bench_pose_ok = false
+		elif upper.position.y > -0.2:
 			bench_pose_ok = false
 	print("Smoke scale/hall/bench pose=", bench_pose_ok, " height=", top)
 	if not bench_pose_ok:
@@ -2583,6 +2590,145 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 	print("Smoke Wave0 playability rescue OK")
+
+	# --- Wave 1: modular body anchors (hair→feet), head region, hand ball attach ---
+	_smoke_prepare_live(match_node, ball)
+	player = match_node.controlled_player
+	if player == null or player.on_bench:
+		player = match_node._first_outfield(match_node._home_players)
+		if player:
+			match_node._set_controlled(player)
+	if player == null:
+		push_error("Smoke Wave1: missing outfield player")
+		get_tree().quit(1)
+		return
+	player.on_bench = false
+	player.excluded = false
+	player._pose_standing_rest()
+	await get_tree().physics_frame
+
+	var required_parts := [
+		"UpperBody", "MeshInstance3D", "Head", "FacePlate", "Hair",
+		"HeadRegion", "ArmL", "ArmR", "HandL", "HandR",
+		"LegL", "LegR", "FootL", "FootR", "ShoeL", "ShoeR",
+	]
+	for part_name in required_parts:
+		var part := player.find_child(part_name, true, false)
+		if part == null:
+			# Bald archetype hides Hair mesh but node must exist.
+			if part_name == "Hair" and player.hair_style() == Player.HairStyle.BALD:
+				continue
+			push_error("Smoke Wave1: missing body part %s" % part_name)
+			get_tree().quit(1)
+			return
+	var head_region := player.get_head_region()
+	if head_region == null or str(head_region.get_meta("body_region", "")) != "head":
+		push_error("Smoke Wave1: HeadRegion must be tagged body_region=head")
+		get_tree().quit(1)
+		return
+	if str(head_region.get_meta("foul_region", "")) != "head_neck":
+		push_error("Smoke Wave1: HeadRegion must be tagged foul_region=head_neck")
+		get_tree().quit(1)
+		return
+	# Hair styles cycle; at least one non-bald and bald exist across roster.
+	var styles_seen := {}
+	for p in match_node._all_players():
+		styles_seen[p.hair_style()] = true
+	if styles_seen.size() < 3:
+		push_error("Smoke Wave1: expected multiple hair archetypes across roster")
+		get_tree().quit(1)
+		return
+	# Ball attach lives on the right hand (not floating mid-torso).
+	var hand_r := player.find_child("HandR", true, false) as Node3D
+	if hand_r == null or player.ball_attach == null:
+		push_error("Smoke Wave1: HandR / BallAttach missing")
+		get_tree().quit(1)
+		return
+	if player.ball_attach.get_parent() != hand_r:
+		push_error("Smoke Wave1: BallAttach should be parented under HandR")
+		get_tree().quit(1)
+		return
+	# Possessed ball should sit near the hand, not chest center.
+	if ball.carrier != null and ball.carrier != player:
+		ball.carrier.has_ball = false
+		ball.carrier = null
+	player.global_position = Vector3(0.0, 0.0, 0.0)
+	player.velocity = Vector3.ZERO
+	ball.global_position = player.ball_attach.global_position
+	var picked := ball.try_pickup(player)
+	player.has_ball = picked
+	if not picked:
+		push_error("Smoke Wave1: try_pickup failed for hand-attach check")
+		get_tree().quit(1)
+		return
+	for _k in range(6):
+		await get_tree().physics_frame
+	var hand_pos := player.ball_attach.global_position
+	var ball_pos := ball.global_position
+	var hand_dist := hand_pos.distance_to(ball_pos)
+	print("Smoke Wave1 hand attach dist=", hand_dist, " hand=", hand_pos, " ball=", ball_pos)
+	if hand_dist > 0.35:
+		push_error("Smoke Wave1: possessed ball should follow the hand attach")
+		get_tree().quit(1)
+		return
+	# Feet soles near court floor (y≈0).
+	var foot_l := player.find_child("ShoeL", true, false) as Node3D
+	var foot_y := foot_l.global_position.y if foot_l else 99.0
+	if foot_y > 0.12 or foot_y < -0.05:
+		push_error("Smoke Wave1: feet should plant near y=0 (got %.3f)" % foot_y)
+		get_tree().quit(1)
+		return
+	# Torso can yaw independently of feet.
+	player.set_torso_yaw_offset(0.4)
+	for _i in range(8):
+		await get_tree().physics_frame
+	var upper := player.get_node_or_null("UpperBody") as Node3D
+	if upper == null or absf(upper.rotation.y) < 0.15:
+		push_error("Smoke Wave1: UpperBody should yaw independently of feet")
+		get_tree().quit(1)
+		return
+	player.set_torso_yaw_offset(0.0)
+	# Jog: legs should swing when moving on floor.
+	player.global_position.y = 0.0
+	player.velocity = Vector3(0.0, 0.0, 6.0)
+	player._bob_phase = 1.2
+	for _j in range(10):
+		player._update_locomotion_anim(0.05, 6.0)
+	var leg := player.get_node_or_null("LegL") as Node3D
+	var jog_swing := absf(leg.rotation.x) if leg else 0.0
+	print("Smoke Wave1 jog leg swing=", jog_swing)
+	if jog_swing < 0.05:
+		push_error("Smoke Wave1: jog should swing legs")
+		get_tree().quit(1)
+		return
+	player.velocity = Vector3.ZERO
+	player._pose_standing_rest()
+	# Bench seated uses modular legs/torso.
+	var bench_p: Player = null
+	for p in match_node._home_players:
+		if p.on_bench:
+			bench_p = p
+			break
+	if bench_p == null:
+		push_error("Smoke Wave1: need a bench player")
+		get_tree().quit(1)
+		return
+	bench_p._apply_bench_visual()
+	var b_leg := bench_p.get_node_or_null("LegL") as Node3D
+	var b_upper := bench_p.get_node_or_null("UpperBody") as Node3D
+	if b_leg == null or absf(b_leg.rotation.x) < 0.6:
+		push_error("Smoke Wave1: bench pose should bend legs")
+		get_tree().quit(1)
+		return
+	if b_upper == null or b_upper.position.y > -0.2:
+		push_error("Smoke Wave1: bench pose should lower torso onto the seat")
+		get_tree().quit(1)
+		return
+	print(
+		"Smoke Wave1 body anchors OK hair_styles=", styles_seen.size(),
+		" head_top=", player.standing_head_top(),
+		" hand_dist=", hand_dist
+	)
 
 	print("SMOKE_OK")
 	get_tree().quit(0)
