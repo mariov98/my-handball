@@ -46,6 +46,7 @@ func _physics_process(delta: float) -> void:
 	if carrier == null:
 		_dribble_phase = 0.0
 		_dribble_was_low = false
+		_rescue_if_lost()
 		_try_bounce_floor_redirect()
 		_soft_pass_steer(delta)
 		return
@@ -60,6 +61,36 @@ func _physics_process(delta: float) -> void:
 	global_position = global_position.lerp(target, 1.0 - exp(-FOLLOW_LERP * delta))
 	linear_velocity = Vector3.ZERO
 	angular_velocity = Vector3.ZERO
+
+
+## Playability: never leave the ball stuck under the floor or outside the hall.
+## Uses literal 40×20 half-extents (same as Court) to avoid a Ball↔Court class cycle.
+const _RESCUE_HALF_WIDTH := 10.0
+const _RESCUE_HALF_LENGTH := 20.0
+
+func _rescue_if_lost() -> void:
+	var under_floor := global_position.y < -0.35
+	var above_hall := global_position.y > 22.0
+	var far_oob := (
+		absf(global_position.x) > _RESCUE_HALF_WIDTH + 8.0
+		or absf(global_position.z) > _RESCUE_HALF_LENGTH + 8.0
+	)
+	if not under_floor and not above_hall and not far_oob:
+		return
+	var rx := clampf(global_position.x, -_RESCUE_HALF_WIDTH + 0.8, _RESCUE_HALF_WIDTH - 0.8)
+	var rz := clampf(global_position.z, -_RESCUE_HALF_LENGTH + 1.2, _RESCUE_HALF_LENGTH - 1.2)
+	# If fully lost (NaN / extreme), snap to center.
+	if is_nan(rx) or is_nan(rz) or is_inf(rx) or is_inf(rz):
+		rx = 0.0
+		rz = 0.0
+	global_position = Vector3(rx, 1.05, rz)
+	linear_velocity = Vector3(0.0, 1.5, 0.0)
+	angular_velocity = Vector3.ZERO
+	freeze = false
+	collision_layer = 4
+	collision_mask = 1 | 2
+	_bounce_armed = false
+	_bounce_done = false
 
 
 ## Fake bounce on the attach point: procedural Y + periodic floor probe at troughs.
