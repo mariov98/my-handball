@@ -3715,6 +3715,249 @@ func _ready() -> void:
 	print("Smoke Wave4 6m sanity OK")
 
 	print("Smoke Wave4 rules completion OK")
+
+	# --- Wave 5: occupation, role slots, marking, off-ball ---
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	match_node.home_attack_shape = Formations.AttackShape.WIDE
+	match_node.home_defense_shape = Formations.DefenseShape.FLAT
+	match_node._sync_team_shapes()
+
+	var w5_by_role: Dictionary = {}
+	for p in match_node._home_players:
+		if p.on_bench or p.is_goalkeeper:
+			continue
+		w5_by_role[Formations.role_for(p)] = p
+	for need_role in [
+		Formations.Role.LEFT_WING,
+		Formations.Role.LEFT_BACK,
+		Formations.Role.CENTER_BACK,
+		Formations.Role.RIGHT_BACK,
+		Formations.Role.RIGHT_WING,
+		Formations.Role.PIVOT,
+	]:
+		if not w5_by_role.has(need_role):
+			push_error("Smoke Wave5: missing role %s" % Formations.role_label(need_role))
+			get_tree().quit(1)
+			return
+	var w5_lw: Player = w5_by_role[Formations.Role.LEFT_WING]
+	var w5_lb: Player = w5_by_role[Formations.Role.LEFT_BACK]
+	var w5_cb: Player = w5_by_role[Formations.Role.CENTER_BACK]
+	var w5_rb: Player = w5_by_role[Formations.Role.RIGHT_BACK]
+	var w5_rw: Player = w5_by_role[Formations.Role.RIGHT_WING]
+	var w5_piv: Player = w5_by_role[Formations.Role.PIVOT]
+	var w5_gk := match_node._goalkeeper_for(0)
+	if w5_gk == null or Formations.role_for(w5_gk) != Formations.Role.GK:
+		push_error("Smoke Wave5: GK role missing")
+		get_tree().quit(1)
+		return
+
+	# R4.3: role-specific attack slots are distinct (not one chase point).
+	var w5_deep_ball := Vector3(1.5, 0.0, 10.0)
+	var w5_slots_atk: Dictionary = {}
+	for role_p in [w5_lw, w5_lb, w5_cb, w5_rb, w5_rw, w5_piv]:
+		w5_slots_atk[Formations.role_for(role_p)] = Formations.attack_slot(role_p, w5_deep_ball)
+	var w5_atk_lw: Vector3 = w5_slots_atk[Formations.Role.LEFT_WING]
+	var w5_atk_lb: Vector3 = w5_slots_atk[Formations.Role.LEFT_BACK]
+	var w5_atk_cb: Vector3 = w5_slots_atk[Formations.Role.CENTER_BACK]
+	var w5_atk_rb: Vector3 = w5_slots_atk[Formations.Role.RIGHT_BACK]
+	var w5_atk_rw: Vector3 = w5_slots_atk[Formations.Role.RIGHT_WING]
+	var w5_atk_piv: Vector3 = w5_slots_atk[Formations.Role.PIVOT]
+	print(
+		"Smoke Wave5 attack LW=", w5_atk_lw.x, " LB=", w5_atk_lb.x,
+		" CB=", w5_atk_cb.x, " RB=", w5_atk_rb.x, " RW=", w5_atk_rw.x, " P=", w5_atk_piv.z
+	)
+	# R4.2 width: wings high/wide; backs in shooting belt; ordered lanes.
+	if w5_atk_lw.x >= -4.5 or w5_atk_rw.x <= 4.5:
+		push_error("Smoke Wave5: wings should hold width")
+		get_tree().quit(1)
+		return
+	if not (
+		w5_atk_lw.x < w5_atk_lb.x
+		and w5_atk_lb.x < w5_atk_cb.x
+		and w5_atk_cb.x < w5_atk_rb.x
+		and w5_atk_rb.x < w5_atk_rw.x
+	):
+		push_error("Smoke Wave5: attack lanes should stay ordered LW<LB<CB<RB<RW")
+		get_tree().quit(1)
+		return
+	# Pivot closer to goal than CB (Home attacks +Z → larger z).
+	if w5_atk_piv.z <= w5_atk_cb.z + 1.5:
+		push_error("Smoke Wave5: pivot should sit ahead of CB toward goal")
+		get_tree().quit(1)
+		return
+	# Drive slots differ by role (not generic goal chase).
+	var w5_drive_lw := Formations.attack_drive_slot(w5_lw, w5_deep_ball)
+	var w5_drive_cb := Formations.attack_drive_slot(w5_cb, w5_deep_ball)
+	var w5_drive_piv := Formations.attack_drive_slot(w5_piv, w5_deep_ball)
+	if absf(w5_drive_lw.x - w5_drive_cb.x) < 2.0:
+		push_error("Smoke Wave5: LW drive should differ from CB drive on X")
+		get_tree().quit(1)
+		return
+	if w5_drive_piv.z <= w5_drive_cb.z:
+		push_error("Smoke Wave5: pivot drive should be deeper than CB")
+		get_tree().quit(1)
+		return
+
+	# R4.2 defense: ball-side slide without stacking (far wing holds width).
+	var w5_threat_ball := Vector3(4.5, 0.0, -6.0)
+	var w5_def_lw := Formations.defense_slot(w5_lw, w5_threat_ball, null)
+	var w5_def_rw := Formations.defense_slot(w5_rw, w5_threat_ball, null)
+	var w5_def_cb := Formations.defense_slot(w5_cb, w5_threat_ball, null)
+	print("Smoke Wave5 defense LW=", w5_def_lw.x, " CB=", w5_def_cb.x, " RW=", w5_def_rw.x)
+	if w5_def_lw.x >= -3.5:
+		push_error("Smoke Wave5: weak-side LW should not stack on ball-side")
+		get_tree().quit(1)
+		return
+	if w5_def_rw.x <= 2.0:
+		push_error("Smoke Wave5: ball-side RW should shade toward threat")
+		get_tree().quit(1)
+		return
+	if absf(w5_def_lw.x - w5_def_rw.x) < 6.0:
+		push_error("Smoke Wave5: defense wings should stay spread")
+		get_tree().quit(1)
+		return
+	if (
+		Court.in_goal_area(w5_def_lw, 0)
+		or Court.in_goal_area(w5_def_rw, 0)
+		or Court.in_goal_area(w5_def_cb, 0)
+	):
+		push_error("Smoke Wave5: defense slots must stay outside own 6 m")
+		get_tree().quit(1)
+		return
+
+	# Kickoff shapes stay correct (offense own half; defense near 6 m).
+	match_node._place_kickoff_shape(0)
+	for p in match_node._home_players:
+		if p.on_bench or p.is_goalkeeper:
+			continue
+		if p.global_position.z > 0.2:
+			push_error("Smoke Wave5: kickoff offense must stay in own half")
+			get_tree().quit(1)
+			return
+	var w5_home_def_line := -Court.HALF_LENGTH + Formations.DEFENSE_LINE_M
+	match_node._place_kickoff_shape(1)
+	for p in match_node._home_players:
+		if p.on_bench or p.is_goalkeeper:
+			continue
+		if absf(p.global_position.z - w5_home_def_line) > 1.5:
+			push_error("Smoke Wave5: kickoff defense should sit near own 6 m wall")
+			get_tree().quit(1)
+			return
+	print("Smoke Wave5 kickoff shapes OK home_def_line=", w5_home_def_line)
+
+	# R4.4 marking: same-role mark + help on pivot; pressure between mark and goal.
+	_smoke_prepare_live(match_node, ball)
+	var away_by_role: Dictionary = {}
+	for p in match_node._away_players:
+		if p.on_bench or p.is_goalkeeper:
+			continue
+		away_by_role[Formations.role_for(p)] = p
+	var away_cb: Player = away_by_role.get(Formations.Role.CENTER_BACK, null)
+	var away_piv: Player = away_by_role.get(Formations.Role.PIVOT, null)
+	var away_lw: Player = away_by_role.get(Formations.Role.LEFT_WING, null)
+	if away_cb == null or away_piv == null or away_lw == null:
+		push_error("Smoke Wave5: away roster roles incomplete for marking")
+		get_tree().quit(1)
+		return
+	away_cb.global_position = Vector3(2.0, 0.0, -8.0)
+	away_piv.global_position = Vector3(0.5, 0.0, -13.5)
+	away_lw.global_position = Vector3(-6.0, 0.0, -9.0)
+	w5_cb.global_position = Vector3(0.0, 0.0, -12.0)
+	var mark_cb := Formations.find_mark_target(w5_cb, match_node._away_players)
+	if mark_cb != away_cb:
+		push_error("Smoke Wave5: CB should mark opposing CB")
+		get_tree().quit(1)
+		return
+	# Ball with wing → CB stays on mark but helps cover deep pivot (not carrier).
+	var help_threat := Formations.find_help_threat(
+		w5_cb, match_node._away_players, mark_cb, away_lw.global_position
+	)
+	if help_threat != away_piv:
+		push_error("Smoke Wave5: help should prefer deep pivot threat")
+		get_tree().quit(1)
+		return
+	var pressure_slot := Formations.defense_mark_slot(
+		w5_cb, away_cb.global_position, away_cb, mark_cb, null
+	)
+	var base_def := Formations.defense_slot(w5_cb, away_cb.global_position, away_cb)
+	if pressure_slot.distance_to(away_cb.global_position) > base_def.distance_to(away_cb.global_position) + 0.35:
+		push_error("Smoke Wave5: mark pressure should close toward the mark")
+		get_tree().quit(1)
+		return
+	var mark_only := Formations.defense_mark_slot(
+		w5_cb, away_lw.global_position, away_lw, mark_cb, null
+	)
+	var mark_help := Formations.defense_mark_slot(
+		w5_cb, away_lw.global_position, away_lw, mark_cb, help_threat
+	)
+	if mark_help.distance_to(away_piv.global_position) > mark_only.distance_to(away_piv.global_position) + 0.15:
+		push_error("Smoke Wave5: help/cover should shade toward pivot")
+		get_tree().quit(1)
+		return
+	print("Smoke Wave5 marking OK mark=", Formations.role_label(Formations.role_for(mark_cb)))
+
+	# R4.5 off-ball: show, cut, pivot seal, clear-out.
+	var w5_show_lw := Formations.show_for_pass_slot(w5_lw, w5_deep_ball, w5_piv, null)
+	var w5_cut_lw := Formations.cut_slot(w5_lw, w5_deep_ball, w5_cb)
+	if w5_cut_lw.x <= w5_show_lw.x + 0.4:
+		# Cut should move inward from wide show lane (less negative X toward center).
+		push_error("Smoke Wave5: LW cut should step inward from show lane")
+		get_tree().quit(1)
+		return
+	var w5_seal := Formations.pivot_seal_slot(w5_piv, w5_deep_ball, away_cb)
+	var w5_piv_atk := Formations.attack_slot(w5_piv, w5_deep_ball)
+	# Seal should sit between defender and goal-ish (Home: seal.z >= defender-ish).
+	if w5_seal.z < away_cb.global_position.z - 1.0 and w5_seal.z < w5_piv_atk.z - 0.5:
+		push_error("Smoke Wave5: pivot seal should bias toward goal/defender")
+		get_tree().quit(1)
+		return
+	var w5_crowded := Formations.clear_out_slot(
+		w5_lb, w5_deep_ball, Vector3(w5_atk_lb.x, 0.0, w5_atk_lb.z), w5_atk_lb
+	)
+	if w5_crowded.distance_to(w5_atk_lb) < 0.4:
+		# clear_out from own slot with same point uses role push — should move.
+		w5_crowded = Formations.clear_out_slot(
+			w5_lb, w5_deep_ball, w5_atk_lb + Vector3(0.2, 0.0, 0.1), w5_atk_lb
+		)
+	if w5_crowded.distance_to(Vector3(w5_atk_lb.x, 0.0, w5_atk_lb.z)) < 0.8:
+		push_error("Smoke Wave5: clear-out should push away from crowd")
+		get_tree().quit(1)
+		return
+	# Support slot with stacked teammate applies spacing.
+	w5_lb.global_position = w5_atk_cb
+	w5_cb.global_position = w5_atk_cb + Vector3(0.1, 0.0, 0.1)
+	var w5_support := Formations.support_attack_slot(
+		w5_cb, w5_deep_ball, w5_lw, [w5_lb, w5_lw, w5_piv], away_cb, false
+	)
+	if w5_support.distance_to(w5_lb.global_position) < Formations.MIN_TEAMMATE_SEP_M * 0.75:
+		push_error("Smoke Wave5: support should clear-out / space from teammate")
+		get_tree().quit(1)
+		return
+	# Spacing helper itself.
+	var w5_spaced := Formations.apply_teammate_spacing(w5_atk_cb, w5_cb, [w5_lb])
+	if w5_spaced.distance_to(w5_lb.global_position) < Formations.MIN_TEAMMATE_SEP_M * 0.9:
+		push_error("Smoke Wave5: apply_teammate_spacing should separate pile-ups")
+		get_tree().quit(1)
+		return
+	print("Smoke Wave5 off-ball show/cut/seal/clear-out OK")
+
+	# HUD role labels match.
+	for role_check in [
+		[Formations.Role.LEFT_WING, "LW"],
+		[Formations.Role.LEFT_BACK, "LB"],
+		[Formations.Role.CENTER_BACK, "CB"],
+		[Formations.Role.RIGHT_BACK, "RB"],
+		[Formations.Role.RIGHT_WING, "RW"],
+		[Formations.Role.PIVOT, "P"],
+		[Formations.Role.GK, "GK"],
+	]:
+		if Formations.role_label(role_check[0]) != role_check[1]:
+			push_error("Smoke Wave5: role label mismatch")
+			get_tree().quit(1)
+			return
+
+	print("Smoke Wave5 occupation and marking OK")
 	print("SMOKE_OK")
 	get_tree().quit(0)
 
