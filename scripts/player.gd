@@ -123,6 +123,10 @@ var sprinting: bool = false
 ## a Player↔Formations class-name cycle at parse time.
 var attack_shape: int = 0
 var defense_shape: int = 0
+## Wave 6: opponent DefenseShape this player is attacking against (synced).
+var facing_defense_shape: int = 0
+## Wave 6 Kempa: brief lockout after redirect so we don't double-fire.
+var _kempa_lock_t: float = 0.0
 ## Phase F jump-shot craft — exposed for ShotCraft.jump_shot_quality duck-typing.
 var jump_shot_active: bool = false
 var jump_shot_air_s: float = 0.0
@@ -268,6 +272,8 @@ func _physics_process(delta: float) -> void:
 			_gk_pose_cache = {}
 	if _catch_settle_t > 0.0:
 		_catch_settle_t = maxf(0.0, _catch_settle_t - delta)
+	if _kempa_lock_t > 0.0:
+		_kempa_lock_t = maxf(0.0, _kempa_lock_t - delta)
 	if _block_timer > 0.0:
 		_block_timer = maxf(0.0, _block_timer - delta)
 		block_ready = _block_timer > 0.0 or diving
@@ -443,6 +449,57 @@ func begin_catch_settle() -> void:
 
 func is_catch_settling() -> bool:
 	return _catch_settle_t > 0.0
+
+
+## Wave 6 R4.8: after an airborne catch near goal, redirect toward goal (readable motion).
+func _try_kempa_after_catch() -> void:
+	if _kempa_lock_t > 0.0 or match_ball == null or not has_ball:
+		return
+	var airborne := (not is_on_floor()) or jump_shot_active or global_position.y > 0.45
+	if not Formations.kempa_eligible(self, airborne):
+		return
+	# Brief settle so the catch reads, then tip toward goal (not a teleport release).
+	_kempa_lock_t = 0.85
+	_catch_settle_t = minf(_catch_settle_t, 0.08)
+	# Defer one physics frame so possession/HUD settle before the tip.
+	call_deferred("_kempa_redirect_deferred")
+
+
+func _kempa_redirect_deferred() -> void:
+	if not has_ball or match_ball == null or match_ball.carrier != self:
+		return
+	try_kempa_redirect(match_ball)
+
+
+## Airborne tip / volley into goal — uses throw windup so it isn't a teleport.
+func try_kempa_redirect(ball: Ball) -> bool:
+	if ball == null or not has_ball or ball.carrier != self:
+		return false
+	if is_goalkeeper or fake_active:
+		return false
+	var airborne := (not is_on_floor()) or jump_shot_active or global_position.y > 0.35
+	if not Formations.kempa_eligible(self, airborne):
+		return false
+	var goal := opponent_goal_point()
+	var from := global_position + Vector3(0.0, 1.35, 0.0)
+	var aim := (goal + Vector3(randf_range(-0.45, 0.45), randf_range(0.85, 1.45), 0.0) - from)
+	if aim.length_squared() < 0.01:
+		return false
+	aim = aim.normalized()
+	# Mild wing assist if finishing from the corridor.
+	if ThrowMotion.is_wing_finish_context(self):
+		aim = ThrowMotion.wing_aim_assist(self, aim)
+	var meta := {
+		"kempa": true,
+		"jump_shot": true,
+		"charge": 0.7,
+		"ai": ai_enabled and not controlled,
+	}
+	jump_shot_active = true
+	var ok := try_shoot(aim, ShotCraft.impulse_for_charge(0.7, false), ball, 0.12, meta)
+	if ok:
+		_kempa_lock_t = 0.9
+	return ok
 
 
 func _move_speed_mul() -> float:
@@ -1118,11 +1175,21 @@ func _ai_support_attack(carrier: Player) -> Vector3:
 			_ai_cut_active = 1.15
 			_ai_cut_cd = 2.8 + float(player_index % 3) * 0.35
 			want_cut = true
+	var opponents := _ai_opponent_roster()
 	var slot := Formations.support_attack_slot(
-		self, ball_pos, carrier, teammates, screen_def, want_cut
+		self, ball_pos, carrier, teammates, screen_def, want_cut, opponents
 	)
 	slot = _keep_outfield_legal(slot)
 	var speed := AI_ATTACK_SPEED_SCALE * (1.14 if want_cut else 1.08)
+	# Wave 6 Kempa setup: jump near crease when a pass is inbound.
+	if (
+		Formations.kempa_near_crease(self)
+		and is_on_floor()
+		and match_ball != null
+		and match_ball.is_pass_in_flight()
+		and match_ball.pass_intended_receiver() == self
+	):
+		velocity.y = maxf(velocity.y, JUMP_VELOCITY * 0.92)
 	return _steer_toward(slot) * minf(speed, 1.0)
 
 
@@ -1228,37 +1295,46 @@ func _ai_attack_with_ball(_delta: float) -> Vector3:
 				Vector3(goal.x + fake_jab_side * 1.4, 0.0, goal.z)
 			)) * AI_ATTACK_SPEED_SCALE
 	# Prefer pass under pressure / at step warning before forcing a contested shot.
+	# Wave 6 R4.6a: vs man, avoid contested lanes when an open receiver exists.
+	var facing_man := Formations.facing_defense_of(self) == Formations.DefenseShape.INDIVIDUAL
 	var prefer_pass := pass_target != null and (
 		must_release
 		or under_pressure
 		or step_warn
 		or dist > 8.5
+		or (facing_man and under_pressure)
 		or ((int(Time.get_ticks_msec() / 700) + player_index) % 3) == 0
 	)
 	if match_ball != null and prefer_pass and _ai_pass_cd <= 0.0 and not fake_active:
 		if _ai_try_pass(pass_target):
 			return Vector3.ZERO
-	if match_ball != null and (dist <= AI_SHOOT_RANGE or must_release) and not fake_active:
-		# Don't force a shot while pressed if a teammate is available.
-		if under_pressure and pass_target != null and not must_release:
-			var evade := Formations.attack_drive_slot(self, me)
+	var nine_m := Formations.should_take_nine_meter_shot(
+		self, dist, under_pressure, pass_target != null
+	)
+	if match_ball != null and (dist <= AI_SHOOT_RANGE or must_release or nine_m) and not fake_active:
+		# Don't force a shot while pressed if a teammate is available (unless 9 m zone look).
+		if under_pressure and pass_target != null and not must_release and not nine_m:
+			var evade := Formations.attack_drive_for_style(self, me)
 			return _steer_toward(_keep_outfield_legal(evade)) * AI_ATTACK_SPEED_SCALE
-		if _ai_shoot_cd <= 0.0 and (dist <= AI_SHOOT_RANGE or must_release):
+		if _ai_shoot_cd <= 0.0 and (dist <= AI_SHOOT_RANGE or must_release or nine_m):
 			var aim := (goal - (me + Vector3(0, 1.2, 0))).normalized()
 			# Slight aim noise so Away isn't laser-perfect.
 			aim += Vector3(randf_range(-0.06, 0.06), randf_range(-0.02, 0.03), randf_range(-0.04, 0.04))
 			aim = aim.normalized()
-			var lob := dist < 7.0 and (player_index % 2) == 0
-			var impulse := ShotCraft.impulse_for_charge(0.55, lob)
+			var lob := dist < 7.0 and (player_index % 2) == 0 and not nine_m
+			var charge := 0.72 if nine_m else 0.55
+			var impulse := ShotCraft.impulse_for_charge(charge, lob)
 			var up := ShotCraft.up_bias(lob)
-			var meta := {"lob": lob, "ai": true, "charge": 0.55}
+			var meta := {"lob": lob, "ai": true, "charge": charge}
+			if nine_m:
+				meta["nine_meter"] = true
 			if try_shoot(aim, impulse, match_ball, up, meta):
 				_ai_shoot_cd = AI_SHOOT_COOLDOWN
 				_ai_carry_sampling = false
 				_ai_carry_dist = 0.0
 				return Vector3.ZERO
-	# Wave 5 R4.3: role-specific drive (wings corridor, backs 9 m belt, pivot crease).
-	var approach := Formations.attack_drive_slot(self, me)
+	# Wave 5/6: role drive + man drive-and-kick / zone 9 m belt.
+	var approach := Formations.attack_drive_for_style(self, me)
 	approach = _keep_outfield_legal(approach)
 	return _steer_toward(approach) * AI_ATTACK_SPEED_SCALE
 
@@ -1332,8 +1408,41 @@ func _ai_pass_target() -> Player:
 		face = Vector3(0.0, 0.0, 1.0 if team_id == 0 else -1.0)
 	else:
 		face = face.normalized()
-	var best := PassCraft.best_in_cone(self, roster, face, team_id)
-	return best as Player
+	var opponents := _ai_opponent_roster()
+	# Wave 6: score open lanes / Kempa jumpers, not only cone geometry.
+	var best: Player = null
+	var best_score := -INF
+	for mate in roster:
+		if mate == null or mate == self or not (mate is Player):
+			continue
+		var recv := mate as Player
+		if recv.is_goalkeeper or recv.match_frozen or recv.excluded or recv.on_bench:
+			continue
+		var score := PassCraft.score_in_cone(self, recv, face, team_id)
+		if score <= -INF:
+			continue
+		var openness := Formations.pass_lane_openness(
+			global_position, recv.global_position, opponents
+		)
+		score += openness * 2.4
+		# R4.6a: vs man, strongly prefer clear lanes over contested ones.
+		if Formations.facing_defense_of(self) == Formations.DefenseShape.INDIVIDUAL:
+			if openness < 0.35:
+				score -= 3.5
+			else:
+				score += openness * 1.6
+		# R4.8: feed an airborne jumper near the crease.
+		var jumper_air := not recv.is_on_floor() or recv.jump_shot_active
+		if Formations.kempa_eligible(recv, jumper_air):
+			score += 5.5
+		elif Formations.kempa_near_crease(recv) and jumper_air:
+			score += 3.0
+		if not recv.controlled:
+			score += 0.3
+		if score > best_score:
+			best_score = score
+			best = recv
+	return best
 
 
 func _ai_try_pass(target: Player) -> bool:
@@ -1397,6 +1506,8 @@ func _try_sticky_pass_catch() -> void:
 		_ai_carry_sampling = false
 		begin_catch_settle()
 		possession_changed.emit(true)
+		# Wave 6 R4.8: airborne catch near crease → Kempa redirect (readable, not teleport).
+		_try_kempa_after_catch()
 
 
 ## Soft clamp so AI outfield targets stay outside both goal areas.
@@ -1441,6 +1552,7 @@ func _on_pickup_body_entered(body: Node3D) -> void:
 			if is_goalkeeper and _should_arm_outlet_from_ball(ball):
 				arm_outlet_pass()
 			possession_changed.emit(true)
+			_try_kempa_after_catch()
 
 
 func _on_save_body_entered(body: Node3D) -> void:

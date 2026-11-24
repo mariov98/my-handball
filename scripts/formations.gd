@@ -3,14 +3,15 @@ class_name Formations
 
 ## Phase 4 tactics lite + Phase E shape presets + Phase G full outfield.
 ## On-court roster: LW / LB / CB / RB / RW / Pivot + GK (7).
-## Attack Wide (3-3) vs Crash (2-4). Defense Flat (6-0) vs OneUp (5-1).
+## Attack Wide (3-3) vs Crash (2-4). Defense: 6-0 / 5-1 / 3-2-1 / Man (Wave 6).
 ## Wave 5: role-distinct slots, ball-side marking + help, off-ball show/cut/clear-out.
+## Wave 6: attack vs man/zone, Kempa eligibility helpers.
 
 enum Role { GK, LEFT_WING, LEFT_BACK, CENTER_BACK, RIGHT_BACK, RIGHT_WING, PIVOT }
 ## Attack shape presets (full-roster reading of 3-3 / 2-4).
 enum AttackShape { WIDE, CRASH }
-## Defense shape presets (full-roster reading of 6-0 / 5-1).
-enum DefenseShape { FLAT, ONE_UP }
+## Defense systems (R4.7): Flat=6-0, OneUp=5-1, layered 3-2-1, Individual=man.
+enum DefenseShape { FLAT, ONE_UP, THREE_TWO_ONE, INDIVIDUAL }
 
 const FREE_THROW_LINE_M := 9.0 ## Distance from goal end for 9 m-style wall / free throws.
 const ATTACK_ARC_M := 9.2 ## Wings sit near the free-throw arc.
@@ -19,6 +20,9 @@ const HALFBACK_DEPTH_M := 11.0 ## LB/RB depth (slightly ahead of CB).
 const PIVOT_DEPTH_M := 7.2 ## Line player just outside 6 m.
 const DEFENSE_LINE_M := 7.6 ## Flat defenders stand outside own 6 m.
 const ONE_UP_DEPTH_M := 9.4 ## OneUp CB steps toward ~9 m on the ball.
+const THREE_FRONT_DEPTH_M := 11.2 ## 3-2-1 front (CB) depth from own goal.
+const THREE_MID_DEPTH_M := 9.2 ## 3-2-1 mid (LB/RB) depth.
+const THREE_BACK_DEPTH_M := 7.5 ## 3-2-1 back wall (wings + pivot).
 const WALL_GAP_M := 3.2 ## Min distance defenders keep from free-throw taker (~3 m / R3.1).
 const RESTART_GAP_M := 3.0 ## Opponents held back on throw-in / goal-throw (Wave 4).
 ## Wave 5 occupation: keep attack width / defense lanes from collapsing into piles.
@@ -28,6 +32,12 @@ const MARK_PRESSURE_M := 1.45 ## Stand this far ball-side of the mark toward own
 const HELP_COVER_BLEND := 0.42 ## How hard weak-side help shades to cutter/pivot.
 const BALL_SIDE_SLIDE_NEAR := 0.32 ## Ball-side lane slide (nearby roles).
 const BALL_SIDE_SLIDE_FAR := 0.08 ## Weak-side holds width — no stack on ball.
+## Wave 6: Kempa / 9 m shoot heuristics.
+const KEMPA_GOAL_DEPTH_M := 9.0 ## Max distance from opponent goal for Kempa redirect.
+const NINE_METER_SHOT_MIN_M := 8.2
+const NINE_METER_SHOT_MAX_M := 12.5
+const ZONE_GAP_BLEND := 0.55
+const MAN_OPEN_SPACE_BLEND := 0.62
 ## Phase G: court roles use player_index 0–6 (GK + 6 outfield).
 const COURT_OUTFIELD_COUNT := 6
 
@@ -93,9 +103,30 @@ static func attack_shape_label(shape: AttackShape) -> String:
 static func defense_shape_label(shape: DefenseShape) -> String:
 	match shape:
 		DefenseShape.ONE_UP:
-			return "OneUp"
+			return "5-1"
+		DefenseShape.THREE_TWO_ONE:
+			return "3-2-1"
+		DefenseShape.INDIVIDUAL:
+			return "Man"
 		_:
-			return "Flat"
+			return "6-0"
+
+
+## Cycle Home defense: 6-0 → 5-1 → 3-2-1 → Man → 6-0.
+static func next_defense_shape(shape: int) -> int:
+	match shape:
+		DefenseShape.FLAT:
+			return DefenseShape.ONE_UP
+		DefenseShape.ONE_UP:
+			return DefenseShape.THREE_TWO_ONE
+		DefenseShape.THREE_TWO_ONE:
+			return DefenseShape.INDIVIDUAL
+		_:
+			return DefenseShape.FLAT
+
+
+static func is_zone_defense(shape: int) -> bool:
+	return shape != DefenseShape.INDIVIDUAL
 
 
 static func attack_shape_of(player: Player) -> AttackShape:
@@ -108,6 +139,13 @@ static func defense_shape_of(player: Player) -> DefenseShape:
 	if player == null:
 		return DefenseShape.FLAT
 	return player.defense_shape as DefenseShape
+
+
+## Opponent defense the attack is facing (synced by MatchController).
+static func facing_defense_of(player: Player) -> DefenseShape:
+	if player == null:
+		return DefenseShape.FLAT
+	return player.facing_defense_shape as DefenseShape
 
 
 static func is_wing(role: Role) -> bool:
@@ -254,7 +292,7 @@ static func attack_slot(player: Player, ball_pos: Vector3) -> Vector3:
 	return _legalize_outfield(slot, player.team_id)
 
 
-## Defense spacing: Flat = 6-across wall; OneUp = CB steps to ~9 m on the ball.
+## Defense spacing: 6-0 flat wall; 5-1 OneUp; 3-2-1 layers; Man (home lanes + mark chase).
 ## Wave 5: ball-side slide is distance-weighted so far-side lanes keep width (no stack).
 static func defense_slot(player: Player, ball_pos: Vector3, carrier: Player = null) -> Vector3:
 	if player == null:
@@ -276,23 +314,56 @@ static func defense_slot(player: Player, ball_pos: Vector3, carrier: Player = nu
 	var lane_x := _defense_home_lane_x(role)
 	var slide := BALL_SIDE_SLIDE_FAR
 	var line_depth := DEFENSE_LINE_M
+	var pressing_front := false
+
 	if shape == DefenseShape.ONE_UP and role == Role.CENTER_BACK:
-		# 5-1-ish: CB presses up to ~9 m on the ball; others stay flat.
+		# 5-1: CB presses up to ~9 m on the ball; others stay flat.
 		slide = 0.55
 		line_depth = ONE_UP_DEPTH_M
 		lane_x = threat_x * 0.15
+		pressing_front = true
+	elif shape == DefenseShape.THREE_TWO_ONE:
+		# Readable 3-2-1 layers without collapsing occupation (R4.7).
+		match role:
+			Role.CENTER_BACK:
+				line_depth = THREE_FRONT_DEPTH_M
+				slide = 0.48
+				lane_x = threat_x * 0.2
+				pressing_front = true
+			Role.LEFT_BACK, Role.RIGHT_BACK:
+				line_depth = THREE_MID_DEPTH_M
+				slide = 0.28
+			Role.LEFT_WING, Role.RIGHT_WING, Role.PIVOT:
+				line_depth = THREE_BACK_DEPTH_M
+				slide = BALL_SIDE_SLIDE_NEAR * 0.7
+				if role == Role.PIVOT:
+					lane_x = clampf(threat_x * 0.35, -1.8, 1.8)
+			_:
+				pass
+		var lane_gap_321 := absf(lane_x - threat_x)
+		var near_321 := clampf(1.0 - lane_gap_321 / 9.0, 0.0, 1.0)
+		if not pressing_front:
+			slide = lerpf(BALL_SIDE_SLIDE_FAR, slide, near_321)
+	elif shape == DefenseShape.INDIVIDUAL:
+		# Man: keep role lanes as recovery anchors; mark chase lives in defense_mark_slot.
+		var lane_gap_m := absf(lane_x - threat_x)
+		var near_m := clampf(1.0 - lane_gap_m / 9.0, 0.0, 1.0)
+		slide = lerpf(0.12, 0.4, near_m)
+		line_depth = DEFENSE_LINE_M + 0.6
+		if role == Role.PIVOT:
+			lane_x = clampf(threat_x * 0.45, -2.2, 2.2)
 	else:
-		# Near ball-side roles slide harder; weak-side holds home lane (R4.2).
+		# 6-0 flat: near ball-side roles slide harder; weak-side holds home lane (R4.2).
 		var lane_gap := absf(lane_x - threat_x)
 		var nearness := clampf(1.0 - lane_gap / 9.0, 0.0, 1.0)
 		slide = lerpf(BALL_SIDE_SLIDE_FAR, BALL_SIDE_SLIDE_NEAR, nearness)
-		# Pivot always shades ball-side interior a bit more.
 		if role == Role.PIVOT:
 			slide = maxf(slide, 0.28)
 			lane_x = clampf(threat_x * 0.4, -2.0, 2.0)
+
 	lane_x = clampf(lane_x + threat_x * slide, -7.8, 7.8)
 	var slot := Vector3(lane_x, 0.0, own_goal_z - defend_sign * line_depth)
-	if not (shape == DefenseShape.ONE_UP and role == Role.CENTER_BACK):
+	if not pressing_front:
 		var mid_push := clampf((10.0 - absf(threat.z)) / 10.0, 0.0, 1.0)
 		slot.z += (-defend_sign) * mid_push * 1.6
 	else:
@@ -424,18 +495,27 @@ static func defense_mark_slot(
 		var ball_x := ball_pos.x if carrier == null else carrier.global_position.x
 		var same_side := signf(mark_pos.x) == signf(ball_x) or absf(ball_x) < 1.5
 		var blend := 0.72 if same_side else 0.28
+		# Individual: stay glued to the mark (R4.7 man).
+		if shape == DefenseShape.INDIVIDUAL:
+			blend = 0.92 if same_side else 0.78
 		# Carrier mark → hard close-out.
 		if carrier != null and mark == carrier:
-			blend = 0.85
-			# OneUp CB already presses; keep a touch of base depth.
-			if shape == DefenseShape.ONE_UP and role == Role.CENTER_BACK:
+			blend = 0.92 if shape == DefenseShape.INDIVIDUAL else 0.85
+			# OneUp / 3-2-1 front already presses; keep a touch of base depth.
+			if (
+				(shape == DefenseShape.ONE_UP or shape == DefenseShape.THREE_TWO_ONE)
+				and role == Role.CENTER_BACK
+			):
 				blend = 0.65
 		# Lite switch: if assigned mark crossed far past our lane toward ball, chase harder.
 		var home_lane := _defense_home_lane_x(role)
 		if absf(mark_pos.x - home_lane) > 3.5 and same_side:
-			blend = maxf(blend, 0.7)
+			blend = maxf(blend, 0.7 if shape != DefenseShape.INDIVIDUAL else 0.88)
 		base.x = lerpf(base.x, press.x, blend)
 		base.z = lerpf(base.z, press.z, blend * 0.85)
+		# Man defense: help is lighter — stay with your man.
+		if shape == DefenseShape.INDIVIDUAL:
+			help = null
 
 	# Help / cover: shade toward cutter or pivot without abandoning the wall.
 	if help != null and (carrier == null or mark != carrier):
@@ -651,13 +731,15 @@ static func apply_teammate_spacing(
 
 
 ## Unified off-ball support: show / cut / pivot seal / clear-out. R4.5
+## Wave 6: optional opponents list biases man open-space / zone gap occupation.
 static func support_attack_slot(
 	player: Player,
 	ball_pos: Vector3,
 	carrier: Player,
 	teammates: Array = [],
 	screen_defender: Player = null,
-	want_cut: bool = false
+	want_cut: bool = false,
+	opponents: Array = []
 ) -> Vector3:
 	if player == null:
 		return Vector3.ZERO
@@ -696,7 +778,212 @@ static func support_attack_slot(
 			break
 
 	slot = apply_teammate_spacing(slot, player, teammates)
+	# Wave 6: bias slot for man vs zone attack styles.
+	slot = apply_attack_style_bias(slot, player, ball_pos, carrier, teammates, opponents)
 	return _legalize_outfield(slot, player.team_id)
+
+
+## Wave 6 R4.6: nudge occupation for man (open space) vs zone (gaps / 9 m belt).
+static func apply_attack_style_bias(
+	slot: Vector3,
+	player: Player,
+	ball_pos: Vector3,
+	carrier: Player,
+	teammates: Array = [],
+	opponents: Array = []
+) -> Vector3:
+	if player == null or player.is_goalkeeper:
+		return slot
+	var facing := facing_defense_of(player)
+	if facing == DefenseShape.INDIVIDUAL:
+		return man_open_space_slot(player, ball_pos, slot, opponents)
+	return zone_gap_slot(player, ball_pos, carrier, slot, opponents, teammates)
+
+
+## Vs man: prefer open pockets away from nearest markers (R4.6a).
+static func man_open_space_slot(
+	player: Player,
+	ball_pos: Vector3,
+	base_slot: Vector3,
+	opponents: Array = []
+) -> Vector3:
+	var slot := Vector3(base_slot.x, 0.0, base_slot.z)
+	if player == null:
+		return slot
+	var nearest: Player = null
+	var nearest_d := INF
+	for item in opponents:
+		if not (item is Player):
+			continue
+		var opp := item as Player
+		if opp == null or opp.is_goalkeeper or opp.excluded or opp.on_bench:
+			continue
+		if opp.team_id == player.team_id:
+			continue
+		var d := slot.distance_squared_to(Vector3(opp.global_position.x, 0.0, opp.global_position.z))
+		if d < nearest_d:
+			nearest_d = d
+			nearest = opp
+	if nearest == null:
+		# No roster passed — bias slightly away from ball X so lanes stay clear.
+		var side := -signf(ball_pos.x) if absf(ball_pos.x) > 1.0 else 1.0
+		slot.x += side * 0.9
+		return _legalize_outfield(slot, player.team_id)
+	var away := slot - Vector3(nearest.global_position.x, 0.0, nearest.global_position.z)
+	away.y = 0.0
+	if away.length_squared() < 0.04:
+		away = Vector3(-signf(nearest.global_position.x + 0.01), 0.0, 0.0)
+	slot = slot.lerp(slot + away.normalized() * 1.8, MAN_OPEN_SPACE_BLEND)
+	return _legalize_outfield(slot, player.team_id)
+
+
+## Vs zone: occupy gaps between defenders; reverse/overload bias (R4.6b).
+static func zone_gap_slot(
+	player: Player,
+	ball_pos: Vector3,
+	carrier: Player,
+	base_slot: Vector3,
+	opponents: Array = [],
+	_teammates: Array = []
+) -> Vector3:
+	var slot := Vector3(base_slot.x, 0.0, base_slot.z)
+	if player == null:
+		return slot
+	var role := role_for(player)
+	var attack_sign := 1.0 if player.team_id == 0 else -1.0
+	var goal_z := 20.0 * attack_sign
+	# Collect opponent X sorted for gap finding.
+	var xs: Array = []
+	for item in opponents:
+		if not (item is Player):
+			continue
+		var opp := item as Player
+		if opp == null or opp.is_goalkeeper or opp.excluded or opp.on_bench:
+			continue
+		if opp.team_id == player.team_id:
+			continue
+		xs.append(opp.global_position.x)
+	xs.sort()
+	var gap_x := slot.x
+	if xs.size() >= 2:
+		var best_gap := -1.0
+		for i in range(xs.size() - 1):
+			var a: float = xs[i]
+			var b: float = xs[i + 1]
+			var mid := (a + b) * 0.5
+			var gap := b - a
+			# Prefer gaps near this role's home lane.
+			var role_pref := absf(mid - slot.x)
+			var score := gap - role_pref * 0.35
+			if score > best_gap:
+				best_gap = score
+				gap_x = mid
+	# Ball reversal: weak-side wings/backs hold width opposite the ball.
+	var car_x := ball_pos.x
+	if carrier:
+		car_x = carrier.global_position.x
+	if is_wing(role) or role == Role.LEFT_BACK or role == Role.RIGHT_BACK:
+		if signf(slot.x) != signf(car_x) and absf(car_x) > 1.5:
+			slot.x = lerpf(slot.x, signf(slot.x) * maxf(absf(slot.x), 5.5), 0.35)
+	# Backs sit in the 9 m shooting belt vs zone.
+	if is_backcourt(role):
+		slot.z = lerpf(slot.z, goal_z - attack_sign * FREE_THROW_LINE_M, 0.28)
+	slot.x = lerpf(slot.x, gap_x, ZONE_GAP_BLEND * 0.55)
+	return _legalize_outfield(slot, player.team_id)
+
+
+## Carrier drive biased by facing defense (drive-and-kick vs man; 9 m belt vs zone).
+static func attack_drive_for_style(player: Player, ball_pos: Vector3) -> Vector3:
+	var drive := attack_drive_slot(player, ball_pos)
+	if player == null:
+		return drive
+	var facing := facing_defense_of(player)
+	var attack_sign := 1.0 if player.team_id == 0 else -1.0
+	var goal_z := 20.0 * attack_sign
+	var role := role_for(player)
+	if facing == DefenseShape.INDIVIDUAL:
+		# Drive hard at the 1v1 — push deeper toward goal.
+		drive.z = lerpf(drive.z, goal_z - attack_sign * 7.8, 0.4)
+		return _legalize_outfield(drive, player.team_id)
+	# Zone: backs hold the 9 m line for long-range looks.
+	if is_backcourt(role):
+		drive.z = lerpf(drive.z, goal_z - attack_sign * FREE_THROW_LINE_M, 0.55)
+		drive.x = lerpf(drive.x, clampf(ball_pos.x * 0.3, -4.5, 4.5), 0.25)
+	return _legalize_outfield(drive, player.team_id)
+
+
+## True when a backcourt carrier should prefer a ~9 m shot vs a closed zone lane (R4.6b).
+static func should_take_nine_meter_shot(
+	player: Player,
+	goal_dist: float,
+	under_pressure: bool,
+	pass_available: bool
+) -> bool:
+	if player == null or not is_backcourt(role_for(player)):
+		return false
+	if facing_defense_of(player) == DefenseShape.INDIVIDUAL:
+		return false
+	if goal_dist < NINE_METER_SHOT_MIN_M or goal_dist > NINE_METER_SHOT_MAX_M:
+		return false
+	# Closed lane: pressed with no clean pass, or zone and already in the belt.
+	if under_pressure and not pass_available:
+		return true
+	if not under_pressure and goal_dist <= FREE_THROW_LINE_M + 1.5:
+		return true
+	return false
+
+
+## Planar openness of a pass lane (1 = clear, 0 = contested). R4.6a.
+static func pass_lane_openness(
+	from_pos: Vector3,
+	to_pos: Vector3,
+	opponents: Array,
+	corridor_half: float = 1.15
+) -> float:
+	var a := Vector3(from_pos.x, 0.0, from_pos.z)
+	var b := Vector3(to_pos.x, 0.0, to_pos.z)
+	var ab := b - a
+	var len_ab := ab.length()
+	if len_ab < 0.5:
+		return 0.0
+	var dir := ab / len_ab
+	var worst := 1.0
+	for item in opponents:
+		if not (item is Player):
+			continue
+		var opp := item as Player
+		if opp == null or opp.is_goalkeeper or opp.excluded or opp.on_bench:
+			continue
+		var p := Vector3(opp.global_position.x, 0.0, opp.global_position.z)
+		var ap := p - a
+		var t := clampf(ap.dot(dir), 0.15, len_ab - 0.15)
+		var closest := a + dir * t
+		var lateral := p.distance_to(closest)
+		if lateral < corridor_half:
+			worst = minf(worst, lateral / corridor_half)
+	return clampf(worst, 0.0, 1.0)
+
+
+## Near opponent crease for Kempa approach / finish (R4.8).
+static func kempa_near_crease(player: Player) -> bool:
+	if player == null or player.is_goalkeeper or player.on_bench or player.excluded:
+		return false
+	var attack_sign := 1.0 if player.team_id == 0 else -1.0
+	var goal_z := 20.0 * attack_sign
+	var dist := absf(player.global_position.z - goal_z)
+	if dist > KEMPA_GOAL_DEPTH_M:
+		return false
+	# Must be on the attack half / approaching the crease.
+	if (player.global_position.z * attack_sign) < 8.0:
+		return false
+	return true
+
+
+## Kempa: airborne attacker near the opponent crease can redirect (R4.8).
+static func kempa_eligible(player: Player, airborne: bool) -> bool:
+	if not airborne:
+		return false
+	return kempa_near_crease(player)
 
 
 ## Kickoff / period restart shape.

@@ -470,7 +470,7 @@ func _ensure_shapes_label() -> void:
 	shapes_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.65))
 	shapes_label.add_theme_constant_override("shadow_offset_x", 1)
 	shapes_label.add_theme_constant_override("shadow_offset_y", 1)
-	shapes_label.text = "Shape Atk Wide · Def Flat"
+	shapes_label.text = "Shape Atk Wide · Def 6-0"
 	$Root.add_child(shapes_label)
 
 
