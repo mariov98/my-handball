@@ -6,6 +6,8 @@ class_name HandballRules
 ## Phase B: 3 s hold + dribble stream (step/hold reset on catch) + double-dribble lite.
 ## Phase C: IHF-inspired passive hybrid — progress/tempo warns, then pass-count.
 ## Phase D: contact lite during shoot/pass windup → FT / heuristic 7 m (+ exclusion flag).
+## Wave 4: soft auto-dribble helpers; foul ladder (head touch / head hit / behind push);
+## 9 m snap for deep FTs; hardened clear-chance → 7 m.
 
 signal rule_warning(code: String, message: String)
 signal rule_violation(code: String, message: String, awarding_team_id: int, spot: Vector3)
@@ -36,8 +38,14 @@ const OOB_COOLDOWN_S := 0.4
 ## IHF-ish: hold ≤ 3 s without dribble / pass / shot.
 const HOLD_MAX_S := 3.0
 const HOLD_WARN_S := 2.4
+## Soft assist: auto-start a legal dribble before the 3 s whistle (Wave 4 / R3.2).
+const HOLD_ASSIST_S := 2.55
+## Soft assist: auto-dribble when on the last counted step (Wave 4 / R3.3).
+const STEPS_ASSIST_AT := 3
+## Master switch for hold/step auto-dribble helpers (never forces a double-dribble).
+const AUTO_DRIBBLE_ASSIST := true
 
-## Phase D contact lite (tunable / exportable feel knobs).
+## Phase D / Wave 4 contact (tunable feel knobs).
 ## Defender reach-in / body-check volume while attacker windups near 6–9 m.
 const CONTACT_REACH_M := 1.05
 ## Arc band from defending goal end where contact during windup is a foul.
@@ -46,12 +54,22 @@ const FOUL_ARC_MAX_M := 9.5
 ## Clear-chance heuristic: airborne shooter inside this distance → 7 m.
 ## Approx (not full IHF referee judgment) — documented in README.
 const CLEAR_CHANCE_DIST_M := 8.0
+## Grounded 1v1 clear-chance inside this distance with behind contact (Wave 4 harden).
+const CLEAR_CHANCE_GROUND_DIST_M := 7.0
 ## Brief overlap before whistle (arcade bump feel; keep low).
 const CONTACT_HOLD_S := 0.04
 ## Dot of defender direction vs carrier facing; ≤ this = behind/side (not front).
 const BEHIND_SIDE_DOT := 0.28
+## Strict behind for push/pull exclusion (front defense must not false-positive).
+const BEHIND_PUSH_DOT := -0.15
+## Head/neck contact uses carrier HeadRegion (Wave 1 anchor) — approx radius.
+const HEAD_CONTACT_M := 0.55
+## Relative approach speed into the head that upgrades touch → hit (red).
+const HEAD_HIT_APPROACH_MPS := 2.6
 ## When true, seven_m fouls set last_foul_warrants_exclusion for MatchController.
 const EXCLUDE_ON_SEVEN_M := true
+## Approx ready-window for a 7 m taker before sandbox turnover (Wave 4 / R3.11).
+const SEVEN_M_READY_LIMIT_S := 5.0
 
 var enabled: bool = true
 var last_touch_team_id: int = 0
@@ -59,6 +77,13 @@ var last_touch_team_id: int = 0
 var last_fouler: Player = null
 ## True when the latest contact foul should trigger a 2-min exclusion lite.
 var last_foul_warrants_exclusion: bool = false
+## True when the latest foul is a violent head strike → red / DQ (sandbox).
+var last_foul_warrants_red: bool = false
+## Last foul taxonomy for HUD / restart copy.
+## "" | "ordinary" | "behind_push" | "head_touch" | "head_hit" | "clear_chance"
+var last_foul_kind: String = ""
+## Soft assist started the current dribble stream (HUD shows AUTO).
+var last_dribble_was_assist: bool = false
 
 var _steps: int = 0
 var _step_accum: float = 0.0
@@ -113,6 +138,9 @@ func reset_possession_tracking() -> void:
 	_windup_is_shot = false
 	last_fouler = null
 	last_foul_warrants_exclusion = false
+	last_foul_warrants_red = false
+	last_foul_kind = ""
+	last_dribble_was_assist = false
 
 
 func begin_lockout() -> void:
@@ -261,6 +289,31 @@ func has_caught_dribble() -> bool:
 	return _dribble_caught
 
 
+## True when a soft assist may legally start a dribble (not after gather).
+func can_auto_dribble(player: Player) -> bool:
+	if not AUTO_DRIBBLE_ASSIST or not enabled or _lockout:
+		return false
+	if player == null or player.is_goalkeeper:
+		return false
+	if _is_dribbling or player.dribbling or _dribble_caught:
+		return false
+	var near_hold := _hold_timer >= HOLD_ASSIST_S
+	var near_steps := _steps >= STEPS_ASSIST_AT
+	return near_hold or near_steps
+
+
+## Soft auto-start dribble near 3 s / step limit when legal (never double-dribble).
+## Returns true if a new bounce stream began via assist.
+func try_auto_dribble_assist(player: Player) -> bool:
+	if not can_auto_dribble(player):
+		return false
+	if not try_begin_dribble(player):
+		return false
+	# try_begin_dribble clears the flag — re-arm after a successful assist begin.
+	last_dribble_was_assist = true
+	return true
+
+
 func _clear_passive() -> void:
 	_passive_timer = 0.0
 	_passive_warned = false
@@ -289,6 +342,7 @@ func try_begin_dribble(player: Player) -> bool:
 	_is_dribbling = true
 	_hold_timer = 0.0
 	_hold_warned = false
+	last_dribble_was_assist = false
 	return true
 
 
@@ -300,6 +354,7 @@ func end_dribble(player: Player) -> void:
 		return
 	_is_dribbling = false
 	_dribble_caught = true
+	last_dribble_was_assist = false
 	_steps = 0
 	_step_accum = 0.0
 	_have_carrier_sample = false
@@ -316,6 +371,7 @@ func _reset_hold_and_dribble() -> void:
 	_hold_warned = false
 	_is_dribbling = false
 	_dribble_caught = false
+	last_dribble_was_assist = false
 
 
 ## Returns true if a violation was emitted (caller should stop further checks).
@@ -448,7 +504,7 @@ func _tick_steps(delta: float, carrier: Player) -> bool:
 		step_taken.emit(_steps)
 		if _steps == MAX_STEPS and not _steps_warned:
 			_steps_warned = true
-			rule_warning.emit("steps", "Last step — pass or shoot")
+			rule_warning.emit("steps", "Last step — pass, shoot, or dribble")
 		if _steps > MAX_STEPS:
 			var spot := Court.clamp_to_court_xz(carrier.global_position, 1.0)
 			# Free-throw style: keep restart outside the 6 m if near goal.
@@ -580,11 +636,15 @@ func _tick_goal_areas(delta: float, players: Array[Player], carrier: Player) -> 
 
 func _free_throw_spot(near: Vector3, awarding_team_id: int) -> Vector3:
 	# Keep free throws outside both goal areas and roughly near the foul.
+	# Wave 4 / R3.10: deep fouls snap to the 9 m line of the defending goal.
 	var spot := Court.clamp_to_court_xz(near, 1.2)
 	if Court.in_goal_area(spot, 0):
 		spot = Court.eject_from_goal_area(spot, 0, 1.0)
 	if Court.in_goal_area(spot, 1):
 		spot = Court.eject_from_goal_area(spot, 1, 1.0)
+	var defend_team := 1 - awarding_team_id
+	if Court.in_nine_meter_area(spot, defend_team):
+		spot = Court.eject_from_nine_meter(spot, defend_team, 0.2)
 	# Nudge slightly toward midfield so the award team faces a playable angle.
 	var mid_sign := 1.0 if awarding_team_id == 0 else -1.0
 	# Prefer facing attack: home wants +Z space.
@@ -647,23 +707,78 @@ func _find_contact_fouler(carrier: Player, players: Array[Player]) -> Player:
 func _emit_contact_foul(carrier: Player, fouler: Player) -> bool:
 	last_fouler = fouler
 	last_foul_warrants_exclusion = false
+	last_foul_warrants_red = false
+	last_foul_kind = "ordinary"
 	var award := carrier.team_id
 	var dist_goal := _dist_to_defend_goal(carrier.global_position, 1 - carrier.team_id)
 	var behind_side := _is_contact_from_behind_or_side(carrier, fouler)
-	# Clear-chance heuristic (approx): airborne shooter inside ~8 m + contact behind/side.
+	var behind_push := _is_contact_from_behind(carrier, fouler)
+	var head_sev := _head_contact_severity(carrier, fouler)
+	# Clear-chance heuristic (approx): airborne shooter inside ~8 m + behind/side,
+	# or grounded 1v1 shot windup inside ~7 m with behind contact (Wave 4 harden).
 	# Height/up-velocity count even if floor contact is sticky after a teleport frame.
 	var airborne_shot := (
 		_is_airborne(carrier)
 		or carrier.global_position.y > 0.85
 		or carrier.velocity.y > 1.0
 	)
-	var clear_chance := (
+	var clear_air := (
 		_windup_is_shot
 		and airborne_shot
 		and dist_goal <= CLEAR_CHANCE_DIST_M
 		and behind_side
 	)
+	var clear_ground := (
+		_windup_is_shot
+		and not airborne_shot
+		and dist_goal <= CLEAR_CHANCE_GROUND_DIST_M
+		and behind_push
+	)
+	# Illegal defense in the crease during a shot windup near goal → 7 m (approx).
+	var illegal_area_def := (
+		_windup_is_shot
+		and dist_goal <= CLEAR_CHANCE_DIST_M
+		and Court.in_goal_area(fouler.global_position, 1 - carrier.team_id)
+	)
+	var clear_chance := clear_air or clear_ground or illegal_area_def
+
+	# Wave 4 foul ladder (severity first):
+	# head hit → red; head touch → 2'; clear chance → 7 m; behind push → 2'; else FT.
+	if head_sev == "hit":
+		last_foul_kind = "head_hit"
+		last_foul_warrants_red = true
+		last_foul_warrants_exclusion = false
+		if clear_chance:
+			var spot7 := Court.seven_meter_spot(1 - award)
+			rule_violation.emit(
+				"seven_m",
+				"7 m — red — head contact",
+				award,
+				spot7
+			)
+			return true
+		var ft_hit := _free_throw_spot(Court.clamp_to_court_xz(carrier.global_position, 1.0), award)
+		rule_violation.emit("foul", "Red — head contact", award, ft_hit)
+		return true
+
+	if head_sev == "touch":
+		last_foul_kind = "head_touch"
+		last_foul_warrants_exclusion = true
+		if clear_chance:
+			var spot_ht := Court.seven_meter_spot(1 - award)
+			rule_violation.emit(
+				"seven_m",
+				"7 m — head/neck contact",
+				award,
+				spot_ht
+			)
+			return true
+		var ft_touch := _free_throw_spot(Court.clamp_to_court_xz(carrier.global_position, 1.0), award)
+		rule_violation.emit("foul", "2 min — head/neck contact", award, ft_touch)
+		return true
+
 	if clear_chance:
+		last_foul_kind = "clear_chance"
 		last_foul_warrants_exclusion = EXCLUDE_ON_SEVEN_M
 		var spot := Court.seven_meter_spot(1 - award)
 		rule_violation.emit(
@@ -673,7 +788,15 @@ func _emit_contact_foul(carrier: Player, fouler: Player) -> bool:
 			spot
 		)
 		return true
-	# Default arcade path: free throw at foul spot.
+
+	if behind_push:
+		last_foul_kind = "behind_push"
+		last_foul_warrants_exclusion = true
+		var ft_behind := _free_throw_spot(Court.clamp_to_court_xz(carrier.global_position, 1.0), award)
+		rule_violation.emit("foul", "2 min — push from behind", award, ft_behind)
+		return true
+
+	# Default arcade path: free throw at foul spot (front / ordinary contact).
 	var ft := Court.clamp_to_court_xz(carrier.global_position, 1.0)
 	ft = _free_throw_spot(ft, award)
 	rule_violation.emit("foul", "Foul — free throw", award, ft)
@@ -683,7 +806,8 @@ func _emit_contact_foul(carrier: Player, fouler: Player) -> bool:
 func _in_attack_foul_zone(pos: Vector3, attack_team_id: int) -> bool:
 	var defend_team := 1 - attack_team_id
 	var dist := _dist_to_defend_goal(pos, defend_team)
-	return dist >= FOUL_ARC_MIN_M and dist <= FOUL_ARC_MAX_M
+	# Allow head-contact fouls slightly deeper / wider; zone still centers on 6–9 m.
+	return dist >= FOUL_ARC_MIN_M - 0.4 and dist <= FOUL_ARC_MAX_M + 0.6
 
 
 func _dist_to_defend_goal(pos: Vector3, defending_team_id: int) -> float:
@@ -695,6 +819,15 @@ func _dist_to_defend_goal(pos: Vector3, defending_team_id: int) -> float:
 
 
 func _is_contact_from_behind_or_side(carrier: Player, defender: Player) -> bool:
+	return _facing_dot_to_defender(carrier, defender) <= BEHIND_SIDE_DOT
+
+
+## Stricter behind heuristic for push/pull exclusion (R3.7) — front defense stays clean.
+func _is_contact_from_behind(carrier: Player, defender: Player) -> bool:
+	return _facing_dot_to_defender(carrier, defender) <= BEHIND_PUSH_DOT
+
+
+func _facing_dot_to_defender(carrier: Player, defender: Player) -> float:
 	var face := carrier.face_direction()
 	face.y = 0.0
 	if face.length_squared() < 0.0001:
@@ -707,9 +840,42 @@ func _is_contact_from_behind_or_side(carrier: Player, defender: Player) -> bool:
 		defender.global_position.z - carrier.global_position.z
 	)
 	if to_def.length_squared() < 0.0001:
-		return true
+		return -1.0
 	to_def = to_def.normalized()
-	return face.dot(to_def) <= BEHIND_SIDE_DOT
+	return face.dot(to_def)
+
+
+## Uses carrier HeadRegion (Wave 1). Returns "" | "touch" | "hit".
+func _head_contact_severity(carrier: Player, fouler: Player) -> String:
+	if carrier == null or fouler == null:
+		return ""
+	var head := carrier.get_head_region() if carrier.has_method("get_head_region") else null
+	var head_pos: Vector3
+	if head != null:
+		head_pos = head.global_position
+	else:
+		head_pos = carrier.global_position + Vector3(0.0, 1.72, 0.0)
+	# Defender reach into head/neck height (hands / upper torso approx).
+	var reach := fouler.global_position + Vector3(0.0, 1.55, 0.0)
+	var d := reach.distance_to(head_pos)
+	var planar := _planar_distance(carrier.global_position, fouler.global_position)
+	if d > HEAD_CONTACT_M and not (planar <= 0.55 and absf(reach.y - head_pos.y) <= 0.4):
+		return ""
+	# Approach speed into the head upgrades touch → violent hit (red).
+	# Positive = fouler closing on the head relative to the carrier.
+	var rel := fouler.velocity - carrier.velocity
+	var to_head := Vector3(head_pos.x - reach.x, 0.0, head_pos.z - reach.z)
+	var approach := 0.0
+	if to_head.length_squared() > 0.0001:
+		approach = rel.dot(to_head.normalized())
+	var airborne_fouler := (
+		fouler.global_position.y > 0.55
+		or fouler.velocity.y > 1.4
+		or fouler.diving
+	)
+	if approach >= HEAD_HIT_APPROACH_MPS or airborne_fouler:
+		return "hit"
+	return "touch"
 
 
 func _planar_distance(a: Vector3, b: Vector3) -> float:

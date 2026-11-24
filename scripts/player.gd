@@ -108,6 +108,8 @@ var block_ready: bool = false
 ## Phase D: 2-min exclusion lite — parked at bench, AI off until MatchController restores.
 var excluded: bool = false
 var exclusion_remaining: float = 0.0
+## Wave 4: red card / DQ sandbox — removed for the match (roster hole).
+var disqualified: bool = false
 ## Phase G: voluntary bench (substitution) — parked sideline, not an exclusion.
 var on_bench: bool = false
 ## Sideline parking slot index (0+) for bench / exclusion spread.
@@ -809,10 +811,16 @@ func reset_to_start() -> void:
 	_dive_cd = 0.0
 	_block_timer = 0.0
 	block_ready = false
-	excluded = false
-	exclusion_remaining = 0.0
+	# Wave 4: red-carded players stay off for the match; 2-min exclusions clear on full reset.
+	if disqualified:
+		excluded = true
+		exclusion_remaining = maxf(exclusion_remaining, 1.0)
+		global_position = Court.bench_marker(team_id, 2 + maxi(0, player_index % 4))
+	else:
+		excluded = false
+		exclusion_remaining = 0.0
 	# on_bench / bench_slot preserved — MatchController owns sub state across resets.
-	if on_bench:
+	if on_bench and not disqualified:
 		global_position = Court.bench_marker(team_id, maxi(0, bench_slot))
 	stamina = STAMINA_MAX
 	sprinting = false

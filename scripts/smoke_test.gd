@@ -1399,6 +1399,7 @@ func _ready() -> void:
 	for p in match_node._all_players():
 		p.excluded = false
 		p.exclusion_remaining = 0.0
+		p.disqualified = false
 		p.visible = true
 	match_node.exclusion_on_seven_m = true
 	match_node.exclusion_seconds = 3.0
@@ -1473,6 +1474,7 @@ func _ready() -> void:
 	for p in match_node._all_players():
 		p.excluded = false
 		p.exclusion_remaining = 0.0
+		p.disqualified = false
 	player = match_node._first_outfield(match_node._home_players)
 	match_node._set_controlled(player)
 	# Inside 8 m of away goal (end z=20): place at z≈13.5 → dist≈6.5.
@@ -3327,6 +3329,392 @@ func _ready() -> void:
 	)
 	print("Smoke Wave3 fakes and GK motion OK")
 
+	# --- Wave 4: rules helpers + foul ladder + 3m/7m/9m harden ---
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	for p in match_node._all_players():
+		p.excluded = false
+		p.exclusion_remaining = 0.0
+		p.disqualified = false
+		p.dribbling = false
+		p.visible = true
+	match_node.auto_dribble_assist = true
+	match_node.exclusion_on_seven_m = true
+	match_node.exclusion_seconds = 3.0
+	match_node._clear_seven_m_ready()
+	match_node._configure_ai()
+
+	# R3.2 helper: near 3 s hold → soft auto-dribble (legal), no double-dribble.
+	player = match_node._first_outfield(match_node._home_players)
+	match_node._set_controlled(player)
+	player.global_position = Vector3(0.0, player.start_position.y, 0.0)
+	player.velocity = Vector3.ZERO
+	if not ball.try_pickup(player):
+		push_error("Smoke Wave4: auto-dribble pickup failed")
+		get_tree().quit(1)
+		return
+	player.has_ball = true
+	match_node.rules.on_pickup(player)
+	match_node.rules._hold_timer = HandballRules.HOLD_ASSIST_S + 0.05
+	match_node.rules._hold_warned = true
+	if not match_node.rules.can_auto_dribble(player):
+		push_error("Smoke Wave4: should allow auto-dribble near hold limit")
+		get_tree().quit(1)
+		return
+	if not match_node.rules.try_auto_dribble_assist(player):
+		push_error("Smoke Wave4: auto-dribble assist failed near hold limit")
+		get_tree().quit(1)
+		return
+	player.dribbling = true
+	if not match_node.rules.last_dribble_was_assist:
+		push_error("Smoke Wave4: assist flag should be set")
+		get_tree().quit(1)
+		return
+	if match_node.rules.get_hold_timer() > 0.001:
+		push_error("Smoke Wave4: assist dribble should clear hold clock")
+		get_tree().quit(1)
+		return
+	# Gather → second stream must still be double-dribble (helper never skips that).
+	player.dribbling = false
+	match_node.rules.end_dribble(player)
+	if match_node.rules.try_auto_dribble_assist(player):
+		push_error("Smoke Wave4: assist must not start after dribble catch")
+		get_tree().quit(1)
+		return
+	if match_node.rules.can_auto_dribble(player):
+		push_error("Smoke Wave4: can_auto_dribble must be false after catch")
+		get_tree().quit(1)
+		return
+	print("Smoke Wave4 hold auto-dribble helper OK")
+
+	# R3.3 helper: at last step → auto-dribble.
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	player = match_node._first_outfield(match_node._home_players)
+	match_node._set_controlled(player)
+	player.global_position = Vector3(1.0, player.start_position.y, 2.0)
+	player.dribbling = false
+	if not ball.try_pickup(player):
+		push_error("Smoke Wave4: steps-assist pickup failed")
+		get_tree().quit(1)
+		return
+	player.has_ball = true
+	match_node.rules.on_pickup(player)
+	match_node.rules._steps = HandballRules.MAX_STEPS
+	match_node.rules._steps_warned = true
+	match_node.rules._dribble_caught = false
+	if not match_node.rules.try_auto_dribble_assist(player):
+		push_error("Smoke Wave4: auto-dribble at last step failed")
+		get_tree().quit(1)
+		return
+	print("Smoke Wave4 steps auto-dribble helper OK")
+
+	# R3.10: deep foul spot snaps to 9 m.
+	var w4_deep := Vector3(0.5, 0.0, 14.5)
+	var w4_snapped := match_node.rules._free_throw_spot(w4_deep, 0)
+	if Court.in_nine_meter_area(w4_snapped, 1):
+		push_error("Smoke Wave4: free-throw spot should snap outside 9 m")
+		get_tree().quit(1)
+		return
+	print("Smoke Wave4 9m snap OK spot=", w4_snapped)
+
+	# R3.1: throw-in opponents held ≥ ~3 m from taker.
+	var ti_spot := Vector3(8.5, 0.0, 5.0)
+	var ti_taker := match_node._nearest_outfield(0, ti_spot)
+	match_node._place_set_piece("throw_in", 0, ti_spot, ti_taker)
+	var ti_gap_ok := true
+	var ti_min := INF
+	for p in match_node._away_players:
+		if p.is_goalkeeper or p.excluded or p.on_bench:
+			continue
+		var gd := Vector3(p.global_position.x - ti_spot.x, 0.0, p.global_position.z - ti_spot.z).length()
+		ti_min = minf(ti_min, gd)
+		if gd < Formations.RESTART_GAP_M * 0.9:
+			ti_gap_ok = false
+	print("Smoke Wave4 throw-in min gap=", ti_min, " ok=", ti_gap_ok)
+	if not ti_gap_ok:
+		push_error("Smoke Wave4: throw-in wall should hold opponents ~3 m off")
+		get_tree().quit(1)
+		return
+
+	# R3.7: push/pull from behind → 2 min + FT (not clear-chance distance).
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	for p in match_node._all_players():
+		p.excluded = false
+		p.exclusion_remaining = 0.0
+		p.disqualified = false
+	player = match_node._first_outfield(match_node._home_players)
+	match_node._set_controlled(player)
+	# ~9 m from away goal → foul zone, outside clear-chance ground dist.
+	player.global_position = Vector3(0.3, player.start_position.y, 11.0)
+	player.rotation.y = 0.0
+	player.velocity = Vector3.ZERO
+	var behind_def: Player = null
+	for p in match_node._away_players:
+		if not p.is_goalkeeper and not p.on_bench:
+			behind_def = p
+			break
+	behind_def.global_position = player.global_position + Vector3(0.1, 0.0, -0.85)
+	behind_def.global_position.y = behind_def.start_position.y
+	behind_def.velocity = Vector3.ZERO
+	behind_def.match_frozen = true
+	behind_def.ai_enabled = false
+	if not ball.try_pickup(player):
+		push_error("Smoke Wave4: behind-push pickup failed")
+		get_tree().quit(1)
+		return
+	player.has_ball = true
+	match_node.rules.on_pickup(player)
+	match_node.rules.set_windup(true, true)
+	var behind_codes: Array = []
+	var behind_msgs: Array = []
+	var behind_cb := func(code: String, msg: String, _award: int, _spot: Vector3) -> void:
+		behind_codes.append(code)
+		behind_msgs.append(msg)
+	match_node.rules.rule_violation.connect(behind_cb)
+	var behind_hit := false
+	for _i in range(8):
+		behind_hit = match_node.rules.tick(0.02, ball, match_node._all_players())
+		if behind_hit:
+			break
+	match_node.rules.rule_violation.disconnect(behind_cb)
+	match_node.rules.set_windup(false)
+	var behind_msg := str(behind_msgs[0]) if not behind_msgs.is_empty() else ""
+	print(
+		"Smoke Wave4 behind-push hit=", behind_hit, " codes=", behind_codes,
+		" msg=", behind_msg
+	)
+	if not behind_hit or not ("foul" in behind_codes):
+		push_error("Smoke Wave4: behind push should free-throw")
+		get_tree().quit(1)
+		return
+	if not behind_msg.contains("behind"):
+		push_error("Smoke Wave4: expected push-from-behind reason text")
+		get_tree().quit(1)
+		return
+	await get_tree().create_timer(MatchController.RESTART_FREEZE + 0.35).timeout
+	if not behind_def.excluded:
+		push_error("Smoke Wave4: behind push should exclude fouler")
+		get_tree().quit(1)
+		return
+	print("Smoke Wave4 behind-push 2min OK")
+
+	# R3.5: head/neck touch → 2 min + FT (uses HeadRegion).
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	for p in match_node._all_players():
+		p.excluded = false
+		p.exclusion_remaining = 0.0
+		p.disqualified = false
+	player = match_node._first_outfield(match_node._home_players)
+	match_node._set_controlled(player)
+	player.global_position = Vector3(0.2, player.start_position.y, 12.0)
+	player.rotation.y = 0.0
+	player.velocity = Vector3.ZERO
+	var head_def: Player = null
+	for p in match_node._away_players:
+		if not p.is_goalkeeper and not p.on_bench and p != behind_def:
+			head_def = p
+			break
+	if head_def == null:
+		head_def = behind_def
+	head_def.excluded = false
+	head_def.disqualified = false
+	# Close frontal body so head region engages; low relative speed = touch not hit.
+	head_def.global_position = player.global_position + Vector3(0.0, 0.0, 0.42)
+	head_def.global_position.y = head_def.start_position.y
+	head_def.velocity = Vector3.ZERO
+	head_def.match_frozen = true
+	head_def.ai_enabled = false
+	if not ball.try_pickup(player):
+		push_error("Smoke Wave4: head-touch pickup failed")
+		get_tree().quit(1)
+		return
+	player.has_ball = true
+	match_node.rules.on_pickup(player)
+	var w4_head := player.get_head_region()
+	if w4_head == null:
+		push_error("Smoke Wave4: HeadRegion missing")
+		get_tree().quit(1)
+		return
+	match_node.rules.set_windup(true, true)
+	# Preflight severity while bodies are still staged (lockout clears warrants).
+	var head_sev := match_node.rules._head_contact_severity(player, head_def)
+	if head_sev != "touch":
+		push_error("Smoke Wave4: staged head contact should be touch severity, got %s" % head_sev)
+		get_tree().quit(1)
+		return
+	var head_touch_codes: Array = []
+	var head_touch_msgs: Array = []
+	var head_touch_cb := func(code: String, msg: String, _award: int, _spot: Vector3) -> void:
+		head_touch_codes.append(code)
+		head_touch_msgs.append(msg)
+	match_node.rules.rule_violation.connect(head_touch_cb)
+	var head_touch_hit := false
+	for _i in range(8):
+		head_touch_hit = match_node.rules.tick(0.02, ball, match_node._all_players())
+		if head_touch_hit:
+			break
+	match_node.rules.rule_violation.disconnect(head_touch_cb)
+	match_node.rules.set_windup(false)
+	var head_touch_msg := str(head_touch_msgs[0]) if not head_touch_msgs.is_empty() else ""
+	print(
+		"Smoke Wave4 head-touch hit=", head_touch_hit, " codes=", head_touch_codes,
+		" msg=", head_touch_msg, " sev=", head_sev
+	)
+	if not head_touch_hit or not ("foul" in head_touch_codes):
+		push_error("Smoke Wave4: head/neck touch should free-throw")
+		get_tree().quit(1)
+		return
+	if not head_touch_msg.contains("head"):
+		push_error("Smoke Wave4: head touch reason should mention head/neck")
+		get_tree().quit(1)
+		return
+	await get_tree().create_timer(MatchController.RESTART_FREEZE + 0.35).timeout
+	if not head_def.excluded or head_def.disqualified:
+		push_error("Smoke Wave4: head touch should 2-min exclude, not red")
+		get_tree().quit(1)
+		return
+	print("Smoke Wave4 head-touch 2min OK")
+
+	# R3.6: violent head hit → red / DQ.
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	for p in match_node._all_players():
+		p.excluded = false
+		p.exclusion_remaining = 0.0
+		p.disqualified = false
+	player = match_node._first_outfield(match_node._home_players)
+	match_node._set_controlled(player)
+	player.global_position = Vector3(-0.4, player.start_position.y, 12.2)
+	player.rotation.y = 0.0
+	player.velocity = Vector3.ZERO
+	var red_def: Player = null
+	for p in match_node._away_players:
+		if not p.is_goalkeeper and not p.on_bench:
+			red_def = p
+			break
+	red_def.global_position = player.global_position + Vector3(0.05, 0.0, 0.4)
+	red_def.global_position.y = red_def.start_position.y
+	# High approach into the head upgrades touch → hit.
+	red_def.velocity = Vector3(0.0, 0.0, -4.5)
+	red_def.match_frozen = true
+	red_def.ai_enabled = false
+	if not ball.try_pickup(player):
+		push_error("Smoke Wave4: head-hit pickup failed")
+		get_tree().quit(1)
+		return
+	player.has_ball = true
+	match_node.rules.on_pickup(player)
+	match_node.rules.set_windup(true, true)
+	var red_sev := match_node.rules._head_contact_severity(player, red_def)
+	if red_sev != "hit":
+		push_error("Smoke Wave4: staged violent head contact should be hit severity, got %s" % red_sev)
+		get_tree().quit(1)
+		return
+	var red_codes: Array = []
+	var red_msgs: Array = []
+	var red_cb := func(code: String, msg: String, _award: int, _spot: Vector3) -> void:
+		red_codes.append(code)
+		red_msgs.append(msg)
+	match_node.rules.rule_violation.connect(red_cb)
+	var red_hit := false
+	for _i in range(8):
+		red_hit = match_node.rules.tick(0.02, ball, match_node._all_players())
+		if red_hit:
+			break
+	match_node.rules.rule_violation.disconnect(red_cb)
+	match_node.rules.set_windup(false)
+	var red_msg := str(red_msgs[0]) if not red_msgs.is_empty() else ""
+	print(
+		"Smoke Wave4 head-hit hit=", red_hit, " codes=", red_codes,
+		" msg=", red_msg, " sev=", red_sev
+	)
+	if not red_hit or not ("foul" in red_codes or "seven_m" in red_codes):
+		push_error("Smoke Wave4: head hit should whistle foul/7m")
+		get_tree().quit(1)
+		return
+	if not red_msg.to_lower().contains("red") and not red_msg.to_lower().contains("head"):
+		push_error("Smoke Wave4: head hit reason should mention red/head")
+		get_tree().quit(1)
+		return
+	await get_tree().create_timer(MatchController.RESTART_FREEZE + 0.35).timeout
+	if not red_def.disqualified or not red_def.excluded:
+		push_error("Smoke Wave4: head hit should DQ fouler")
+		get_tree().quit(1)
+		return
+	# DQ must not expire like a 2-min exclusion.
+	red_def.exclusion_remaining = 0.05
+	for _k in range(8):
+		match_node._tick_exclusions(0.02)
+	if not red_def.disqualified or not red_def.excluded:
+		push_error("Smoke Wave4: red card must not return to court")
+		get_tree().quit(1)
+		return
+	print("Smoke Wave4 head-hit red OK")
+
+	# R3.11: 7 m ready limit → goal throw to defense (approx).
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	for p in match_node._all_players():
+		if p.disqualified:
+			continue
+		p.excluded = false
+		p.exclusion_remaining = 0.0
+	player = match_node._first_outfield(match_node._home_players)
+	var w4_seven_spot := Court.seven_meter_spot(1)
+	match_node._place_set_piece("seven_m", 0, w4_seven_spot, player)
+	match_node._give_ball_to(player)
+	match_node.rules.on_pickup(player)
+	match_node._seven_m_live = true
+	match_node._seven_m_timer = HandballRules.SEVEN_M_READY_LIMIT_S - 0.05
+	match_node._seven_m_award_team = 0
+	match_node.match_state = MatchController.MatchState.LIVE
+	var w4_seven_to_codes: Array = []
+	var w4_seven_to_cb := func(code: String, _msg: String, _award: int, _spot: Vector3) -> void:
+		w4_seven_to_codes.append(code)
+	match_node.rules.rule_violation.connect(w4_seven_to_cb)
+	for _i in range(6):
+		match_node._tick_seven_m_ready(0.05)
+		if not w4_seven_to_codes.is_empty():
+			break
+	match_node.rules.rule_violation.disconnect(w4_seven_to_cb)
+	print("Smoke Wave4 7m ready codes=", w4_seven_to_codes)
+	if not ("goal_throw" in w4_seven_to_codes):
+		push_error("Smoke Wave4: 7 m ready timeout should award goal throw")
+		get_tree().quit(1)
+		return
+	await get_tree().create_timer(MatchController.RESTART_FREEZE + 0.35).timeout
+	print("Smoke Wave4 7m ready limit OK")
+
+	# R3.4 / R3.9 / R3.12 sanity: 6 m / passive / double-dribble still healthy.
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	player = match_node._first_outfield(match_node._home_players)
+	player.disqualified = false
+	player.excluded = false
+	player.global_position = Vector3(0.0, player.start_position.y, 16.5)
+	player.velocity = Vector3.ZERO
+	if not ball.try_pickup(player):
+		push_error("Smoke Wave4: 6m sanity pickup failed")
+		get_tree().quit(1)
+		return
+	player.has_ball = true
+	match_node.rules.on_pickup(player)
+	var ga_hit := false
+	for _i in range(int(HandballRules.GOAL_AREA_GRACE_S / 0.05) + 6):
+		ga_hit = match_node.rules.tick(0.05, ball, match_node._all_players())
+		if ga_hit:
+			break
+	if not ga_hit:
+		push_error("Smoke Wave4: grounded 6 m entry should still free-throw")
+		get_tree().quit(1)
+		return
+	await get_tree().create_timer(MatchController.RESTART_FREEZE + 0.3).timeout
+	print("Smoke Wave4 6m sanity OK")
+
+	print("Smoke Wave4 rules completion OK")
 	print("SMOKE_OK")
 	get_tree().quit(0)
 

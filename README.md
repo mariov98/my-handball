@@ -121,8 +121,28 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 ### Intentional simplifications (Phase B)
 
 - Continuous bounce without true palm contact (**approx**).
-- No AI auto-dribble yet (Away still passes / shoots under step pressure).
-- No 7 m / foul ladder in this slice (passive remount is Phase C).
+- Soft **auto-dribble assist** (Wave 4) can start a legal bounce near the 3 s / last-step limit; HUD shows `Hold · AUTO`. Never forces a double-dribble after gather.
+- No 7 m / foul ladder in this slice (passive remount is Phase C; foul ladder is Wave 4).
+
+## Wave 4 — rules helpers & foul ladder
+
+Audits Phase B–D rules up to the requirements checklist bar. Feel-accurate first; labeled **approx** vs **strict** below.
+
+| Feature | How it feels in play | Approx / strict |
+|---------|----------------------|-----------------|
+| **Hold / step helpers** | Near **~2.55 s** hold or **last step**, soft auto-start dribble if legal. HUD `Hold · AUTO` (still readable). Pass / shoot / takeover (hold **V** then release) ends it. | **approx** soft assist |
+| **3 m wall** | Free-throw wall gap ≥ ~**3.2 m**; throw-in / goal-throw opponents held ≥ ~**3 m**. | **approx** |
+| **Head/neck touch → 2′** | Contact vs carrier **HeadRegion** during windup → **2 min** exclusion + FT (reason text). | **approx** (volume + height) |
+| **Head hit → red** | Faster approach / airborne fouler into head → **RED** DQ for the match (roster hole). | **approx** severity |
+| **Push from behind → 2′** | Strict behind heuristic (front defense stays clean) → **2 min** + FT. | **approx** |
+| **Clear chance → 7 m** | Airborne + behind/side ≤~8 m; grounded behind ≤~7 m; illegal crease defense during shot windup. | **heuristic** |
+| **FT / 9 m** | Deep fouls snap to the **9 m** line; wall still forms outside. | **approx** |
+| **7 m set piece** | Taker on mark; GK on 4 m; ~**5 s** ready limit → goal throw to defense if stalled. | **approx** ready timer |
+| **HUD** | Exclusion clocks (`2′ Name Ns`), `RED Name`, `7m Ns` on the rules line. | — |
+
+### Still healthy after Wave 4
+
+6 m crease, passive (lite), OOB throw-in / goal throw, double-dribble lite — unchanged paths, smoke-covered.
 
 ## Phase C — passive play v2 (pass-aware)
 
@@ -255,14 +275,14 @@ These are **handball-informed approximations** for a playable prototype — reco
 | Rule | How it feels in play |
 |------|----------------------|
 | **Steps / traveling** | Discrete foot-plants while moving with the ball (~1.8 m gait). Catch gets a **reception zero** (first plant free). Stop / slow = **pivot** (gait pauses; taken steps stay). HUD ticks **Steps n/3** each plant; at 3 a **Last step** warning; a 4th plant → **TRAVELING** free throw. **Jump-shot** (airborne) and **dribbling** do not add steps. Gathering a dribble resets steps. |
-| **3-second hold / dribble** | Hold ≤ **3 s** without dribble / pass / shot → free throw. Hold **V** / **R3** to bounce (pauses the clock). Catch the dribble → new 3 s + steps; a second stream after gather → **double dribble**. |
+| **3-second hold / dribble** | Hold ≤ **3 s** without dribble / pass / shot → free throw. Hold **V** / **R3** to bounce (pauses the clock). Catch the dribble → new 3 s + steps; a second stream after gather → **double dribble**. Wave 4 soft assist may auto-start a legal dribble near the limit (`Hold · AUTO`). |
 | **Passive play (lite)** | **IHF-inspired hybrid (Phase C):** stall without progress ~**7 s** → **Passive (lite)** warn. After warn, same-team receives count; **5th receive** without a shot → free throw. Meaningful progress (~1.5 m closer) resets/delays the *warn* only. Shot attempt clears; GK possession exempt. |
 | **Out of bounds** | Soft sideline / end-line bounds inside the walls. Sideline → **throw-in** for the other team. End line outside the goal mouth: attack last touch → **goal throw** (defending GK); defense last touch → corner-style **throw-in**. |
 | **Goal area (6 m)** | IHF stadium shape (3 m straight + quarter-circles at the posts) for collision and painted lines; dashed **9 m** free-throw arcs; **7 m** marks; center line + circle. Outfield players may not stand in either crease; **airborne attackers** can enter for a jump shot. Grounded illegal presence (brief grace) → free throw. Away AI steers outside both arcs. |
-| **Restarts** | Throw-in / goal throw / free throw (traveling, passive, 6 m, foul) / **7 m** with short freeze + banner + set-piece placement. **Kickoff after goals** (and period starts) from Phase 1 is unchanged in timing. |
-| **Contact / 7 m (Phase D)** | Defender reach-in during shoot/pass windup near 6–9 m → foul FT; clear-chance heuristic → 7 m (+ optional 2-min exclusion). |
+| **Restarts** | Throw-in / goal throw / free throw (traveling, passive, 6 m, foul) / **7 m** with short freeze + banner + set-piece placement. **Kickoff after goals** (and period starts) from Phase 1 is unchanged in timing. Deep FTs snap to **9 m**; throw-in / FT walls keep ~**3 m** gap. |
+| **Contact / foul ladder (Phase D + Wave 4)** | Windup contact near 6–9 m → FT; head/neck touch → 2′; head hit → red; push from behind → 2′; clear-chance heuristic → 7 m (+ exclusion). |
 
-HUD shows a large glanceable **Steps n/3** (color + pulse per plant), a **Hold** pip/timer beside it, and a **Passive (lite)** line (timer pre-warn, receive count after). Traveling / 3 s / double dribble / foul / 7 m use red free-throw banners.
+HUD shows a large glanceable **Steps n/3** (color + pulse per plant), a **Hold** pip/timer beside it (`DRIBBLE` / `AUTO`), a **Passive (lite)** line, and exclusion / red / 7 m ready clocks. Traveling / 3 s / double dribble / foul / 7 m use red free-throw banners.
 
 ## Phase 1 — mini match (still in)
 
@@ -376,6 +396,15 @@ resources/        materials / physics (reserved)
 - [ ] Clear-chance 7 m → fouler sits on sideline bench briefly (`ai_enabled` off), then returns
 - [ ] Court shows 7 m cross marks at both ends
 
+### Wave 4 rules helpers & foul ladder
+- [ ] Stand still near 3 s without pressing V → `Hold · AUTO` soft dribble; no whistle; after gather, second dribble → DOUBLE DRIBBLE
+- [ ] Take 3 steps → soft auto-dribble before traveling
+- [ ] Contact to head/neck (light) → **2 min** + FT; HUD exclusion clock
+- [ ] Hard/airborne head contact → **RED** banner; fouler stays off
+- [ ] Push from behind (not front defense) → **2 min** + FT
+- [ ] Deep foul spot → restart on / outside **9 m**; throw-in defenders ≥ ~3 m off
+- [ ] Stall on 7 m mark ~5 s → goal throw to defense
+
 ### Phase E shapes
 - [ ] **1** toggles attack Wide ↔ Crash; HUD / banner update; Crash tucks CB toward the 6 m line
 - [ ] **2** toggles defense Flat ↔ OneUp; OneUp steps CB up toward ~9 m
@@ -389,7 +418,7 @@ resources/        materials / physics (reserved)
 godot --path . -- --smoke
 ```
 
-Expect `SMOKE_OK` after Phase 1–5 + Phase A–E checks (pass, dribble/hold, passive, fouls/7 m, shapes).
+Expect `SMOKE_OK` after Phase 1–5 + Phase A–G + Waves 0–4 checks (pass, dribble/hold helpers, passive, foul ladder / 7 m, shapes).
 
 ## License
 
