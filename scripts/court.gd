@@ -97,15 +97,43 @@ static func in_goal_area(pos: Vector3, defending_team_id: int) -> bool:
 static func eject_from_goal_area(pos: Vector3, defending_team_id: int, margin: float = 0.35) -> Vector3:
 	if not in_goal_area(pos, defending_team_id):
 		return pos
+	return _eject_from_stadium_arc(pos, defending_team_id, GOAL_AREA_RADIUS, margin)
+
+
+## True if `pos` is inside the defending team's 9 m free-throw area (same stadium shape).
+static func in_nine_meter_area(pos: Vector3, defending_team_id: int) -> bool:
+	var end_z := -HALF_LENGTH if defending_team_id == 0 else HALF_LENGTH
+	var toward_mid := 1.0 if defending_team_id == 0 else -1.0
+	if (pos.z - end_z) * toward_mid < 0.0:
+		return false
+	var half_goal := GOAL_WIDTH * 0.5
+	var nearest_x := clampf(pos.x, -half_goal, half_goal)
+	var dx := pos.x - nearest_x
+	var dz := pos.z - end_z
+	return dx * dx + dz * dz <= NINE_METER_M * NINE_METER_M
+
+
+## Push a spot onto / outside the 9 m line (deep free throws snap here — Wave 4).
+static func eject_from_nine_meter(pos: Vector3, defending_team_id: int, margin: float = 0.15) -> Vector3:
+	if not in_nine_meter_area(pos, defending_team_id):
+		return pos
+	return _eject_from_stadium_arc(pos, defending_team_id, NINE_METER_M, margin)
+
+
+static func _eject_from_stadium_arc(
+	pos: Vector3,
+	defending_team_id: int,
+	radius: float,
+	margin: float
+) -> Vector3:
 	var end_z := -HALF_LENGTH if defending_team_id == 0 else HALF_LENGTH
 	var half_goal := GOAL_WIDTH * 0.5
 	var nearest_x := clampf(pos.x, -half_goal, half_goal)
 	var from := Vector3(pos.x - nearest_x, 0.0, pos.z - end_z)
 	if from.length_squared() < 0.0001:
-		# Dead center of goal line — push toward midfield.
 		var toward_mid := 1.0 if defending_team_id == 0 else -1.0
-		return Vector3(pos.x, pos.y, end_z + toward_mid * (GOAL_AREA_RADIUS + margin))
-	var pushed := Vector3(nearest_x, 0.0, end_z) + from.normalized() * (GOAL_AREA_RADIUS + margin)
+		return Vector3(pos.x, pos.y, end_z + toward_mid * (radius + margin))
+	var pushed := Vector3(nearest_x, 0.0, end_z) + from.normalized() * (radius + margin)
 	pushed.y = pos.y
 	pushed.x = clampf(pushed.x, -HALF_WIDTH + 0.5, HALF_WIDTH - 0.5)
 	pushed.z = clampf(pushed.z, -HALF_LENGTH + 0.5, HALF_LENGTH - 0.5)

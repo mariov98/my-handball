@@ -8,6 +8,8 @@ const COLOR_STEPS_TRAVEL := Color(1.0, 0.35, 0.28, 1.0)
 const COLOR_HOLD_IDLE := Color(0.75, 0.88, 0.95, 0.8)
 const COLOR_HOLD_WARN := Color(1.0, 0.72, 0.28, 1.0)
 const COLOR_HOLD_DRIBBLE := Color(0.55, 0.95, 0.7, 1.0)
+const COLOR_HOLD_AUTO := Color(0.45, 0.9, 1.0, 1.0)
+const COLOR_BANNER_RED := Color(1.0, 0.28, 0.28, 1.0)
 const COLOR_BANNER_DEFAULT := Color(0.95, 0.98, 1.0, 1.0)
 const COLOR_BANNER_WARN := Color(1.0, 0.86, 0.35, 1.0)
 const COLOR_BANNER_TRAVEL := Color(1.0, 0.42, 0.32, 1.0)
@@ -216,13 +218,14 @@ func set_steps_status(steps: int, max_steps: int, warned: bool, visible_now: boo
 		_pulse_steps()
 
 
-## Small 3 s hold pip beside Steps. Shows remaining time, or DRIBBLE while bouncing.
+## Small 3 s hold pip beside Steps. Shows remaining time, or DRIBBLE/AUTO while bouncing.
 func set_hold_status(
 	remaining: float,
 	max_s: float,
 	visible_now: bool,
 	dribbling: bool = false,
-	warned: bool = false
+	warned: bool = false,
+	auto_assist: bool = false
 ) -> void:
 	_ensure_hold_label()
 	if hold_label == null:
@@ -232,8 +235,12 @@ func set_hold_status(
 		return
 	hold_label.visible = true
 	if dribbling:
-		hold_label.text = "Hold · DRIBBLE"
-		hold_label.add_theme_color_override("font_color", COLOR_HOLD_DRIBBLE)
+		if auto_assist:
+			hold_label.text = "Hold · AUTO"
+			hold_label.add_theme_color_override("font_color", COLOR_HOLD_AUTO)
+		else:
+			hold_label.text = "Hold · DRIBBLE"
+			hold_label.add_theme_color_override("font_color", COLOR_HOLD_DRIBBLE)
 		return
 	var rem := clampf(remaining, 0.0, max_s)
 	# Compact pip: filled blocks drain as the 3 s clock burns.
@@ -370,9 +377,23 @@ func flash_rule(message: String, code: String = "") -> void:
 		"passive":
 			color = COLOR_BANNER_WARN
 			hold = 0.9
+		"exclusion":
+			color = COLOR_BANNER_WARN
+			hold = 1.0
+		"red_card":
+			color = COLOR_BANNER_RED
+			hold = 1.2
+			if message.is_empty():
+				message = "RED — head contact"
 		_:
 			if message.to_lower().begins_with("traveling"):
 				color = COLOR_BANNER_TRAVEL
+				hold = 1.0
+			elif message.to_lower().begins_with("red"):
+				color = COLOR_BANNER_RED
+				hold = 1.2
+			elif message.to_lower().begins_with("2 min"):
+				color = COLOR_BANNER_WARN
 				hold = 1.0
 	_flash_center(banner_label, message, hold, 0.35, color)
 

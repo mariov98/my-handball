@@ -32,6 +32,8 @@ const PASS_IMPULSE_MAX := 13.0
 @export var exclusion_seconds: float = 120.0
 ## When true, clear-chance → 7 m also benches the fouler for exclusion_seconds.
 @export var exclusion_on_seven_m: bool = true
+## Wave 4: soft auto-dribble near 3 s / last step when legal (never double-dribble).
+@export var auto_dribble_assist: bool = true
 
 var aim_mode: AimMode = AimMode.FACE
 var controlled_player: Player = null
@@ -63,6 +65,10 @@ var _charge_held_s: float = 0.0
 ## After a pass steals the hold, ignore shoot until the shoot action is released.
 var _pass_suppress_shoot: bool = false
 var _block_trace: BlockTrace
+## Wave 4: live 7 m ready window (taker must shoot before limit).
+var _seven_m_live: bool = false
+var _seven_m_timer: float = 0.0
+var _seven_m_award_team: int = 0
 
 @onready var _home_root: Node = get_node(home_team_path)
 @onready var _away_root: Node = get_node(away_team_path)
@@ -359,6 +365,7 @@ func _physics_process(delta: float) -> void:
 	if hud and hud.has_method("set_clock"):
 		hud.set_clock(clock_remaining)
 	_tick_exclusions(delta)
+	_tick_seven_m_ready(delta)
 	_update_away_shapes()
 	_update_rules_hud()
 	_update_shot_hud()
@@ -367,6 +374,7 @@ func _physics_process(delta: float) -> void:
 	rules.set_windup(_charging and controlled_player != null and controlled_player.has_ball, true)
 	if rules.tick(delta, ball, _all_players()):
 		rules.set_windup(false)
+		_clear_seven_m_ready()
 		return
 	if clock_remaining <= 0.0:
 		_on_period_expired()
@@ -409,10 +417,12 @@ func _aim_direction_for(p: Player) -> Vector3:
 
 
 ## Hold `dribble` (V / R3) while possessing to bounce; release gathers (new steps + 3 s).
+## Wave 4: soft auto-start near 3 s / last step when legal (HUD still readable).
 func _update_dribble_input() -> void:
 	if match_state != MatchState.LIVE:
 		_end_controlled_dribble()
 		return
+	_try_soft_auto_dribble()
 	var p := controlled_player
 	if p == null or not p.has_ball or p.is_goalkeeper or ball == null or ball.carrier != p:
 		_end_controlled_dribble()
@@ -427,8 +437,31 @@ func _update_dribble_input() -> void:
 			if rules.try_begin_dribble(p):
 				p.dribbling = true
 			# Double-dribble violation is handled by rules → restart.
+		elif rules.last_dribble_was_assist:
+			# Player takes over the soft-assist stream; release will gather.
+			rules.last_dribble_was_assist = false
 	elif p.dribbling:
-		_end_controlled_dribble()
+		if rules.last_dribble_was_assist:
+			# Soft assist keeps bouncing until pass/shot or player takeover.
+			pass
+		else:
+			_end_controlled_dribble()
+
+
+## Soft assist for any live carrier (human or AI) near hold/step limits.
+func _try_soft_auto_dribble() -> void:
+	if not auto_dribble_assist or ball == null:
+		return
+	var carrier: Player = ball.carrier
+	if carrier == null or carrier.is_goalkeeper or carrier.dribbling:
+		return
+	if _charging and carrier == controlled_player:
+		return
+	if carrier.has_method("is_faking") and carrier.is_faking():
+		return
+	if rules.try_auto_dribble_assist(carrier):
+		carrier.dribbling = true
+		_update_rules_hud()
 
 
 func _end_controlled_dribble() -> void:
@@ -1095,15 +1128,22 @@ func _on_rule_violation(code: String, message: String, awarding_team_id: int, sp
 	print("RULE [%s]: %s → team %d @ %s" % [code, message, awarding_team_id, str(spot)])
 	if hud and hud.has_method("flash_rule"):
 		hud.flash_rule(message, code)
-	# Phase D: optional 2-min exclusion on clear-chance 7 m.
+	_clear_seven_m_ready()
+	# Wave 4 foul ladder: red → DQ; else 2-min exclusion on head touch / behind / 7 m.
 	if (
-		code == "seven_m"
-		and exclusion_on_seven_m
-		and rules.last_foul_warrants_exclusion
+		rules.last_foul_warrants_red
 		and rules.last_fouler != null
 		and is_instance_valid(rules.last_fouler)
 	):
-		_begin_exclusion(rules.last_fouler)
+		_begin_red_card(rules.last_fouler)
+	elif (
+		rules.last_foul_warrants_exclusion
+		and rules.last_fouler != null
+		and is_instance_valid(rules.last_fouler)
+	):
+		# seven_m still gated by exclusion_on_seven_m; other codes always exclude.
+		if code != "seven_m" or exclusion_on_seven_m:
+			_begin_exclusion(rules.last_fouler)
 	# Fire-and-forget async restart (same pattern as goal kickoff).
 	_run_rule_restart(code, message, awarding_team_id, spot)
 
@@ -1169,6 +1209,13 @@ func _run_rule_restart(code: String, _message: String, awarding_team_id: int, sp
 	rules.end_lockout()
 	_set_players_frozen(false)
 	match_state = MatchState.LIVE
+	# Wave 4 / R3.11: arm 7 m ready window once the set piece goes live.
+	if Formations.is_seven_meter_code(code):
+		_seven_m_live = true
+		_seven_m_timer = 0.0
+		_seven_m_award_team = awarding_team_id
+	else:
+		_clear_seven_m_ready()
 	_update_rules_hud()
 
 
@@ -1281,7 +1328,7 @@ func _nearest_outfield(team_id: int, spot: Vector3) -> Player:
 
 ## Phase D: park fouler on the bench with AI off for exclusion_seconds of match clock.
 func _begin_exclusion(fouler: Player) -> void:
-	if fouler == null or fouler.is_goalkeeper:
+	if fouler == null or fouler.is_goalkeeper or fouler.disqualified:
 		return
 	fouler.excluded = true
 	fouler.exclusion_remaining = exclusion_seconds
@@ -1308,22 +1355,50 @@ func _begin_exclusion(fouler: Player) -> void:
 		hud.flash_rule("2 min exclusion", "exclusion")
 
 
+## Wave 4 / R3.6: violent head strike → red card (DQ for the match, roster hole).
+func _begin_red_card(fouler: Player) -> void:
+	if fouler == null or fouler.is_goalkeeper:
+		return
+	fouler.disqualified = true
+	fouler.excluded = true
+	fouler.exclusion_remaining = 9999.0
+	fouler.ai_enabled = false
+	fouler.controlled = false
+	fouler.has_ball = false
+	fouler.dribbling = false
+	fouler.velocity = Vector3.ZERO
+	var excl_slot := 2 + maxi(0, fouler.player_index % 4)
+	fouler.global_position = Court.bench_marker(fouler.team_id, excl_slot)
+	if controlled_player == fouler:
+		var fallback := _nearest_outfield(fouler.team_id, fouler.global_position)
+		if fallback == null:
+			fallback = _first_outfield(_on_court_players(fouler.team_id))
+		if fallback:
+			_set_controlled(fallback)
+	_configure_ai()
+	print("RED CARD: %s disqualified (head contact)" % fouler.name)
+	if hud and hud.has_method("flash_rule"):
+		hud.flash_rule("RED — head contact", "red_card")
+
+
 func _tick_exclusions(delta: float) -> void:
 	for p in _all_players():
 		if not p.excluded:
 			continue
-		p.exclusion_remaining = maxf(0.0, p.exclusion_remaining - delta)
 		# Keep parked on the sideline while the clock runs.
 		var excl_slot := 2 + maxi(0, p.player_index % 4)
 		p.global_position = Court.bench_marker(p.team_id, excl_slot)
 		p.velocity = Vector3.ZERO
 		p.ai_enabled = false
+		if p.disqualified:
+			continue
+		p.exclusion_remaining = maxf(0.0, p.exclusion_remaining - delta)
 		if p.exclusion_remaining <= 0.0:
 			_end_exclusion(p)
 
 
 func _end_exclusion(player: Player) -> void:
-	if player == null:
+	if player == null or player.disqualified:
 		return
 	player.excluded = false
 	player.exclusion_remaining = 0.0
@@ -1344,6 +1419,40 @@ func _end_exclusion(player: Player) -> void:
 	print("EXCLUSION ended: %s returns" % player.name)
 
 
+func _clear_seven_m_ready() -> void:
+	_seven_m_live = false
+	_seven_m_timer = 0.0
+
+
+## Wave 4 / R3.11: approx ready limit on 7 m — stall → goal throw to defense.
+func _tick_seven_m_ready(delta: float) -> void:
+	if not _seven_m_live or match_state != MatchState.LIVE:
+		return
+	_seven_m_timer += delta
+	# Shot / pass / lost ball clears the window.
+	if ball == null or ball.carrier == null or ball.carrier.team_id != _seven_m_award_team:
+		_clear_seven_m_ready()
+		return
+	if _charging:
+		return
+	if _seven_m_timer < HandballRules.SEVEN_M_READY_LIMIT_S:
+		return
+	_clear_seven_m_ready()
+	var defend := 1 - _seven_m_award_team
+	var spot := Vector3(0.0, 0.0, -16.8 if defend == 0 else 16.8)
+	# Clear contact-foul warrants so the restart isn't treated as a personal foul.
+	rules.last_fouler = null
+	rules.last_foul_warrants_exclusion = false
+	rules.last_foul_warrants_red = false
+	rules.last_foul_kind = ""
+	rules.rule_violation.emit(
+		"goal_throw",
+		"7 m — time expired",
+		defend,
+		spot
+	)
+
+
 func _update_rules_hud() -> void:
 	if hud == null:
 		return
@@ -1360,15 +1469,18 @@ func _update_rules_hud() -> void:
 		)
 	if hud.has_method("set_hold_status"):
 		if carrying:
+			var drib := rules.is_dribbling() or (ball.carrier != null and ball.carrier.dribbling)
+			# Wave 4: AUTO pip when soft assist started the bounce stream.
 			hud.set_hold_status(
 				rules.get_hold_remaining(),
 				HandballRules.HOLD_MAX_S,
 				true,
-				rules.is_dribbling() or (ball.carrier != null and ball.carrier.dribbling),
-				rules.is_hold_warned()
+				drib,
+				rules.is_hold_warned(),
+				rules.last_dribble_was_assist and drib
 			)
 		else:
-			hud.set_hold_status(0.0, HandballRules.HOLD_MAX_S, false, false, false)
+			hud.set_hold_status(0.0, HandballRules.HOLD_MAX_S, false, false, false, false)
 	if not hud.has_method("set_rules_status"):
 		return
 	# Passive (lite) stays readable during a pass flight after the warn.
@@ -1380,6 +1492,15 @@ func _update_rules_hud() -> void:
 		)
 	elif carrying and rules.get_passive_timer() > 3.0:
 		parts.append("Passive (lite) %.0fs" % rules.get_passive_timer())
+	# Wave 4: exclusion / red clocks (R3.5–R3.7 HUD).
+	for p in _all_players():
+		if p.disqualified:
+			parts.append("RED %s" % p.name)
+		elif p.excluded and p.exclusion_remaining > 0.0 and p.exclusion_remaining < 9000.0:
+			parts.append("2′ %s %.0fs" % [p.name, p.exclusion_remaining])
+	if _seven_m_live:
+		var left := maxf(0.0, HandballRules.SEVEN_M_READY_LIMIT_S - _seven_m_timer)
+		parts.append("7m %.0fs" % left)
 	if parts.is_empty() and not carrying:
 		hud.set_rules_status("")
 		return

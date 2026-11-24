@@ -18,7 +18,8 @@ const HALFBACK_DEPTH_M := 11.0 ## LB/RB depth (slightly ahead of CB).
 const PIVOT_DEPTH_M := 7.2 ## Line player just outside 6 m.
 const DEFENSE_LINE_M := 7.6 ## Flat defenders stand outside own 6 m.
 const ONE_UP_DEPTH_M := 9.4 ## OneUp CB steps toward ~9 m on the ball.
-const WALL_GAP_M := 3.2 ## Min distance defenders keep from free-throw taker.
+const WALL_GAP_M := 3.2 ## Min distance defenders keep from free-throw taker (~3 m / R3.1).
+const RESTART_GAP_M := 3.0 ## Opponents held back on throw-in / goal-throw (Wave 4).
 ## Phase G: court roles use player_index 0–6 (GK + 6 outfield).
 const COURT_OUTFIELD_COUNT := 6
 
@@ -359,7 +360,10 @@ static func kickoff_slot(player: Player, kickoff_team_id: int) -> Vector3:
 
 ## Set-piece placement for Phase 2 restart codes.
 static func is_free_throw_code(code: String) -> bool:
-	return code in ["traveling", "passive", "goal_area", "free_throw", "hold", "double_dribble", "foul"]
+	return code in [
+		"traveling", "passive", "goal_area", "free_throw",
+		"hold", "double_dribble", "foul"
+	]
 
 
 static func is_seven_meter_code(code: String) -> bool:
@@ -519,19 +523,20 @@ static func _goal_throw_outfield(
 			_:
 				slot = Vector3(0.0, 0.0, -5.0 * face)
 	else:
+		# Defending outfield: stay ~3 m+ from the goal-throw taker / crease (R3.1).
 		match role:
 			Role.LEFT_WING:
-				slot = Vector3(-5.5, 0.0, 5.0 * face)
+				slot = Vector3(-6.5, 0.0, 6.5 * face)
 			Role.RIGHT_WING:
-				slot = Vector3(5.5, 0.0, 5.0 * face)
+				slot = Vector3(6.5, 0.0, 6.5 * face)
 			Role.LEFT_BACK:
-				slot = Vector3(-3.0, 0.0, 4.0 * face)
+				slot = Vector3(-4.0, 0.0, 5.5 * face)
 			Role.RIGHT_BACK:
-				slot = Vector3(3.0, 0.0, 4.0 * face)
+				slot = Vector3(4.0, 0.0, 5.5 * face)
 			Role.PIVOT:
-				slot = Vector3(0.0, 0.0, 2.5 * face)
+				slot = Vector3(0.0, 0.0, 4.5 * face)
 			_:
-				slot = Vector3(0.0, 0.0, 3.5 * face)
+				slot = Vector3(0.0, 0.0, 5.0 * face)
 	return _legalize_outfield(slot, player.team_id)
 
 
@@ -568,20 +573,36 @@ static func _throw_in_slot(
 			_:
 				slot = Vector3(side * 2.0, 0.0, spot.z + face * 1.0)
 	else:
+		# Opponents held ~3 m off the throw-in spot (R3.1 wall consistency).
 		match role:
 			Role.LEFT_WING:
-				slot = Vector3(side * 4.5, 0.0, spot.z - face * 1.5)
+				slot = Vector3(side * 5.5, 0.0, spot.z - face * 2.5)
 			Role.RIGHT_WING:
-				slot = Vector3(side * 2.5, 0.0, spot.z + face * 2.0)
+				slot = Vector3(side * 3.5, 0.0, spot.z + face * 3.0)
 			Role.LEFT_BACK:
-				slot = Vector3(side * 3.0, 0.0, spot.z)
+				slot = Vector3(side * 4.2, 0.0, spot.z - face * 0.5)
 			Role.RIGHT_BACK:
-				slot = Vector3(side * 1.8, 0.0, spot.z + face * 1.0)
+				slot = Vector3(side * 3.2, 0.0, spot.z + face * 1.5)
 			Role.PIVOT:
-				slot = Vector3(side * 1.0, 0.0, spot.z - face * 0.5)
+				slot = Vector3(side * 2.8, 0.0, spot.z - face * 1.5)
 			_:
-				slot = Vector3(side * 1.5, 0.0, spot.z)
+				slot = Vector3(side * 3.5, 0.0, spot.z + face * 0.5)
+		slot = _hold_back_from_spot(slot, spot, RESTART_GAP_M)
 	return _legalize_outfield(slot, player.team_id)
+
+
+## Push `slot` away from `spot` until planar gap ≥ `min_gap` (3 m wall / restart).
+static func _hold_back_from_spot(slot: Vector3, spot: Vector3, min_gap: float) -> Vector3:
+	var delta := Vector3(slot.x - spot.x, 0.0, slot.z - spot.z)
+	var d := delta.length()
+	if d >= min_gap:
+		return slot
+	if d < 0.001:
+		# Degenerate — push inward from sideline / toward midfield.
+		var inward := -1.0 if spot.x > 0.0 else 1.0
+		return Vector3(spot.x + inward * min_gap, slot.y, spot.z)
+	var pushed := Vector3(spot.x, slot.y, spot.z) + delta.normalized() * min_gap
+	return pushed
 
 
 static func _free_throw_attack_slot(
@@ -647,6 +668,8 @@ static func _free_throw_wall_slot(
 
 	var side := Vector3(-dir.z, 0.0, dir.x)
 	var slot := wall_anchor + side * lateral
+	# Enforce ≥ ~3 m from the taker even after 9 m line blend (R3.1).
+	slot = _hold_back_from_spot(slot, spot, WALL_GAP_M)
 	return _legalize_outfield(slot, player.team_id)
 
 
