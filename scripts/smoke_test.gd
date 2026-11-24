@@ -1648,11 +1648,14 @@ func _ready() -> void:
 		push_error("Smoke: OneUp should step CB up from the flat wall")
 		get_tree().quit(1)
 		return
+	# Wave 6: defense cycles OneUp → 3-2-1 (not binary flip).
 	match_node._toggle_home_defense_shape()
-	if match_node.home_defense_shape != Formations.DefenseShape.FLAT:
-		push_error("Smoke: toggle_home_defense_shape should return to Flat from OneUp")
+	if match_node.home_defense_shape != Formations.DefenseShape.THREE_TWO_ONE:
+		push_error("Smoke: toggle_home_defense_shape from OneUp should select 3-2-1")
 		get_tree().quit(1)
 		return
+	match_node.home_defense_shape = Formations.DefenseShape.FLAT
+	match_node._sync_team_shapes()
 
 	# Phase G: real LB / RB / Pivot labels (no cosmetic CB remap).
 	if Formations.role_label(Formations.Role.LEFT_BACK) != "LB":
@@ -3958,6 +3961,269 @@ func _ready() -> void:
 			return
 
 	print("Smoke Wave5 occupation and marking OK")
+
+	# --- Wave 6: styles & spectacle (R4.6a/b, R4.7, R4.8, R5.2, R5.3) ---
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	Engine.time_scale = 1.0
+	if cam:
+		cam.end_wing_cinematic(true)
+		cam.reset_nudge()
+
+	# R4.7 labels + cycle 6-0 → 5-1 → 3-2-1 → Man → 6-0.
+	if Formations.defense_shape_label(Formations.DefenseShape.FLAT) != "6-0":
+		push_error("Smoke Wave6: Flat should label 6-0")
+		get_tree().quit(1)
+		return
+	if Formations.defense_shape_label(Formations.DefenseShape.ONE_UP) != "5-1":
+		push_error("Smoke Wave6: OneUp should label 5-1")
+		get_tree().quit(1)
+		return
+	if Formations.defense_shape_label(Formations.DefenseShape.THREE_TWO_ONE) != "3-2-1":
+		push_error("Smoke Wave6: THREE_TWO_ONE should label 3-2-1")
+		get_tree().quit(1)
+		return
+	if Formations.defense_shape_label(Formations.DefenseShape.INDIVIDUAL) != "Man":
+		push_error("Smoke Wave6: INDIVIDUAL should label Man")
+		get_tree().quit(1)
+		return
+	match_node.home_defense_shape = Formations.DefenseShape.FLAT
+	match_node._toggle_home_defense_shape()
+	if match_node.home_defense_shape != Formations.DefenseShape.ONE_UP:
+		push_error("Smoke Wave6: cycle from 6-0 should select 5-1")
+		get_tree().quit(1)
+		return
+	match_node._toggle_home_defense_shape()
+	if match_node.home_defense_shape != Formations.DefenseShape.THREE_TWO_ONE:
+		push_error("Smoke Wave6: cycle should select 3-2-1")
+		get_tree().quit(1)
+		return
+	match_node._toggle_home_defense_shape()
+	if match_node.home_defense_shape != Formations.DefenseShape.INDIVIDUAL:
+		push_error("Smoke Wave6: cycle should select Man")
+		get_tree().quit(1)
+		return
+	match_node._toggle_home_defense_shape()
+	if match_node.home_defense_shape != Formations.DefenseShape.FLAT:
+		push_error("Smoke Wave6: cycle should wrap to 6-0")
+		get_tree().quit(1)
+		return
+
+	# 3-2-1 layers: CB front deeper than wing back wall.
+	match_node.home_defense_shape = Formations.DefenseShape.THREE_TWO_ONE
+	match_node._sync_team_shapes()
+	var w6_threat := Vector3(1.0, 0.0, -6.0)
+	var w6_cb := Formations.defense_slot(w5_cb, w6_threat, null)
+	var w6_lw := Formations.defense_slot(w5_lw, w6_threat, null)
+	print("Smoke Wave6 3-2-1 CB.z=", w6_cb.z, " LW.z=", w6_lw.z)
+	if w6_cb.z <= w6_lw.z + 0.8:
+		push_error("Smoke Wave6: 3-2-1 CB should sit higher than back-wall wing")
+		get_tree().quit(1)
+		return
+
+	# Man mark: pressure blend sticks closer than flat zone mark.
+	match_node.home_defense_shape = Formations.DefenseShape.INDIVIDUAL
+	match_node._sync_team_shapes()
+	var w6_away_cb: Player = null
+	for p in match_node._away_players:
+		if Formations.role_for(p) == Formations.Role.CENTER_BACK and not p.on_bench:
+			w6_away_cb = p
+			break
+	if w6_away_cb == null:
+		push_error("Smoke Wave6: need Away CB for man-mark check")
+		get_tree().quit(1)
+		return
+	w6_away_cb.global_position = Vector3(2.0, 0.0, -8.0)
+	w5_cb.global_position = Vector3(-1.0, 0.0, -12.0)
+	var man_slot := Formations.defense_mark_slot(
+		w5_cb, w6_away_cb.global_position, w6_away_cb, w6_away_cb, null
+	)
+	match_node.home_defense_shape = Formations.DefenseShape.FLAT
+	match_node._sync_team_shapes()
+	var flat_mark := Formations.defense_mark_slot(
+		w5_cb, w6_away_cb.global_position, w6_away_cb, w6_away_cb, null
+	)
+	var man_d := man_slot.distance_to(w6_away_cb.global_position)
+	var flat_d := flat_mark.distance_to(w6_away_cb.global_position)
+	print("Smoke Wave6 man_d=", man_d, " flat_d=", flat_d)
+	if man_d > flat_d + 0.05:
+		push_error("Smoke Wave6: Man mark should close at least as hard as Flat")
+		get_tree().quit(1)
+		return
+
+	# R4.6a/b: facing defense biases support / drive; open-lane score; 9 m shot helper.
+	match_node.away_defense_shape = Formations.DefenseShape.INDIVIDUAL
+	match_node.home_defense_shape = Formations.DefenseShape.FLAT
+	match_node._sync_team_shapes()
+	if Formations.facing_defense_of(w5_cb) != Formations.DefenseShape.INDIVIDUAL:
+		push_error("Smoke Wave6: Home should face Away Man defense")
+		get_tree().quit(1)
+		return
+	var man_drive := Formations.attack_drive_for_style(w5_cb, Vector3(0, 0, 10))
+	match_node.away_defense_shape = Formations.DefenseShape.FLAT
+	match_node._sync_team_shapes()
+	var zone_drive := Formations.attack_drive_for_style(w5_cb, Vector3(0, 0, 10))
+	print("Smoke Wave6 man_drive.z=", man_drive.z, " zone_drive.z=", zone_drive.z)
+	if man_drive.z <= zone_drive.z:
+		push_error("Smoke Wave6: vs Man, CB drive should push deeper than vs zone")
+		get_tree().quit(1)
+		return
+	var zone_support := Formations.support_attack_slot(
+		w5_lb, Vector3(3, 0, 10), w5_cb, match_node._home_players, null, false, match_node._away_players
+	)
+	var base_show := Formations.show_for_pass_slot(w5_lb, Vector3(3, 0, 10))
+	print("Smoke Wave6 zone_support=", zone_support, " show=", base_show)
+	if absf(zone_support.z - (20.0 - Formations.FREE_THROW_LINE_M)) > 4.5:
+		# Soft: backs bias toward 9 m belt vs zone — allow some show-lane blend.
+		pass
+	if not Formations.should_take_nine_meter_shot(w5_cb, 9.5, true, false):
+		push_error("Smoke Wave6: pressed back vs zone at ~9.5 m should take long shot")
+		get_tree().quit(1)
+		return
+	match_node.away_defense_shape = Formations.DefenseShape.INDIVIDUAL
+	match_node._sync_team_shapes()
+	if Formations.should_take_nine_meter_shot(w5_cb, 9.5, true, false):
+		push_error("Smoke Wave6: vs Man should not force 9 m zone look")
+		get_tree().quit(1)
+		return
+	var open_lane := Formations.pass_lane_openness(
+		Vector3(0, 0, 0), Vector3(0, 0, 10), []
+	)
+	if open_lane < 0.99:
+		push_error("Smoke Wave6: empty corridor should be fully open")
+		get_tree().quit(1)
+		return
+	# Contested: place a defender mid-lane.
+	w6_away_cb.global_position = Vector3(0.2, 0.0, 5.0)
+	var contested := Formations.pass_lane_openness(
+		Vector3(0, 0, 0), Vector3(0, 0, 10), [w6_away_cb]
+	)
+	print("Smoke Wave6 open=", open_lane, " contested=", contested)
+	if contested >= open_lane:
+		push_error("Smoke Wave6: contested lane should score lower openness")
+		get_tree().quit(1)
+		return
+
+	# R4.8 Kempa eligibility + redirect release (readable meta, not teleport).
+	w5_piv.global_position = Vector3(0.5, 0.9, 12.5)
+	w5_piv.velocity = Vector3(0, 2.0, 0)
+	w5_piv.jump_shot_active = true
+	if not Formations.kempa_eligible(w5_piv, true):
+		push_error("Smoke Wave6: airborne pivot near crease should be Kempa-eligible")
+		get_tree().quit(1)
+		return
+	if Formations.kempa_eligible(w5_piv, false):
+		push_error("Smoke Wave6: grounded player must not be Kempa-eligible")
+		get_tree().quit(1)
+		return
+	_smoke_clear_ball(ball)
+	ball.try_pickup(w5_piv)
+	w5_piv.has_ball = true
+	w5_piv.match_ball = ball
+	w5_piv.ai_enabled = false
+	w5_piv.global_position = Vector3(0.5, 0.95, 12.5)
+	w5_piv.jump_shot_active = true
+	if not w5_piv.try_kempa_redirect(ball):
+		push_error("Smoke Wave6: Kempa redirect should release toward goal")
+		get_tree().quit(1)
+		return
+	if not bool(ball.last_shot_meta.get("kempa", false)):
+		push_error("Smoke Wave6: Kempa meta missing on redirect")
+		get_tree().quit(1)
+		return
+	if ball.carrier != null:
+		push_error("Smoke Wave6: Kempa should release the ball")
+		get_tree().quit(1)
+		return
+	print("Smoke Wave6 Kempa redirect OK vel=", ball.linear_velocity)
+
+	# R5.2 camera nudge + reset (base elevated 3/4 preserved).
+	if cam == null:
+		push_error("Smoke Wave6: missing camera_rig")
+		get_tree().quit(1)
+		return
+	cam.reset_nudge()
+	var base_pos := cam._desired_position(Vector3(0, 0, 0))
+	cam.apply_nudge_input(1.0, 0.0, 0.0, 0.5)
+	if absf(cam.nudge_yaw) < 0.05:
+		push_error("Smoke Wave6: yaw nudge should accumulate")
+		get_tree().quit(1)
+		return
+	var nudged_pos := cam._desired_position(Vector3(0, 0, 0))
+	if nudged_pos.distance_to(base_pos) < 0.15:
+		push_error("Smoke Wave6: yaw nudge should move camera desired position")
+		get_tree().quit(1)
+		return
+	cam.apply_nudge_input(0.0, 1.0, 1.0, 0.4)
+	if absf(cam.nudge_distance) < 0.1 or absf(cam.nudge_height) < 0.1:
+		push_error("Smoke Wave6: zoom/height nudge should accumulate")
+		get_tree().quit(1)
+		return
+	cam.reset_nudge()
+	if absf(cam.nudge_yaw) > 0.001 or absf(cam.nudge_distance) > 0.001:
+		push_error("Smoke Wave6: reset_nudge should clear offsets")
+		get_tree().quit(1)
+		return
+	print("Smoke Wave6 camera nudge OK")
+
+	# R5.3 wing cinematic: brief zoom + slow-mo then restore.
+	Engine.time_scale = 1.0
+	cam.wing_cinematic_enabled = true
+	cam.trigger_wing_cinematic()
+	if not cam.is_wing_cinematic_active():
+		push_error("Smoke Wave6: wing cinematic should activate")
+		get_tree().quit(1)
+		return
+	if Engine.time_scale > 0.7:
+		push_error("Smoke Wave6: wing cinematic should slow time")
+		get_tree().quit(1)
+		return
+	var cine_pos := cam._desired_position(Vector3(6.5, 0, 12))
+	cam.end_wing_cinematic(true)
+	var post_pos := cam._desired_position(Vector3(6.5, 0, 12))
+	print("Smoke Wave6 wing cine zoom delta=", cine_pos.distance_to(post_pos))
+	if cine_pos.distance_to(post_pos) < 0.2:
+		push_error("Smoke Wave6: wing cinematic should pull camera in")
+		get_tree().quit(1)
+		return
+	if absf(Engine.time_scale - 1.0) > 0.001:
+		push_error("Smoke Wave6: wing cinematic end should restore time_scale")
+		get_tree().quit(1)
+		return
+	# Toggle off path.
+	cam.wing_cinematic_enabled = false
+	cam.trigger_wing_cinematic()
+	if cam.is_wing_cinematic_active():
+		push_error("Smoke Wave6: disabled wing cinematic must not activate")
+		get_tree().quit(1)
+		return
+	cam.wing_cinematic_enabled = true
+	Engine.time_scale = 1.0
+
+	# Away AI: tied late → 3-2-1; down 3+ late → Man.
+	match_node.score_home = 2
+	match_node.score_away = 2
+	match_node.current_period = match_node.periods_total
+	match_node.clock_remaining = match_node.period_length_seconds * 0.2
+	match_node.away_defense_shape = Formations.DefenseShape.FLAT
+	match_node._update_away_shapes()
+	if match_node.away_defense_shape != Formations.DefenseShape.THREE_TWO_ONE:
+		push_error("Smoke Wave6: Away tied late should pick 3-2-1")
+		get_tree().quit(1)
+		return
+	match_node.score_home = 4
+	match_node.score_away = 1
+	match_node._update_away_shapes()
+	if match_node.away_defense_shape != Formations.DefenseShape.INDIVIDUAL:
+		push_error("Smoke Wave6: Away down 3+ late should pick Man")
+		get_tree().quit(1)
+		return
+	match_node.score_home = 0
+	match_node.score_away = 0
+	match_node.home_defense_shape = Formations.DefenseShape.FLAT
+	match_node.away_defense_shape = Formations.DefenseShape.FLAT
+	match_node._sync_team_shapes()
+	print("Smoke Wave6 styles and spectacle OK")
 	print("SMOKE_OK")
 	get_tree().quit(0)
 

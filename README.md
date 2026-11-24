@@ -41,7 +41,10 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 | **Switch-to-best** | **R** | X / West |
 | Toggle aim mode | **T** | Y / North |
 | **Toggle attack shape** (Wide ↔ Crash) | **1** | D-pad Up |
-| **Toggle defense shape** (Flat ↔ OneUp) | **2** | D-pad Down |
+| **Toggle defense shape** (6-0 → 5-1 → 3-2-1 → Man) | **2** | D-pad Down |
+| **Camera nudge** (yaw / zoom / height) | **[ ]** · **- =** · **PgUp/PgDn** | Right stick |
+| **Camera reset** | **Home** or **0** | — |
+| **Wing cinematic toggle** | **4** | — |
 | **Sprint** (drains stamina) | Hold **Shift** | Hold **Back** / Select |
 | **Cycle bench** (sub candidate) | **,** (comma) | D-pad Right (dead ball / no ball) |
 | **Confirm sub** (dead ball only) | **.** (period) | **Start** |
@@ -52,13 +55,15 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 
 **Movement** is relative to the **current camera**: W / stick-up walks into the screen along the camera forward projected onto the court. When possession flips and the camera yaws behind the new attack, the same stick direction keeps matching what you see.
 
-**Camera:** behind the team with (or last with) the ball. In the **center corridor** the frame is square with the goal (goal in the middle). When the ball drifts wide the rig adds only a **subtle yaw** about the ball — it does **not** recenter the ball on screen; the goal stays the visual anchor.
+**Camera:** behind the team with (or last with) the ball. In the **center corridor** the frame is square with the goal (goal in the middle). When the ball drifts wide the rig adds only a **subtle yaw** about the ball — it does **not** recenter the ball on screen; the goal stays the visual anchor. **Wave 6:** nudge yaw/zoom/height during play (**[ ]** / **- =** / **PgUp/PgDn**, or right stick); **Home/0** resets. Wing finishes get a brief zoom + slow-mo (**4** toggles off).
 
 **Team control:** While **Home** has the ball, control follows the **carrier** automatically (pickup, catch, GK gather, restart). **Q** still cycles the Home on-court roster (skips bench / exclusions) for off-ball work. **R** jumps to the most useful on-court teammate (nearest to a free ball, open receiver when attacking, best defender when covering). Away possession never forces Away control.
 
-**Shapes (Phase E, full 7):** **1** / D-pad↑ toggles Home **attack** Wide (3-3) ↔ Crash (2-4). **2** / D-pad↓ toggles Home **defense** Flat (6-0) ↔ OneUp (5-1). Roles are real **LW / LB / CB / RB / RW / Pivot**. Away AI picks shapes from score/time. HUD shows `Shape Atk … · Def …`.
+**Shapes (Phase E + Wave 6):** **1** / D-pad↑ toggles Home **attack** Wide (3-3) ↔ Crash (2-4). **2** / D-pad↓ cycles Home **defense** **6-0 → 5-1 → 3-2-1 → Man**. Roles are real **LW / LB / CB / RB / RW / Pivot**. Away AI picks shapes from score/time (incl. 3-2-1 / Man lite). HUD shows `Shape Atk … · Def …`.
 
 **Occupation & marking (Wave 5):** Uncontrolled teammates hold **role-specific** slots (not one chase). Attack keeps wing width and backcourt belt spacing; defense slides **ball-side** while weak-side lanes stay spread. Defenders **mark** the paired threat with pressure toward own goal and **help/cover** cutters/pivot (lite switch/stay). Off-ball: **show-for-pass**, timed **cuts**, pivot **seal/screen** lite, and **clear-out** when crowded.
+
+**Styles & spectacle (Wave 6):** Attack auto-adapts to the facing defense — vs **Man**: open spaces + clear lanes + drive-and-kick; vs **zone**: gaps, ball reversal, backs take ~9 m looks. **Kempa:** airborne catch near the crease redirects toward goal (readable throw, not a teleport).
 
 **Stamina / subs (Phase G):** Hold **Shift** to sprint (drains). Jump and shot also cost stamina; low stamina softens speed and shot accuracy; recovers off-ball (faster on the bench). Substitutions only on whistle / dead ball (kickoff, goal pause, period break, rule restart): **,** cycles the bench candidate, **.** swaps the controlled outfielder with that bench player. HUD shows stamina pips + sub hint.
 

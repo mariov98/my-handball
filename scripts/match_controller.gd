@@ -267,6 +267,27 @@ func _unhandled_input(event: InputEvent) -> void:
 		_toggle_home_defense_shape()
 		get_viewport().set_input_as_handled()
 		return
+	# Wave 6 R5.2: reset camera nudge to elevated 3/4 defaults.
+	if event.is_action_pressed("camera_reset"):
+		if camera_rig:
+			camera_rig.reset_nudge()
+		if hud and hud.has_method("flash_rule"):
+			hud.flash_rule("Camera reset", "shape")
+		get_viewport().set_input_as_handled()
+		return
+	# Wave 6 R5.3: optional toggle for wing-shot cinematic.
+	if event.is_action_pressed("toggle_wing_cine"):
+		if camera_rig:
+			camera_rig.wing_cinematic_enabled = not camera_rig.wing_cinematic_enabled
+			if not camera_rig.wing_cinematic_enabled:
+				camera_rig.end_wing_cinematic(true)
+			if hud and hud.has_method("flash_rule"):
+				hud.flash_rule(
+					"Wing cam %s" % ("ON" if camera_rig.wing_cinematic_enabled else "OFF"),
+					"shape"
+				)
+		get_viewport().set_input_as_handled()
+		return
 	# Phase G: dead-ball substitutions (, cycle bench / . confirm).
 	# Wave 3: D-pad Right / , is pass-fake while LIVE with the ball (else bench cycle).
 	if event.is_action_pressed("cycle_bench"):
@@ -354,6 +375,7 @@ func _unhandled_input(event: InputEvent) -> void:
 
 func _physics_process(delta: float) -> void:
 	_update_camera_attack_side()
+	_update_camera_nudge(delta)
 	_update_shot_charge(delta)
 	_update_dribble_input()
 	_park_bench_players()
@@ -569,11 +591,8 @@ func _toggle_home_attack_shape() -> void:
 
 
 func _toggle_home_defense_shape() -> void:
-	home_defense_shape = (
-		Formations.DefenseShape.ONE_UP
-		if home_defense_shape == Formations.DefenseShape.FLAT
-		else Formations.DefenseShape.FLAT
-	)
+	# Wave 6 R4.7: cycle 6-0 → 5-1 → 3-2-1 → Man → 6-0.
+	home_defense_shape = Formations.next_defense_shape(home_defense_shape)
 	_sync_team_shapes()
 	_update_shapes_hud()
 	if hud and hud.has_method("flash_rule"):
@@ -589,12 +608,15 @@ func _sync_team_shapes() -> void:
 	for p in _home_players:
 		p.attack_shape = home_attack_shape
 		p.defense_shape = home_defense_shape
+		p.facing_defense_shape = away_defense_shape
 	for p in _away_players:
 		p.attack_shape = away_attack_shape
 		p.defense_shape = away_defense_shape
+		p.facing_defense_shape = home_defense_shape
 
 
-## Away AI: simple score/time shape picks (losing → Crash/OneUp; winning → Wide/Flat).
+## Away AI: score/time shape picks (Wave 6 adds 3-2-1 / Man lite).
+## Losing late / down 2+ still picks 5-1 (OneUp) so Phase E smoke stays stable.
 func _update_away_shapes() -> void:
 	var score_diff := score_away - score_home
 	var time_frac := clock_remaining / maxf(period_length_seconds, 1.0)
@@ -606,20 +628,24 @@ func _update_away_shapes() -> void:
 	var next_atk := Formations.AttackShape.WIDE
 	var next_def := Formations.DefenseShape.FLAT
 	if score_diff < 0:
-		# Losing: crash the line; press with OneUp when late or down by 2+.
+		# Losing: crash the line; press with 5-1 when late or down by 2+.
+		# Down by 3+ late → man pressure (lite).
 		next_atk = Formations.AttackShape.CRASH
-		next_def = (
-			Formations.DefenseShape.ONE_UP
-			if late or score_diff <= -2
-			else Formations.DefenseShape.FLAT
-		)
+		if score_diff <= -3 and late:
+			next_def = Formations.DefenseShape.INDIVIDUAL
+		elif late or score_diff <= -2:
+			next_def = Formations.DefenseShape.ONE_UP
+		else:
+			next_def = Formations.DefenseShape.FLAT
 	elif score_diff > 0:
 		next_atk = Formations.AttackShape.WIDE
 		next_def = Formations.DefenseShape.FLAT
 	else:
-		# Tied: Crash/OneUp only when the clock is late.
+		# Tied: late → Crash + 3-2-1; early → Wide + 6-0.
 		next_atk = Formations.AttackShape.CRASH if late else Formations.AttackShape.WIDE
-		next_def = Formations.DefenseShape.ONE_UP if late else Formations.DefenseShape.FLAT
+		next_def = (
+			Formations.DefenseShape.THREE_TWO_ONE if late else Formations.DefenseShape.FLAT
+		)
 	if next_atk != away_attack_shape or next_def != away_defense_shape:
 		away_attack_shape = next_atk
 		away_defense_shape = next_def
@@ -788,6 +814,7 @@ func _swap_players_for_sub(outgoing: Player, incoming: Player) -> void:
 	incoming.velocity = Vector3.ZERO
 	incoming.attack_shape = outgoing.attack_shape
 	incoming.defense_shape = outgoing.defense_shape
+	incoming.facing_defense_shape = outgoing.facing_defense_shape
 	_set_controlled(incoming)
 	_configure_ai()
 	_park_bench_players()
@@ -897,6 +924,9 @@ func _try_shoot_charged(held_s: float) -> void:
 		_spawn_shot_trace(from, aim, lob, jump_q)
 		# Nearby defending outfield raise hands for the contest window.
 		_nudge_defenders_to_block(controlled_player.team_id, from, aim)
+		# Wave 6 R5.3: brief wing-corridor cinematic (zoom + slow-mo).
+		if wing and camera_rig:
+			camera_rig.trigger_wing_cinematic()
 	if hud and hud.has_method("set_shot_status"):
 		hud.set_shot_status(0.0, false, "", false)
 
@@ -1086,6 +1116,28 @@ func _update_camera_attack_side() -> void:
 	if ball.carrier:
 		_attack_team_id = ball.carrier.team_id
 	camera_rig.set_attack_direction(_attack_team_id == 0)
+
+
+## Wave 6 R5.2: nudge yaw / zoom / height from keys or right stick.
+func _update_camera_nudge(delta: float) -> void:
+	if camera_rig == null or match_state == MatchState.MATCH_OVER:
+		return
+	var yaw := Input.get_axis("camera_yaw_left", "camera_yaw_right")
+	var zoom := Input.get_axis("camera_zoom_in", "camera_zoom_out")
+	var height := Input.get_axis("camera_height_down", "camera_height_up")
+	# Right stick (look_*): X = yaw, Y = zoom (up = closer).
+	yaw += Input.get_axis("look_left", "look_right")
+	var stick_y := Input.get_axis("look_up", "look_down")
+	# Stick up (negative look_down axis in Godot often) → zoom in.
+	zoom += -stick_y
+	if absf(yaw) < 0.08:
+		yaw = 0.0
+	if absf(zoom) < 0.08:
+		zoom = 0.0
+	if absf(height) < 0.08:
+		height = 0.0
+	if absf(yaw) > 0.001 or absf(zoom) > 0.001 or absf(height) > 0.001:
+		camera_rig.apply_nudge_input(yaw, zoom, height, delta)
 
 
 func _on_ball_picked_up(player: Player) -> void:
