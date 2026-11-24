@@ -9,6 +9,8 @@ class_name Player
 
 signal possession_changed(has_ball: bool)
 signal dive_started
+signal fake_started(kind: int)
+signal save_resolved(caught: bool)
 signal block_attempted(blocker: Player, ball: Ball, success: bool)
 
 ## Metres per second. 1 unit = 1 m (see Court.METERS_PER_UNIT).
@@ -65,6 +67,10 @@ const CATCH_SETTLE_S := 0.38
 const CATCH_SETTLE_SPEED := 0.52
 const GK_OUTLET_DELAY_S := 0.42
 const GK_OUTLET_COOLDOWN_S := 1.1
+## Wave 3: fake cooldown so spam doesn't soft-lock shoot/pass.
+const FAKE_COOLDOWN_S := 0.55
+## Brief move soft while jabbing.
+const FAKE_JAB_SPEED := 0.72
 ## Phase F jump-shot plant slows approach so the takeoff reads.
 const JUMP_PLANT_SPEED := 0.28
 ## Phase G stamina — drain on sprint / jump / shot; recover off-ball / on bench.
@@ -130,6 +136,28 @@ var throw_aim_dir: Vector3 = Vector3.FORWARD
 ## True while a one-shot throw sequence owns arms/torso (not charge-only).
 var throw_motion_active: bool = false
 var _throw_pose_cache: Dictionary = {}
+
+## Wave 3 fakes — keep ball; threaten then recover.
+var fake_kind: int = 0  # FakeMotion.Kind
+var fake_phase: int = 0  # FakeMotion.Phase
+var fake_t: float = 0.0
+var fake_active: bool = false
+var fake_jab_side: float = 1.0
+var _fake_pose_cache: Dictionary = {}
+var _fake_cd: float = 0.0
+var _ai_fake_cd: float = 0.0
+## Lite sell: briefly frozen / slowed after being faked.
+var fake_sold_t: float = 0.0
+var fake_recover_t: float = 0.0
+
+## Wave 3 GK vocabulary.
+var gk_stance: int = 0  # GkMotion.Stance
+var dive_side: int = 0  # GkMotion.DiveSide
+var dive_height: int = 0  # GkMotion.DiveHeight
+var last_save_caught: bool = false
+var _gk_pose_timer: float = 0.0
+var _gk_pose_cache: Dictionary = {}
+var _seven_m_lock: bool = false
 
 var _bob_phase: float = 0.0
 var _idle_phase: float = 0.0
@@ -211,6 +239,23 @@ func _physics_process(delta: float) -> void:
 		_dive_cd = maxf(0.0, _dive_cd - delta)
 	if _outlet_cd > 0.0:
 		_outlet_cd = maxf(0.0, _outlet_cd - delta)
+	if _fake_cd > 0.0:
+		_fake_cd = maxf(0.0, _fake_cd - delta)
+	if _ai_fake_cd > 0.0:
+		_ai_fake_cd = maxf(0.0, _ai_fake_cd - delta)
+	if fake_sold_t > 0.0:
+		fake_sold_t = maxf(0.0, fake_sold_t - delta)
+		if fake_sold_t <= 0.0 and fake_recover_t <= 0.0:
+			fake_recover_t = FakeMotion.SELL_RECOVER_S
+	if fake_recover_t > 0.0:
+		fake_recover_t = maxf(0.0, fake_recover_t - delta)
+	if _gk_pose_timer > 0.0:
+		_gk_pose_timer = maxf(0.0, _gk_pose_timer - delta)
+		if _gk_pose_timer <= 0.0 and not diving and gk_stance in [
+			GkMotion.Stance.CATCH, GkMotion.Stance.DEFLECT, GkMotion.Stance.OUTLET
+		]:
+			gk_stance = GkMotion.Stance.SET if is_goalkeeper else GkMotion.Stance.IDLE
+			_gk_pose_cache = {}
 	if _catch_settle_t > 0.0:
 		_catch_settle_t = maxf(0.0, _catch_settle_t - delta)
 	if _block_timer > 0.0:
@@ -246,6 +291,10 @@ func _physics_process(delta: float) -> void:
 	elif diving:
 		wish = Vector3.ZERO
 		_tick_stamina(delta, false, false)
+	elif fake_sold_t > 0.0:
+		# Sold by a fake — freeze briefly, then soft recover.
+		wish = Vector3.ZERO
+		_tick_stamina(delta, false, false)
 	elif controlled:
 		var input_dir := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
 		# WASD / left stick are camera-relative: forward = into the screen along
@@ -263,6 +312,10 @@ func _physics_process(delta: float) -> void:
 	elif ai_enabled:
 		wish = _ai_wish(delta)
 
+	# 7 m: defending GK stays on / behind the 4 m restraining line (lite).
+	if is_goalkeeper and _seven_m_lock and not diving:
+		wish = _clamp_gk_seven_m_wish(wish)
+
 	var target_speed := SPEED * (0.85 if is_goalkeeper else 1.0)
 	if is_goalkeeper and not diving:
 		# Quicker lateral shuffle on the line.
@@ -276,8 +329,10 @@ func _physics_process(delta: float) -> void:
 		target_speed *= SPRINT_SPEED_MUL
 	# Catch settle + jump plant + low stamina briefly softens speed.
 	target_speed *= _move_speed_mul()
+	if fake_recover_t > 0.0:
+		target_speed *= 0.55
 	# Snappy ground response; softer air control for jump-shot steering.
-	if not diving and _js_plant_t <= 0.0 and not on_bench and not excluded:
+	if not diving and _js_plant_t <= 0.0 and not on_bench and not excluded and fake_sold_t <= 0.0:
 		var desired := wish * target_speed
 		var rate := 18.0 if is_on_floor() else (18.0 * AIR_CONTROL)
 		var blend := 1.0 - exp(-rate * delta)
@@ -303,13 +358,17 @@ func _physics_process(delta: float) -> void:
 		_tick_stamina(delta, sprinting, wish.length_squared() > 0.04)
 		_tick_jump_shot_craft(delta)
 		_tick_gk_outlet(delta)
+		_tick_fake_motion(delta)
+		_update_gk_stance(wish, planar_speed_hint(wish, target_speed))
 
 	# Soft velocity push clears nested capsules without freezing wish/slide motion.
 	_apply_soft_player_separation()
 	move_and_slide()
+	if is_goalkeeper and _seven_m_lock:
+		_enforce_gk_four_meter()
 
 	var planar := Vector3(velocity.x, 0.0, velocity.z)
-	if planar.length() > FACE_THRESHOLD and not diving and _js_plant_t <= 0.0:
+	if planar.length() > FACE_THRESHOLD and not diving and _js_plant_t <= 0.0 and not fake_active:
 		var target_yaw := atan2(planar.x, planar.z)
 		rotation.y = lerp_angle(rotation.y, target_yaw, 1.0 - exp(-12.0 * delta))
 
@@ -322,9 +381,17 @@ func _physics_process(delta: float) -> void:
 	_update_locomotion_anim(delta, planar.length())
 	_update_arm_pose(delta)
 	_apply_throw_pose(delta)
+	_apply_fake_pose(delta)
+	_apply_gk_pose(delta)
 	_apply_torso_yaw(delta)
 	_apply_bench_visual()
 	_try_sticky_pass_catch()
+
+
+func planar_speed_hint(wish: Vector3, target_speed: float) -> float:
+	if wish.length_squared() < 0.01:
+		return 0.0
+	return wish.length() * target_speed
 
 
 func try_shoot(
@@ -335,6 +402,9 @@ func try_shoot(
 	shot_meta: Dictionary = {}
 ) -> bool:
 	if not has_ball or ball == null or ball.carrier != self:
+		return false
+	# Fakes keep the ball — never allow a release mid-fake.
+	if fake_active:
 		return false
 	_pickup_block = PICKUP_COOLDOWN
 	dribbling = false
@@ -371,6 +441,8 @@ func _move_speed_mul() -> float:
 		mul *= CATCH_SETTLE_SPEED
 	if _js_plant_t > 0.0:
 		mul *= JUMP_PLANT_SPEED
+	if fake_active and fake_kind == FakeMotion.Kind.JAB and fake_phase == FakeMotion.Phase.THREATEN:
+		mul *= FAKE_JAB_SPEED
 	mul *= stamina_speed_mul()
 	return mul
 
@@ -490,6 +562,14 @@ func arm_outlet_pass() -> void:
 		return
 	_outlet_pending = true
 	_outlet_timer = GK_OUTLET_DELAY_S
+	gk_stance = GkMotion.Stance.OUTLET
+	_gk_pose_timer = GkMotion.OUTLET_POSE_S
+	var yaw := 0.0
+	var wing := _ai_outlet_wing()
+	if wing:
+		yaw = ThrowMotion.torso_yaw_toward(face_direction(), wing.global_position - global_position)
+	_gk_pose_cache = GkMotion.pose_outlet(yaw)
+	_apply_save_box_from_pose(_gk_pose_cache)
 
 
 func _tick_gk_outlet(delta: float) -> void:
@@ -501,6 +581,7 @@ func _tick_gk_outlet(delta: float) -> void:
 		return
 	if controlled and not ai_enabled:
 		# Human GK keeps the ball — outlet is an AI assist after saves.
+		# Still show outlet-ready pose so distribution reads.
 		return
 	_outlet_timer = maxf(0.0, _outlet_timer - delta)
 	if _outlet_timer > 0.0 or _outlet_cd > 0.0 or _ai_pass_cd > 0.0:
@@ -529,6 +610,143 @@ func _ai_outlet_wing() -> Player:
 	return best as Player
 
 
+## Wave 3: usable fake — keeps ball, never fires a shot/pass.
+func try_fake(kind: int, aim_hint: Vector3 = Vector3.ZERO) -> bool:
+	if kind == FakeMotion.Kind.NONE:
+		return false
+	if not has_ball or match_frozen or on_bench or excluded or diving or is_goalkeeper:
+		return false
+	if fake_active or _fake_cd > 0.0:
+		return false
+	if throw_motion_active and throw_phase == ThrowMotion.Phase.CHARGE:
+		# Abort charge so fake can't be mistaken for a release.
+		clear_shot_charge_motion()
+	if throw_motion_active and throw_phase != ThrowMotion.Phase.IDLE:
+		return false
+	if jump_shot_active and not is_on_floor():
+		return false
+	dribbling = false
+	fake_kind = kind
+	fake_phase = FakeMotion.Phase.THREATEN
+	fake_t = 0.0
+	fake_active = true
+	_fake_cd = FAKE_COOLDOWN_S + FakeMotion.threaten_duration(kind) + FakeMotion.recover_duration(kind)
+	var aim := aim_hint
+	if aim.length_squared() < 0.01:
+		aim = opponent_goal_point() - global_position
+	_torso_yaw_offset = ThrowMotion.torso_yaw_toward(face_direction(), aim)
+	if kind == FakeMotion.Kind.JAB:
+		var side := aim.x
+		if absf(side) < 0.05:
+			side = face_direction().x
+		if absf(side) < 0.05:
+			side = 1.0 if (player_index % 2) == 0 else -1.0
+		fake_jab_side = signf(side)
+		# Small planar nudge so the jab reads as a step, not a root slide only.
+		velocity.x += fake_jab_side * 2.8
+	_fake_pose_cache = FakeMotion.pose_for(kind, fake_phase, _torso_yaw_offset, fake_jab_side)
+	_sell_fake_to_markers()
+	fake_started.emit(kind)
+	return true
+
+
+func clear_fake_motion() -> void:
+	fake_kind = FakeMotion.Kind.NONE
+	fake_phase = FakeMotion.Phase.IDLE
+	fake_t = 0.0
+	fake_active = false
+	_fake_pose_cache = {}
+
+
+func is_faking() -> bool:
+	return fake_active
+
+
+func _tick_fake_motion(delta: float) -> void:
+	if not fake_active:
+		return
+	if not has_ball or match_frozen or on_bench or excluded:
+		clear_fake_motion()
+		return
+	var stepped := FakeMotion.tick_fake(
+		fake_kind, fake_phase, fake_t, delta, _torso_yaw_offset, fake_jab_side
+	)
+	fake_phase = int(stepped["phase"])
+	fake_t = float(stepped["t"])
+	_fake_pose_cache = stepped["pose"]
+	if bool(stepped["done"]):
+		_apply_pose_dict(stepped["pose"] as Dictionary, 1.0)
+		clear_fake_motion()
+
+
+func _apply_fake_pose(delta: float) -> void:
+	if not fake_active or _fake_pose_cache.is_empty() or _arm_r == null:
+		return
+	if throw_motion_active:
+		return
+	var blend := 1.0 - exp(-18.0 * delta)
+	_apply_pose_dict(_fake_pose_cache, blend)
+
+
+func _sell_fake_to_markers() -> void:
+	var match_root := get_parent()
+	if match_root:
+		match_root = match_root.get_parent()
+	if match_root == null:
+		return
+	for team_root in match_root.get_children():
+		if not (team_root is Node):
+			continue
+		for child in team_root.get_children():
+			if child == self or not (child is Player):
+				continue
+			var opp := child as Player
+			if opp.team_id == team_id or opp.is_goalkeeper or opp.on_bench or opp.excluded:
+				continue
+			if global_position.distance_to(opp.global_position) > FakeMotion.SELL_RADIUS:
+				continue
+			# Lite sell: freeze then soft recover. Shot/pass fakes sell harder than jab.
+			var sell := FakeMotion.SELL_DURATION
+			if fake_kind == FakeMotion.Kind.JAB:
+				sell *= 0.75
+			opp.fake_sold_t = maxf(opp.fake_sold_t, sell)
+			opp.raise_block(0.15)
+
+
+func set_seven_meter_lock(active: bool) -> void:
+	_seven_m_lock = active and is_goalkeeper
+
+
+func _clamp_gk_seven_m_wish(wish: Vector3) -> Vector3:
+	if wish.length_squared() < 0.0001:
+		return wish
+	var four := Court.four_meter_spot(team_id)
+	var toward_court := 1.0 if team_id == 0 else -1.0
+	# Don't advance past the 4 m mark toward midfield.
+	var next_z := global_position.z + wish.z * 0.35
+	if team_id == 0 and next_z > four.z:
+		wish.z = minf(wish.z, 0.0)
+	elif team_id == 1 and next_z < four.z:
+		wish.z = maxf(wish.z, 0.0)
+	# Tiny bias back onto the line when past it.
+	if team_id == 0 and global_position.z > four.z + 0.05:
+		wish.z = minf(wish.z, -0.6)
+		wish += Vector3(0.0, 0.0, -toward_court) * 0.15
+	elif team_id == 1 and global_position.z < four.z - 0.05:
+		wish.z = maxf(wish.z, 0.6)
+	return wish
+
+
+func _enforce_gk_four_meter() -> void:
+	var four := Court.four_meter_spot(team_id)
+	if team_id == 0 and global_position.z > four.z:
+		global_position.z = four.z
+		velocity.z = minf(velocity.z, 0.0)
+	elif team_id == 1 and global_position.z < four.z:
+		global_position.z = four.z
+		velocity.z = maxf(velocity.z, 0.0)
+
+
 ## GK dive toward a planar direction. Returns true if dive started.
 func try_dive(dir: Vector3) -> bool:
 	if not is_goalkeeper or diving or match_frozen or has_ball:
@@ -550,12 +768,20 @@ func try_dive(dir: Vector3) -> bool:
 	if flat.length_squared() < 0.01:
 		flat = Vector3.RIGHT if team_id == 0 else Vector3.LEFT
 	_dive_dir = flat.normalized()
+	var ball_y := 1.0
+	if match_ball:
+		ball_y = match_ball.global_position.y
+	var classified := GkMotion.classify_dive(_dive_dir, ball_y, face_direction())
+	dive_side = int(classified["side"])
+	dive_height = int(classified["height"])
 	diving = true
+	gk_stance = GkMotion.Stance.DIVE
 	_dive_timer = DIVE_DURATION
 	_dive_cd = DIVE_COOLDOWN + DIVE_DURATION
 	_block_timer = DIVE_DURATION + 0.15
 	block_ready = true
-	velocity = _dive_dir * DIVE_SPEED + Vector3(0.0, DIVE_UP, 0.0)
+	var up := DIVE_UP * (1.15 if dive_height == GkMotion.DiveHeight.HIGH else 0.72)
+	velocity = _dive_dir * DIVE_SPEED + Vector3(0.0, up, 0.0)
 	_set_dive_pose(true)
 	dive_started.emit()
 	return true
@@ -601,6 +827,18 @@ func reset_to_start() -> void:
 	_outlet_timer = 0.0
 	_outlet_cd = 0.0
 	clear_throw_motion()
+	clear_fake_motion()
+	_fake_cd = 0.0
+	_ai_fake_cd = 0.0
+	fake_sold_t = 0.0
+	fake_recover_t = 0.0
+	gk_stance = GkMotion.Stance.IDLE
+	dive_side = GkMotion.DiveSide.NONE
+	dive_height = GkMotion.DiveHeight.LOW
+	last_save_caught = false
+	_gk_pose_timer = 0.0
+	_gk_pose_cache = {}
+	_seven_m_lock = false
 	_set_dive_pose(false)
 	_torso_yaw_offset = 0.0
 	if on_bench or excluded:
@@ -919,6 +1157,25 @@ func _ai_attack_with_ball(_delta: float) -> Vector3:
 	var step_warn := _ai_carry_dist >= AI_STEP_WARN_DIST
 	var under_pressure := _ai_under_pressure()
 	var pass_target := _ai_pass_target()
+	# Wave 3: sparingly fake under pressure before releasing.
+	if (
+		under_pressure
+		and not must_release
+		and _ai_fake_cd <= 0.0
+		and not fake_active
+		and randf() < FakeMotion.AI_FAKE_CHANCE
+	):
+		var fk := FakeMotion.Kind.JAB
+		if dist <= AI_SHOOT_RANGE and (player_index % 2) == 0:
+			fk = FakeMotion.Kind.SHOT
+		elif pass_target != null:
+			fk = FakeMotion.Kind.PASS
+		var hint := flat if fk != FakeMotion.Kind.PASS else (pass_target.global_position - me)
+		if try_fake(fk, hint):
+			_ai_fake_cd = FakeMotion.AI_FAKE_COOLDOWN_S
+			return _steer_toward(_keep_outfield_legal(
+				Vector3(goal.x + fake_jab_side * 1.4, 0.0, goal.z)
+			)) * AI_ATTACK_SPEED_SCALE
 	# Prefer pass under pressure / at step warning before forcing a contested shot.
 	var prefer_pass := pass_target != null and (
 		must_release
@@ -927,10 +1184,10 @@ func _ai_attack_with_ball(_delta: float) -> Vector3:
 		or dist > 8.5
 		or ((int(Time.get_ticks_msec() / 700) + player_index) % 3) == 0
 	)
-	if match_ball != null and prefer_pass and _ai_pass_cd <= 0.0:
+	if match_ball != null and prefer_pass and _ai_pass_cd <= 0.0 and not fake_active:
 		if _ai_try_pass(pass_target):
 			return Vector3.ZERO
-	if match_ball != null and (dist <= AI_SHOOT_RANGE or must_release):
+	if match_ball != null and (dist <= AI_SHOOT_RANGE or must_release) and not fake_active:
 		# Don't force a shot while pressed if a teammate is available.
 		if under_pressure and pass_target != null and not must_release:
 			return _steer_toward(_keep_outfield_legal(
@@ -1185,6 +1442,7 @@ func _contest_ball(ball: Ball, is_save: bool) -> void:
 			has_ball = true
 			begin_catch_settle()
 			if is_save:
+				_begin_gk_catch_pose()
 				arm_outlet_pass()
 			possession_changed.emit(true)
 			block_attempted.emit(self, ball, true)
@@ -1204,10 +1462,13 @@ func _contest_ball(ball: Ball, is_save: bool) -> void:
 		if ball.try_pickup(self):
 			has_ball = true
 			begin_catch_settle()
+			_begin_gk_catch_pose()
 			arm_outlet_pass()
 			possession_changed.emit(true)
 			block_attempted.emit(self, ball, true)
 			return
+	if is_save:
+		_begin_gk_deflect_pose()
 	ball.linear_velocity = away * deflect_speed + Vector3(0.0, up, 0.0)
 	ball.angular_velocity = Vector3(randf_range(-8.0, 8.0), randf_range(-4.0, 4.0), randf_range(-8.0, 8.0))
 	block_attempted.emit(self, ball, success)
@@ -1217,6 +1478,35 @@ func _contest_ball(ball: Ball, is_save: bool) -> void:
 	else:
 		_block_timer = 0.08
 		block_ready = false
+
+
+func _begin_gk_catch_pose() -> void:
+	if not is_goalkeeper:
+		return
+	last_save_caught = true
+	gk_stance = GkMotion.Stance.CATCH
+	_gk_pose_timer = GkMotion.CATCH_POSE_S
+	_gk_pose_cache = GkMotion.pose_catch()
+	_apply_save_box_from_pose(_gk_pose_cache)
+	save_resolved.emit(true)
+
+
+func _begin_gk_deflect_pose() -> void:
+	if not is_goalkeeper:
+		return
+	last_save_caught = false
+	gk_stance = GkMotion.Stance.DEFLECT
+	_gk_pose_timer = GkMotion.DEFLECT_POSE_S
+	var side := dive_side if dive_side != GkMotion.DiveSide.NONE else GkMotion.DiveSide.RIGHT
+	if match_ball:
+		side = (
+			GkMotion.DiveSide.LEFT
+			if match_ball.global_position.x < global_position.x
+			else GkMotion.DiveSide.RIGHT
+		)
+	_gk_pose_cache = GkMotion.pose_deflect(side)
+	_apply_save_box_from_pose(_gk_pose_cache)
+	save_resolved.emit(false)
 
 
 func _should_arm_outlet_from_ball(ball: Ball) -> bool:
@@ -1393,7 +1683,7 @@ func _tick_throw_motion(delta: float) -> void:
 
 
 func _apply_throw_pose(delta: float) -> void:
-	if on_bench or excluded or diving or _arm_r == null:
+	if on_bench or excluded or diving or _arm_r == null or fake_active:
 		return
 	var blend := 1.0 - exp(-16.0 * delta)
 	if throw_motion_active and not _throw_pose_cache.is_empty():
@@ -1433,6 +1723,10 @@ func _apply_pose_dict(pose: Dictionary, blend: float) -> void:
 	if _leg_l and _leg_r and pose.has("leg_l_x"):
 		_leg_l.rotation.x = lerpf(_leg_l.rotation.x, float(pose["leg_l_x"]), blend)
 		_leg_r.rotation.x = lerpf(_leg_r.rotation.x, float(pose["leg_r_x"]), blend)
+	if _leg_l and pose.has("leg_l_z"):
+		_leg_l.rotation.z = lerpf(_leg_l.rotation.z, float(pose["leg_l_z"]), blend)
+	if _leg_r and pose.has("leg_r_z"):
+		_leg_r.rotation.z = lerpf(_leg_r.rotation.z, float(pose["leg_r_z"]), blend)
 
 
 func is_throw_motion_busy() -> bool:
@@ -1712,23 +2006,72 @@ func _set_dive_pose(active: bool) -> void:
 	if _arm_l == null or _arm_r == null:
 		return
 	if active:
-		_arm_l.position = Vector3(-0.85, 0.85, 0.1)
-		_arm_r.position = Vector3(0.85, 0.85, 0.1)
-		_arm_l.rotation_degrees = Vector3(0, 0, 25)
-		_arm_r.rotation_degrees = Vector3(0, 0, -25)
-		if _hand_l and _hand_r:
-			_hand_l.position = Vector3(-1.05, 0.78, 0.18)
-			_hand_r.position = Vector3(1.05, 0.78, 0.18)
-		if _save_area and _save_area.get_child_count() > 0:
-			var shape := _save_area.get_child(0) as CollisionShape3D
-			if shape and shape.shape is BoxShape3D:
-				(shape.shape as BoxShape3D).size = Vector3(2.6, 1.2, 1.4)
+		var pose := GkMotion.pose_dive(dive_side, dive_height)
+		_gk_pose_cache = pose
+		gk_stance = GkMotion.Stance.DIVE
+		_apply_pose_dict(pose, 1.0)
+		_apply_save_box_from_pose(pose)
 	else:
 		_pose_arms_rest()
-		if _save_area and _save_area.get_child_count() > 0:
-			var shape2 := _save_area.get_child(0) as CollisionShape3D
-			if shape2 and shape2.shape is BoxShape3D:
-				(shape2.shape as BoxShape3D).size = Vector3(1.8, 1.6, 1.1)
+		if is_goalkeeper:
+			gk_stance = GkMotion.Stance.SET
+			_gk_pose_cache = GkMotion.pose_set()
+			_apply_save_box_from_pose(_gk_pose_cache)
+		else:
+			_apply_save_box_size(Vector3(1.8, 1.6, 1.1))
+
+
+func _apply_save_box_from_pose(pose: Dictionary) -> void:
+	if pose.has("save_box"):
+		_apply_save_box_size(pose["save_box"] as Vector3)
+
+
+func _apply_save_box_size(size: Vector3) -> void:
+	if _save_area == null or _save_area.get_child_count() == 0:
+		return
+	var shape := _save_area.get_child(0) as CollisionShape3D
+	if shape and shape.shape is BoxShape3D:
+		(shape.shape as BoxShape3D).size = size
+
+
+func _update_gk_stance(wish: Vector3, speed_hint: float) -> void:
+	if not is_goalkeeper or on_bench or excluded or diving:
+		return
+	if gk_stance in [GkMotion.Stance.CATCH, GkMotion.Stance.DEFLECT, GkMotion.Stance.OUTLET]:
+		if _gk_pose_timer > 0.0:
+			return
+	# Holding after save / with ball → set or outlet already armed.
+	if has_ball:
+		if _outlet_pending:
+			gk_stance = GkMotion.Stance.OUTLET
+		else:
+			gk_stance = GkMotion.Stance.SET
+			_gk_pose_cache = GkMotion.pose_set()
+		return
+	var lateral := absf(wish.x) > 0.12 or absf(velocity.x) > 1.1
+	if lateral and speed_hint > 0.8:
+		gk_stance = GkMotion.Stance.SHUFFLE
+		var side := wish.x
+		if absf(side) < 0.05:
+			side = velocity.x
+		_gk_pose_cache = GkMotion.pose_shuffle(side)
+	else:
+		gk_stance = GkMotion.Stance.SET
+		_gk_pose_cache = GkMotion.pose_set()
+	_apply_save_box_from_pose(_gk_pose_cache)
+
+
+func _apply_gk_pose(delta: float) -> void:
+	if not is_goalkeeper or on_bench or excluded:
+		return
+	if throw_motion_active or fake_active:
+		return
+	if _gk_pose_cache.is_empty():
+		return
+	# Dive pose already applied hard; still refresh while diving.
+	if diving or gk_stance != GkMotion.Stance.IDLE:
+		var blend := 1.0 - exp(-14.0 * delta)
+		_apply_pose_dict(_gk_pose_cache, blend)
 
 
 func _pose_arms_rest() -> void:
@@ -1753,8 +2096,10 @@ func _pose_arms_rest() -> void:
 func _update_arm_pose(_delta: float) -> void:
 	if diving or _arm_l == null or on_bench or excluded:
 		return
-	# Wave 2 throw / jump craft owns the arms while active.
-	if throw_motion_active or (jump_shot_active and has_ball):
+	# Wave 2/3 throw / fake / GK craft owns the arms while active.
+	if throw_motion_active or fake_active or (jump_shot_active and has_ball):
+		return
+	if is_goalkeeper and gk_stance != GkMotion.Stance.IDLE:
 		return
 	if not is_goalkeeper and block_ready:
 		_arm_l.position = Vector3(-0.50, 1.48, 0.22)
@@ -1955,8 +2300,10 @@ func _update_locomotion_anim(delta: float, speed: float) -> void:
 		if _upper_body:
 			_upper_body.position.y = lerpf(_upper_body.position.y, _upper_base_y - 0.2, 1.0 - exp(-10.0 * delta))
 		return
-	# Throw / jump craft owns arms, torso settle, and plant legs.
-	if throw_motion_active or (jump_shot_active and has_ball):
+	# Throw / fake / jump / GK craft owns arms, torso settle, and plant legs.
+	if throw_motion_active or fake_active or (jump_shot_active and has_ball):
+		return
+	if is_goalkeeper and gk_stance != GkMotion.Stance.IDLE:
 		return
 
 	var blend := 1.0 - exp(-12.0 * delta)

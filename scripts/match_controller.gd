@@ -262,8 +262,17 @@ func _unhandled_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 		return
 	# Phase G: dead-ball substitutions (, cycle bench / . confirm).
+	# Wave 3: D-pad Right / , is pass-fake while LIVE with the ball (else bench cycle).
 	if event.is_action_pressed("cycle_bench"):
-		_cycle_bench_select()
+		if (
+			match_state == MatchState.LIVE
+			and controlled_player
+			and controlled_player.has_ball
+			and not controlled_player.is_goalkeeper
+		):
+			_try_fake(FakeMotion.Kind.PASS)
+		else:
+			_cycle_bench_select()
 		get_viewport().set_input_as_handled()
 		return
 	if event.is_action_pressed("confirm_sub"):
@@ -280,8 +289,36 @@ func _unhandled_input(event: InputEvent) -> void:
 			_cycle_teammate()
 		get_viewport().set_input_as_handled()
 		return
+	# Wave 3 fakes — keep ball; cancel charge; never fire shot/pass.
+	# Dive (C/B) on an outfielder with the ball = shot fake (GK still dives in player.gd).
+	if (
+		event.is_action_pressed("dive")
+		and match_state == MatchState.LIVE
+		and controlled_player
+		and controlled_player.has_ball
+		and not controlled_player.is_goalkeeper
+	):
+		_try_fake(FakeMotion.Kind.SHOT)
+		get_viewport().set_input_as_handled()
+		return
+	if match_state == MatchState.LIVE and controlled_player and controlled_player.has_ball:
+		if event.is_action_pressed("fake_shot"):
+			_try_fake(FakeMotion.Kind.SHOT)
+			get_viewport().set_input_as_handled()
+			return
+		if event.is_action_pressed("fake_pass"):
+			_try_fake(FakeMotion.Kind.PASS)
+			get_viewport().set_input_as_handled()
+			return
+		if event.is_action_pressed("fake_jab"):
+			_try_fake(FakeMotion.Kind.JAB)
+			get_viewport().set_input_as_handled()
+			return
 	# Pass first so RMB/G/RB never starts or finishes a shoot-charge.
 	if event.is_action_pressed("pass_ball") and match_state == MatchState.LIVE:
+		if controlled_player and controlled_player.is_faking():
+			get_viewport().set_input_as_handled()
+			return
 		_end_controlled_dribble()
 		_try_pass()
 		get_viewport().set_input_as_handled()
@@ -289,6 +326,9 @@ func _unhandled_input(event: InputEvent) -> void:
 	# Phase 3: hold shoot to charge, release to fire. Tap still works (min power).
 	if event.is_action_pressed("shoot") and match_state == MatchState.LIVE:
 		if _pass_suppress_shoot:
+			get_viewport().set_input_as_handled()
+			return
+		if controlled_player and controlled_player.is_faking():
 			get_viewport().set_input_as_handled()
 			return
 		if controlled_player and controlled_player.has_ball:
@@ -299,7 +339,10 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_released("shoot"):
 		_pass_suppress_shoot = false
 		if _charging:
-			_release_charged_shot()
+			if controlled_player and controlled_player.is_faking():
+				_cancel_charge()
+			else:
+				_release_charged_shot()
 			get_viewport().set_input_as_handled()
 
 
@@ -329,6 +372,42 @@ func _physics_process(delta: float) -> void:
 		_on_period_expired()
 
 
+## Wave 3: trigger a fake; cancels shoot charge so release cannot fire.
+func _try_fake(kind: int) -> void:
+	var p := controlled_player
+	if p == null or not p.has_ball or p.is_goalkeeper:
+		return
+	if ball == null or ball.carrier != p:
+		return
+	_end_controlled_dribble()
+	if _charging:
+		_cancel_charge()
+	_pass_suppress_shoot = true
+	var aim := _aim_direction_for(p)
+	if kind == FakeMotion.Kind.PASS:
+		var target := _best_pass_target(p, aim)
+		if target:
+			aim = target.global_position - p.global_position
+	elif kind == FakeMotion.Kind.JAB:
+		var wish := Input.get_vector("move_left", "move_right", "move_forward", "move_back")
+		if wish.length_squared() > 0.04:
+			aim = p.camera_relative_wish(wish)
+	p.try_fake(kind, aim)
+	if hud and hud.has_method("flash_rule"):
+		hud.flash_rule("Fake · %s" % FakeMotion.kind_name(kind), "fake")
+
+
+func _aim_direction_for(p: Player) -> Vector3:
+	if p == null:
+		return Vector3.FORWARD
+	# Reuse shot/pass aim so fakes match face vs mouse mode.
+	if p == controlled_player:
+		var aim := _compute_aim(false)
+		if aim.length_squared() > 0.01:
+			return aim
+	return p.face_direction()
+
+
 ## Hold `dribble` (V / R3) while possessing to bounce; release gathers (new steps + 3 s).
 func _update_dribble_input() -> void:
 	if match_state != MatchState.LIVE:
@@ -339,7 +418,7 @@ func _update_dribble_input() -> void:
 		_end_controlled_dribble()
 		return
 	# Don't bounce while charging a shot — shoot owns the hands.
-	if _charging:
+	if _charging or p.is_faking():
 		_end_controlled_dribble()
 		return
 	var want := Input.is_action_pressed("dribble")
@@ -370,7 +449,7 @@ func _update_shot_charge(delta: float) -> void:
 	if match_state != MatchState.LIVE or controlled_player == null or not controlled_player.has_ball:
 		_cancel_charge()
 		return
-	if _pass_suppress_shoot:
+	if _pass_suppress_shoot or controlled_player.is_faking():
 		_cancel_charge()
 		return
 	# Keep charging while the shoot action is held (mouse / E / RT).
@@ -1094,6 +1173,7 @@ func _run_rule_restart(code: String, _message: String, awarding_team_id: int, sp
 
 
 func _place_set_piece(code: String, awarding_team_id: int, spot: Vector3, taker: Player) -> void:
+	var seven := Formations.is_seven_meter_code(code)
 	for p in _all_players():
 		var place := Formations.set_piece_slot(p, code, awarding_team_id, spot, taker)
 		if p.excluded:
@@ -1102,10 +1182,15 @@ func _place_set_piece(code: String, awarding_team_id: int, spot: Vector3, taker:
 			place = Court.bench_marker(p.team_id, maxi(0, p.bench_slot))
 		p.global_position = place
 		p.velocity = Vector3.ZERO
+		# Wave 3: defending GK locked to 4 m restraining line during 7 m.
+		if p.is_goalkeeper:
+			p.set_seven_meter_lock(seven and p.team_id != awarding_team_id)
+		else:
+			p.set_seven_meter_lock(false)
 		var face := 0.0 if p.team_id == 0 else PI
 		if code == "throw_in":
 			face = -PI * 0.5 if spot.x > 0.0 else PI * 0.5
-		elif Formations.is_seven_meter_code(code):
+		elif seven:
 			if p == taker or p.team_id == awarding_team_id:
 				face = 0.0 if awarding_team_id == 0 else PI
 			elif p.is_goalkeeper:
@@ -1403,6 +1488,7 @@ func _place_kickoff_shape(kickoff_team_id: int) -> void:
 		p.global_position = slot
 		p.rotation.y = 0.0 if p.team_id == 0 else PI
 		p.velocity = Vector3.ZERO
+		p.set_seven_meter_lock(false)
 	_resolve_player_overlaps()
 
 
