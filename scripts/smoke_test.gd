@@ -4224,6 +4224,198 @@ func _ready() -> void:
 	match_node.away_defense_shape = Formations.DefenseShape.FLAT
 	match_node._sync_team_shapes()
 	print("Smoke Wave6 styles and spectacle OK")
+
+	# --- Shoot cam + goal crosshair (behind head → goal; restore after) ---
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	Engine.time_scale = 1.0
+	if cam:
+		cam.end_wing_cinematic(true)
+		cam.end_shoot_cam(0.0)
+		cam.reset_nudge()
+	# Prefer CB / first outfield; lock AI so possession stays put.
+	var shooter: Player = match_node._first_outfield(match_node._home_players)
+	if shooter == null:
+		shooter = player
+	for p in match_node._all_players():
+		p.ai_enabled = false
+		p.velocity = Vector3.ZERO
+	shooter.global_position = Vector3(0.0, 0.0, 8.0)
+	shooter.velocity = Vector3.ZERO
+	shooter.rotation.y = 0.0
+	shooter.on_bench = false
+	shooter.excluded = false
+	match_node._set_controlled(shooter)
+	player = shooter
+	shooter._pickup_block = 0.0
+	if not ball.try_pickup(shooter):
+		# Clear any stale carrier and force give (same pattern as Wave 2 smoke).
+		_smoke_clear_ball(ball)
+		if not ball.try_pickup(shooter):
+			push_error("Smoke shoot-cam: pickup failed")
+			get_tree().quit(1)
+			return
+	shooter.has_ball = true
+	_smoke_snap_ball_to_carrier(ball)
+	if not shooter.has_ball or ball.carrier != shooter:
+		push_error("Smoke shoot-cam: shooter must hold the ball")
+		get_tree().quit(1)
+		return
+	# Face +Z toward Away goal so aim∩goal plane is valid.
+	shooter.look_at(shooter.global_position + Vector3(0.0, 0.0, 4.0), Vector3.UP)
+	match_node.aim_mode = MatchController.AimMode.FACE
+	# Hold shoot so _update_shot_charge does not auto-release mid-assert.
+	Input.action_press("shoot")
+	match_node._charging = true
+	match_node._charge_held_s = ShotCraft.CHARGE_TIME_S * 0.55
+	match_node._update_shoot_cam_and_crosshair()
+	# Nudge physics ticks so the rig lerps toward the close-up.
+	for _i in range(12):
+		await get_tree().physics_frame
+		# Keep possession + charge pinned (AI/rules soft clears can race).
+		if ball.carrier != shooter:
+			ball.try_pickup(shooter)
+			shooter.has_ball = true
+			_smoke_snap_ball_to_carrier(ball)
+		match_node._charging = true
+		match_node._set_controlled(shooter)
+		match_node._update_shoot_cam_and_crosshair()
+	if cam == null or not cam.is_shoot_cam_active():
+		Input.action_release("shoot")
+		push_error("Smoke shoot-cam: should be active while charging")
+		get_tree().quit(1)
+		return
+	var head := shooter.head_world_position()
+	var desired := cam._shoot_desired_position(shooter)
+	var desired_to_head := desired.distance_to(head)
+	if desired_to_head > 2.6:
+		Input.action_release("shoot")
+		push_error("Smoke shoot-cam: desired close-up should sit near the head (dist=%.2f)" % desired_to_head)
+		get_tree().quit(1)
+		return
+	# Snap to desired so look/crosshair asserts aren't timing-sensitive on llvmpipe.
+	cam.global_position = desired
+	cam.look_at(cam.get_shoot_look(), Vector3.UP)
+	var cam_to_head := cam.global_position.distance_to(head)
+	if cam_to_head > 3.2:
+		Input.action_release("shoot")
+		push_error("Smoke shoot-cam: camera should be close behind the head (dist=%.2f)" % cam_to_head)
+		get_tree().quit(1)
+		return
+	var goal_look := cam.get_shoot_look()
+	var to_goal := (goal_look - cam.global_position).normalized()
+	var forward := -cam.global_transform.basis.z
+	if forward.dot(to_goal) < 0.75:
+		Input.action_release("shoot")
+		push_error("Smoke shoot-cam: should look toward the attacked goal")
+		get_tree().quit(1)
+		return
+	# Desired close-up sits behind the head relative to goal.
+	var head_to_goal := Vector3(goal_look.x - head.x, 0.0, goal_look.z - head.z).normalized()
+	var head_to_cam := Vector3(desired.x - head.x, 0.0, desired.z - head.z)
+	if head_to_cam.length_squared() > 0.01 and head_to_cam.normalized().dot(head_to_goal) > -0.2:
+		Input.action_release("shoot")
+		push_error("Smoke shoot-cam: desired cam should sit behind the head vs goal")
+		get_tree().quit(1)
+		return
+	var hud := match_node.hud
+	if hud == null or not hud.has_method("is_goal_crosshair_visible") or not hud.is_goal_crosshair_visible():
+		Input.action_release("shoot")
+		push_error("Smoke shoot-cam: goal crosshair should be visible while aiming")
+		get_tree().quit(1)
+		return
+	var plane_hit := MatchController.aim_point_on_goal_plane(
+		head, Vector3(0.0, 0.12, 1.0).normalized(), shooter.team_id
+	)
+	if absf(plane_hit.z - (Court.HALF_LENGTH - 0.5)) > 0.05:
+		Input.action_release("shoot")
+		push_error("Smoke shoot-cam: aim point should land on Away goal plane")
+		get_tree().quit(1)
+		return
+	if absf(plane_hit.x) > Court.GOAL_WIDTH * 0.5 + 0.01:
+		Input.action_release("shoot")
+		push_error("Smoke shoot-cam: aim point should clamp inside goal width")
+		get_tree().quit(1)
+		return
+	print("Smoke shoot-cam active OK dist=", cam_to_head, " crosshair=", hud.is_goal_crosshair_visible())
+
+	# Cancel → restore match cam + hide crosshair.
+	Input.action_release("shoot")
+	match_node._cancel_charge()
+	for _j in range(20):
+		await get_tree().physics_frame
+	if cam.is_shoot_cam_active():
+		push_error("Smoke shoot-cam: cancel should restore match camera")
+		get_tree().quit(1)
+		return
+	if hud.is_goal_crosshair_visible():
+		push_error("Smoke shoot-cam: crosshair should hide after cancel")
+		get_tree().quit(1)
+		return
+	# Elevated 3/4 target is far behind the attack (desired), and live cam eases out.
+	var match_desired := cam._desired_position(ball.global_position if ball else shooter.global_position)
+	var desired_dist := match_desired.distance_to(head)
+	if desired_dist < 8.0:
+		push_error("Smoke shoot-cam: match desired should be elevated 3/4 (dist=%.2f)" % desired_dist)
+		get_tree().quit(1)
+		return
+	var match_dist := cam.global_position.distance_to(head)
+	if match_dist < 3.5:
+		push_error("Smoke shoot-cam: live cam should ease away from head after restore (dist=%.2f)" % match_dist)
+		get_tree().quit(1)
+		return
+	print("Smoke shoot-cam cancel restore OK dist=", match_dist, " desired=", desired_dist)
+
+	# Release settle path: charge → release → settle then restore; wing cine still works.
+	if not shooter.has_ball:
+		if not ball.try_pickup(shooter):
+			push_error("Smoke shoot-cam: re-pickup failed")
+			get_tree().quit(1)
+			return
+		_smoke_snap_ball_to_carrier(ball)
+	match_node._set_controlled(shooter)
+	Input.action_press("shoot")
+	match_node._charging = true
+	match_node._charge_held_s = ShotCraft.CHARGE_TIME_S * 0.7
+	match_node._update_shoot_cam_and_crosshair()
+	for _pre in range(3):
+		await get_tree().physics_frame
+		match_node._charging = true
+		match_node._update_shoot_cam_and_crosshair()
+	if not cam.is_shoot_cam_active():
+		Input.action_release("shoot")
+		push_error("Smoke shoot-cam: expected active before release")
+		get_tree().quit(1)
+		return
+	Input.action_release("shoot")
+	match_node._release_charged_shot()
+	# Crosshair off immediately; cam may settle briefly.
+	if hud.is_goal_crosshair_visible():
+		push_error("Smoke shoot-cam: crosshair should hide on release")
+		get_tree().quit(1)
+		return
+	# Wait out settle window.
+	for _k in range(30):
+		await get_tree().physics_frame
+		if not cam.is_shoot_cam_active():
+			break
+	if cam.is_shoot_cam_active():
+		cam.end_shoot_cam(0.0)
+	if cam.is_shoot_cam_active():
+		push_error("Smoke shoot-cam: should restore after release settle")
+		get_tree().quit(1)
+		return
+	# Wing cinematic still available after shoot-cam handoff.
+	Engine.time_scale = 1.0
+	cam.wing_cinematic_enabled = true
+	cam.trigger_wing_cinematic()
+	if not cam.is_wing_cinematic_active():
+		push_error("Smoke shoot-cam: wing cinematic should still work after shoot-cam")
+		get_tree().quit(1)
+		return
+	cam.end_wing_cinematic(true)
+	Engine.time_scale = 1.0
+	print("Smoke shoot-cam release restore + wing cine OK")
 	print("SMOKE_OK")
 	get_tree().quit(0)
 

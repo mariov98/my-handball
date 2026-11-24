@@ -33,6 +33,7 @@ const COLOR_GOAL_AWAY := Color(1.0, 0.72, 0.35, 1.0)
 var shapes_label: Label
 var stamina_label: Label
 var sub_label: Label
+var _goal_crosshair: Control
 
 var _steps_pulse: Tween
 var _goal_tween: Tween
@@ -57,6 +58,7 @@ func _ready() -> void:
 	_ensure_shapes_label()
 	_ensure_stamina_label()
 	_ensure_sub_label()
+	_ensure_goal_crosshair()
 
 
 func set_score(home: int, away: int) -> void:
@@ -133,6 +135,22 @@ func set_sub_status(can_sub: bool, bench_label: String, bench_count: int) -> voi
 			(" · %s" % bench_label) if not bench_label.is_empty() else ""
 		)
 		sub_label.add_theme_color_override("font_color", Color(0.75, 0.82, 0.9, 0.75))
+
+
+## Goal-mouth aim reticle while shooting (screen-space over projected aim).
+func set_goal_crosshair(screen_pos: Vector2, visible_now: bool) -> void:
+	_ensure_goal_crosshair()
+	if _goal_crosshair == null:
+		return
+	if not visible_now:
+		_goal_crosshair.visible = false
+		return
+	_goal_crosshair.visible = true
+	_goal_crosshair.position = screen_pos - _goal_crosshair.size * 0.5
+
+
+func is_goal_crosshair_visible() -> bool:
+	return _goal_crosshair != null and is_instance_valid(_goal_crosshair) and _goal_crosshair.visible
 
 
 ## Phase 3 power / lob / jump-shot readout. Hidden when idle to avoid clutter.
@@ -512,6 +530,49 @@ func _ensure_sub_label() -> void:
 	sub_label.add_theme_constant_override("shadow_offset_y", 1)
 	sub_label.text = "SUB on whistle · , cycle"
 	$Root.add_child(sub_label)
+
+
+## Compact goal-plane reticle — readable, not a cluttered HUD badge.
+func _ensure_goal_crosshair() -> void:
+	if _goal_crosshair and is_instance_valid(_goal_crosshair):
+		return
+	_goal_crosshair = get_node_or_null("Root/GoalCrosshair") as Control
+	if _goal_crosshair:
+		_goal_crosshair.visible = false
+		return
+	_goal_crosshair = Control.new()
+	_goal_crosshair.name = "GoalCrosshair"
+	_goal_crosshair.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_goal_crosshair.visible = false
+	_goal_crosshair.size = Vector2(28, 28)
+	_goal_crosshair.z_index = 20
+	var ink := Color(0.98, 0.98, 0.92, 0.92)
+	var shadow := Color(0.05, 0.08, 0.12, 0.55)
+	# Shadow arms then bright arms (open center so the goal paint stays readable).
+	_add_cross_arm(_goal_crosshair, Rect2(12, 2, 4, 8), shadow)
+	_add_cross_arm(_goal_crosshair, Rect2(12, 18, 4, 8), shadow)
+	_add_cross_arm(_goal_crosshair, Rect2(2, 12, 8, 4), shadow)
+	_add_cross_arm(_goal_crosshair, Rect2(18, 12, 8, 4), shadow)
+	_add_cross_arm(_goal_crosshair, Rect2(13, 3, 2, 7), ink)
+	_add_cross_arm(_goal_crosshair, Rect2(13, 18, 2, 7), ink)
+	_add_cross_arm(_goal_crosshair, Rect2(3, 13, 7, 2), ink)
+	_add_cross_arm(_goal_crosshair, Rect2(18, 13, 7, 2), ink)
+	var dot := ColorRect.new()
+	dot.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	dot.position = Vector2(13, 13)
+	dot.size = Vector2(2, 2)
+	dot.color = Color(1.0, 0.82, 0.35, 0.95)
+	_goal_crosshair.add_child(dot)
+	$Root.add_child(_goal_crosshair)
+
+
+func _add_cross_arm(parent: Control, rect: Rect2, color: Color) -> void:
+	var arm := ColorRect.new()
+	arm.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	arm.position = rect.position
+	arm.size = rect.size
+	arm.color = color
+	parent.add_child(arm)
 
 
 func _flash_center(label: Label, text: String, hold: float, fade: float, color: Color = COLOR_BANNER_DEFAULT) -> void:
