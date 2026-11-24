@@ -6,6 +6,7 @@ class_name Player
 ## named parts (hair→feet) so anims and foul regions have real anchors.
 ## Phase 3: GK dive/track, outfield block volume for contested shots.
 ## Phase 4: formation-aware off-ball slots (wing / backcourt / pivot-ish).
+## Wave 5: role-distinct drive/mark/support (show, cut, seal, clear-out).
 
 signal possession_changed(has_ball: bool)
 signal dive_started
@@ -170,6 +171,9 @@ var _ai_pass_cd: float = 0.0
 var _ai_carry_dist: float = 0.0
 var _ai_carry_last_xz: Vector3 = Vector3.ZERO
 var _ai_carry_sampling: bool = false
+## Wave 5: cut cadence so off-ball motion isn't a permanent dash.
+var _ai_cut_cd: float = 0.0
+var _ai_cut_active: float = 0.0
 ## Torso mesh (kit). Kept as MeshInstance3D for older smoke paths.
 var _mesh: MeshInstance3D
 var _mesh_base_y: float = 1.30
@@ -245,6 +249,10 @@ func _physics_process(delta: float) -> void:
 		_fake_cd = maxf(0.0, _fake_cd - delta)
 	if _ai_fake_cd > 0.0:
 		_ai_fake_cd = maxf(0.0, _ai_fake_cd - delta)
+	if _ai_cut_cd > 0.0:
+		_ai_cut_cd = maxf(0.0, _ai_cut_cd - delta)
+	if _ai_cut_active > 0.0:
+		_ai_cut_active = maxf(0.0, _ai_cut_active - delta)
 	if fake_sold_t > 0.0:
 		fake_sold_t = maxf(0.0, fake_sold_t - delta)
 		if fake_sold_t <= 0.0 and fake_recover_t <= 0.0:
@@ -838,6 +846,8 @@ func reset_to_start() -> void:
 	clear_fake_motion()
 	_fake_cd = 0.0
 	_ai_fake_cd = 0.0
+	_ai_cut_cd = 0.0
+	_ai_cut_active = 0.0
 	fake_sold_t = 0.0
 	fake_recover_t = 0.0
 	gk_stance = GkMotion.Stance.IDLE
@@ -1061,47 +1071,59 @@ func _ai_free_ball_position() -> Vector3:
 		target.y = 0.0
 		target = _keep_outfield_legal(target)
 		return _steer_toward(target)
-	# Hold attack/defense-neutral mid shape toward last ball side.
+	# Hold role shape toward last ball side — not a second chaser (R4.3).
 	var slot := Formations.attack_slot(self, match_ball.global_position)
 	# Bias slightly toward ball without full chase.
-	slot = slot.lerp(Vector3(match_ball.global_position.x, 0.0, match_ball.global_position.z), 0.2)
+	slot = slot.lerp(Vector3(match_ball.global_position.x, 0.0, match_ball.global_position.z), 0.15)
+	slot = Formations.apply_teammate_spacing(slot, self, _ai_teammate_roster())
 	slot = _keep_outfield_legal(slot)
 	return _steer_toward(slot) * AI_ATTACK_SPEED_SCALE
 
 
 func _ai_defend_block(carrier: Player) -> Vector3:
+	# Wave 5 R4.4: mark threats (ball-side pressure) + help/cover on cutters/pivot.
 	var ball_pos := match_ball.global_position if match_ball else carrier.global_position
-	var slot := Formations.defense_slot(self, ball_pos, carrier)
-	# Micro-adjust toward the carrier lane so the wall isn't glued to spots.
+	var opponents := _ai_opponent_roster()
+	var mark := Formations.find_mark_target(self, opponents)
+	var help := Formations.find_help_threat(self, opponents, mark, ball_pos)
+	var slot := Formations.defense_mark_slot(self, ball_pos, carrier, mark, help)
+	slot = Formations.apply_teammate_spacing(slot, self, _ai_teammate_roster())
 	var carrier_pos := carrier.global_position
 	carrier_pos.y = 0.0
-	slot.x = lerpf(slot.x, carrier_pos.x, 0.12)
 	slot = _keep_outfield_legal(slot)
-	if carrier.has_ball and carrier_pos.distance_to(global_position) < 3.8:
+	var close := carrier_pos.distance_to(global_position) < 3.8
+	var marking_carrier := mark != null and mark == carrier
+	if carrier.has_ball and (close or marking_carrier):
 		raise_block(0.2)
 	return _steer_toward(slot) * AI_BLOCK_SPEED_SCALE
 
 
 func _ai_support_attack(carrier: Player) -> Vector3:
-	# Show for pass: hold a formation lane but step into an open angle when a
-	# teammate (esp. the human) has the ball — readable wing↔CB circulation.
-	# Crash: ball-side wing may seal a light screen between pivot and nearest defender.
+	# Wave 5 R4.5: show-for-pass, timed cuts, pivot seal, clear-out when crowded.
 	var ball_pos := carrier.global_position
-	var pivot := _ai_teammate_pivot()
-	var screen_def := _ai_nearest_opponent() if attack_shape == Formations.AttackShape.CRASH else null
-	var slot := Formations.show_for_pass_slot(self, ball_pos, pivot, screen_def)
-	var to_carrier := slot.distance_to(Vector3(ball_pos.x, 0.0, ball_pos.z))
-	if to_carrier < 2.4:
-		# Don't stack on the ball carrier — slide wider.
-		var role := Formations.role_for(self)
-		var side := 1.0 if role == Formations.Role.RIGHT_WING or role == Formations.Role.RIGHT_BACK else -1.0
-		if role == Formations.Role.CENTER_BACK or role == Formations.Role.PIVOT:
-			side = 0.0
-			slot.z += (-1.0 if team_id == 0 else 1.0) * 1.5
-		slot.x += side * 2.2
+	var teammates := _ai_teammate_roster()
+	var screen_def := _ai_nearest_opponent()
+	var role := Formations.role_for(self)
+	# Cut cadence: wings/backs flash cut; pivot seals continuously via support_attack_slot.
+	var want_cut := _ai_cut_active > 0.0
+	if (
+		not want_cut
+		and _ai_cut_cd <= 0.0
+		and role != Formations.Role.PIVOT
+		and role != Formations.Role.GK
+	):
+		# Stagger by roster index so the whole attack doesn't cut together.
+		var beat := (int(Time.get_ticks_msec() / 900) + player_index) % 5
+		if beat == 0 or beat == player_index % 5:
+			_ai_cut_active = 1.15
+			_ai_cut_cd = 2.8 + float(player_index % 3) * 0.35
+			want_cut = true
+	var slot := Formations.support_attack_slot(
+		self, ball_pos, carrier, teammates, screen_def, want_cut
+	)
 	slot = _keep_outfield_legal(slot)
-	# Slightly sharper close-out when showing so the lane arrives in time.
-	return _steer_toward(slot) * minf(AI_ATTACK_SPEED_SCALE * 1.08, 1.0)
+	var speed := AI_ATTACK_SPEED_SCALE * (1.14 if want_cut else 1.08)
+	return _steer_toward(slot) * minf(speed, 1.0)
 
 
 func _ai_teammate_pivot() -> Player:
@@ -1127,10 +1149,34 @@ func _ai_teammate_pivot() -> Player:
 func _ai_nearest_opponent() -> Player:
 	var best: Player = null
 	var best_d := INF
+	for opp in _ai_opponent_roster():
+		var d := global_position.distance_squared_to(opp.global_position)
+		if d < best_d:
+			best_d = d
+			best = opp
+	return best
+
+
+func _ai_teammate_roster() -> Array:
+	var out: Array = []
+	var parent_n := get_parent()
+	if parent_n == null:
+		return out
+	for sibling in parent_n.get_children():
+		if sibling == self or not (sibling is Player):
+			continue
+		var mate := sibling as Player
+		if mate.is_goalkeeper or mate.excluded or mate.on_bench:
+			continue
+		out.append(mate)
+	return out
+
+
+func _ai_opponent_roster() -> Array:
+	var out: Array = []
 	var my_parent := get_parent()
 	if my_parent == null or my_parent.get_parent() == null:
-		return null
-	# Home/Away roots are siblings under MatchController.
+		return out
 	for team_root in my_parent.get_parent().get_children():
 		if team_root == my_parent:
 			continue
@@ -1140,11 +1186,8 @@ func _ai_nearest_opponent() -> Player:
 			var opp := child as Player
 			if opp.team_id == team_id or opp.is_goalkeeper or opp.excluded or opp.on_bench:
 				continue
-			var d := global_position.distance_squared_to(opp.global_position)
-			if d < best_d:
-				best_d = d
-				best = opp
-	return best
+			out.append(opp)
+	return out
 
 
 func _ai_attack_with_ball(_delta: float) -> Vector3:
@@ -1198,9 +1241,8 @@ func _ai_attack_with_ball(_delta: float) -> Vector3:
 	if match_ball != null and (dist <= AI_SHOOT_RANGE or must_release) and not fake_active:
 		# Don't force a shot while pressed if a teammate is available.
 		if under_pressure and pass_target != null and not must_release:
-			return _steer_toward(_keep_outfield_legal(
-				Vector3(goal.x + (float(player_index) - 2.0) * 1.2, 0.0, goal.z)
-			)) * AI_ATTACK_SPEED_SCALE
+			var evade := Formations.attack_drive_slot(self, me)
+			return _steer_toward(_keep_outfield_legal(evade)) * AI_ATTACK_SPEED_SCALE
 		if _ai_shoot_cd <= 0.0 and (dist <= AI_SHOOT_RANGE or must_release):
 			var aim := (goal - (me + Vector3(0, 1.2, 0))).normalized()
 			# Slight aim noise so Away isn't laser-perfect.
@@ -1215,8 +1257,8 @@ func _ai_attack_with_ball(_delta: float) -> Vector3:
 				_ai_carry_sampling = false
 				_ai_carry_dist = 0.0
 				return Vector3.ZERO
-	# Approach goal with a slight lateral weave by index — stay outside 6 m.
-	var approach := Vector3(goal.x + (float(player_index) - 2.0) * 1.2, 0.0, goal.z)
+	# Wave 5 R4.3: role-specific drive (wings corridor, backs 9 m belt, pivot crease).
+	var approach := Formations.attack_drive_slot(self, me)
 	approach = _keep_outfield_legal(approach)
 	return _steer_toward(approach) * AI_ATTACK_SPEED_SCALE
 
