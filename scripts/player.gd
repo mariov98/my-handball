@@ -41,19 +41,26 @@ const COLLISION_MASK_COURT_AND_PLAYERS := 1 | 2
 enum HairStyle { SHORT = 0, MID = 1, LONG = 2, BALD = 3 }
 
 # AI tuning — pressure on defense, beatable on the break.
+# Core-loop feel: open 9 m / crease shots; pass under pressure; avoid stall back-passes.
 const AI_CHASE_SPEED_SCALE := 0.88
 const AI_BLOCK_SPEED_SCALE := 0.92
 const AI_ATTACK_SPEED_SCALE := 0.84
 const AI_GK_SPEED_SCALE := 0.76
 const AI_GK_TRACK_SPEED_SCALE := 1.0
-const AI_SHOOT_RANGE := 10.0
-const AI_SHOOT_COOLDOWN := 1.55
-const AI_PASS_COOLDOWN := 0.7
+const AI_SHOOT_RANGE := 10.5
+## Near crease: take the shot unless a clean forward escape exists.
+const AI_CREASE_SHOT_RANGE := 8.2
+const AI_SHOOT_COOLDOWN := 1.15
+const AI_PASS_COOLDOWN := 0.55
 const AI_BLOCK_DEPTH := 4.5
 ## Defender inside this range → prefer pass over forcing a shot.
 const AI_PRESSURE_RANGE := 2.9
 ## Carry distance that reads as "last step" before traveling (~3 plants).
 const AI_STEP_WARN_DIST := 2.5
+## Wall-clock possession without a release → force pass/shot (dead-attack guard).
+const AI_POSSESSION_FORCE_S := 3.6
+## Only circulate when this far from the attacked goal (was 8.5 — stalled 9 m looks).
+const AI_CIRCULATE_DIST := 12.0
 
 # Phase 3 GK dive
 const DIVE_DURATION := 0.55
@@ -175,6 +182,10 @@ var _ai_pass_cd: float = 0.0
 var _ai_carry_dist: float = 0.0
 var _ai_carry_last_xz: Vector3 = Vector3.ZERO
 var _ai_carry_sampling: bool = false
+## Seconds holding the ball this possession (AI release / stall guard).
+var _ai_possess_t: float = 0.0
+## MatchController sets when attack stalls without progress — honor next tick.
+var _ai_force_release: bool = false
 ## Wave 5: cut cadence so off-ball motion isn't a permanent dash.
 var _ai_cut_cd: float = 0.0
 var _ai_cut_active: float = 0.0
@@ -868,8 +879,7 @@ func reset_to_start() -> void:
 	_pickup_block = 0.0
 	_ai_shoot_cd = 0.0
 	_ai_pass_cd = 0.0
-	_ai_carry_dist = 0.0
-	_ai_carry_sampling = false
+	_ai_reset_possession_tracking()
 	_bob_phase = 0.0
 	diving = false
 	_dive_timer = 0.0
@@ -1257,6 +1267,44 @@ func _ai_opponent_roster() -> Array:
 	return out
 
 
+func _ai_reset_possession_tracking() -> void:
+	_ai_carry_dist = 0.0
+	_ai_carry_sampling = false
+	_ai_possess_t = 0.0
+	_ai_force_release = false
+
+
+func _ai_pass_is_forward(target: Player) -> bool:
+	if target == null:
+		return false
+	var attack_sign := 1.0 if team_id == 0 else -1.0
+	var dz := (target.global_position.z - global_position.z) * attack_sign
+	return dz >= -0.35
+
+
+func _ai_try_shoot_at_goal(dist: float, nine_m: bool) -> bool:
+	if match_ball == null or _ai_shoot_cd > 0.0 or fake_active:
+		return false
+	var goal := opponent_goal_point()
+	var me := global_position
+	var aim := (goal - (me + Vector3(0, 1.2, 0))).normalized()
+	# Slight aim noise so Away isn't laser-perfect.
+	aim += Vector3(randf_range(-0.06, 0.06), randf_range(-0.02, 0.03), randf_range(-0.04, 0.04))
+	aim = aim.normalized()
+	var lob := dist < 7.0 and (player_index % 2) == 0 and not nine_m
+	var charge := 0.72 if nine_m else 0.55
+	var impulse := ShotCraft.impulse_for_charge(charge, lob)
+	var up := ShotCraft.up_bias(lob)
+	var meta := {"lob": lob, "ai": true, "charge": charge}
+	if nine_m:
+		meta["nine_meter"] = true
+	if try_shoot(aim, impulse, match_ball, up, meta):
+		_ai_shoot_cd = AI_SHOOT_COOLDOWN
+		_ai_reset_possession_tracking()
+		return true
+	return false
+
+
 func _ai_attack_with_ball(_delta: float) -> Vector3:
 	var goal := opponent_goal_point()
 	var me := global_position
@@ -1264,21 +1312,32 @@ func _ai_attack_with_ball(_delta: float) -> Vector3:
 	if not _ai_carry_sampling:
 		_ai_carry_last_xz = xz
 		_ai_carry_dist = 0.0
+		_ai_possess_t = 0.0
 		_ai_carry_sampling = true
 	else:
 		_ai_carry_dist += xz.distance_to(_ai_carry_last_xz)
 		_ai_carry_last_xz = xz
+		_ai_possess_t += _delta
 	var flat := Vector3(goal.x - me.x, 0.0, goal.z - me.z)
 	var dist := flat.length()
 	# Pass or shoot before traveling (3 steps ≈ ~5.4 m with tuned gait).
-	var must_release := _ai_carry_dist >= 3.2
+	var must_release := _ai_carry_dist >= 3.2 or _ai_force_release
 	var step_warn := _ai_carry_dist >= AI_STEP_WARN_DIST
 	var under_pressure := _ai_under_pressure()
 	var pass_target := _ai_pass_target()
+	var forward_pass := _ai_pass_is_forward(pass_target)
+	var shot_lane := Formations.shot_lane_openness(me, team_id, _ai_opponent_roster())
+	var open_shot := (not under_pressure or shot_lane >= 0.52) and dist <= AI_SHOOT_RANGE
+	var crease_look := dist <= AI_CREASE_SHOT_RANGE
+	var force_release := must_release or _ai_possess_t >= AI_POSSESSION_FORCE_S
+	var nine_m := Formations.should_take_nine_meter_shot(
+		self, dist, under_pressure, pass_target != null and forward_pass
+	)
 	# Wave 3: sparingly fake under pressure before releasing.
 	if (
 		under_pressure
-		and not must_release
+		and not force_release
+		and not open_shot
 		and _ai_fake_cd <= 0.0
 		and not fake_active
 		and randf() < FakeMotion.AI_FAKE_CHANCE
@@ -1294,45 +1353,40 @@ func _ai_attack_with_ball(_delta: float) -> Vector3:
 			return _steer_toward(_keep_outfield_legal(
 				Vector3(goal.x + fake_jab_side * 1.4, 0.0, goal.z)
 			)) * AI_ATTACK_SPEED_SCALE
-	# Prefer pass under pressure / at step warning before forcing a contested shot.
+	# Take open 9 m / crease looks before recycling. Never stall on back-passes.
+	var should_shoot := (
+		open_shot
+		or nine_m
+		or (crease_look and (not under_pressure or shot_lane >= 0.4 or force_release))
+		or (force_release and (pass_target == null or not forward_pass or open_shot or crease_look))
+	)
+	if match_ball != null and should_shoot and not fake_active:
+		if _ai_try_shoot_at_goal(dist, nine_m):
+			return Vector3.ZERO
+	# Prefer pass under pressure / far from goal / force with a forward escape.
 	# Wave 6 R4.6a: vs man, avoid contested lanes when an open receiver exists.
 	var facing_man := Formations.facing_defense_of(self) == Formations.DefenseShape.INDIVIDUAL
-	var prefer_pass := pass_target != null and (
-		must_release
-		or under_pressure
-		or step_warn
-		or dist > 8.5
-		or (facing_man and under_pressure)
-		or ((int(Time.get_ticks_msec() / 700) + player_index) % 3) == 0
+	var prefer_pass := pass_target != null and not open_shot and (
+		(under_pressure and not (crease_look and shot_lane >= 0.55))
+		or (force_release and forward_pass)
+		or (step_warn and under_pressure and forward_pass)
+		or (dist > AI_CIRCULATE_DIST and forward_pass)
+		or (facing_man and under_pressure and forward_pass)
 	)
+	# Endless back-passes kill the attack — shoot instead when in range.
+	if prefer_pass and not forward_pass and dist <= AI_SHOOT_RANGE:
+		prefer_pass = false
+		if match_ball != null and not fake_active and _ai_try_shoot_at_goal(dist, nine_m):
+			return Vector3.ZERO
 	if match_ball != null and prefer_pass and _ai_pass_cd <= 0.0 and not fake_active:
 		if _ai_try_pass(pass_target):
 			return Vector3.ZERO
-	var nine_m := Formations.should_take_nine_meter_shot(
-		self, dist, under_pressure, pass_target != null
-	)
-	if match_ball != null and (dist <= AI_SHOOT_RANGE or must_release or nine_m) and not fake_active:
-		# Don't force a shot while pressed if a teammate is available (unless 9 m zone look).
-		if under_pressure and pass_target != null and not must_release and not nine_m:
-			var evade := Formations.attack_drive_for_style(self, me)
-			return _steer_toward(_keep_outfield_legal(evade)) * AI_ATTACK_SPEED_SCALE
-		if _ai_shoot_cd <= 0.0 and (dist <= AI_SHOOT_RANGE or must_release or nine_m):
-			var aim := (goal - (me + Vector3(0, 1.2, 0))).normalized()
-			# Slight aim noise so Away isn't laser-perfect.
-			aim += Vector3(randf_range(-0.06, 0.06), randf_range(-0.02, 0.03), randf_range(-0.04, 0.04))
-			aim = aim.normalized()
-			var lob := dist < 7.0 and (player_index % 2) == 0 and not nine_m
-			var charge := 0.72 if nine_m else 0.55
-			var impulse := ShotCraft.impulse_for_charge(charge, lob)
-			var up := ShotCraft.up_bias(lob)
-			var meta := {"lob": lob, "ai": true, "charge": charge}
-			if nine_m:
-				meta["nine_meter"] = true
-			if try_shoot(aim, impulse, match_ball, up, meta):
-				_ai_shoot_cd = AI_SHOOT_COOLDOWN
-				_ai_carry_sampling = false
-				_ai_carry_dist = 0.0
-				return Vector3.ZERO
+	# Last-chance release so possessions end in a shot or turnover, not a stall.
+	if match_ball != null and force_release and not fake_active:
+		if pass_target != null and _ai_pass_cd <= 0.0 and _ai_try_pass(pass_target):
+			return Vector3.ZERO
+		if _ai_try_shoot_at_goal(dist, nine_m or dist <= AI_SHOOT_RANGE):
+			return Vector3.ZERO
 	# Wave 5/6: role drive + man drive-and-kick / zone 9 m belt.
 	var approach := Formations.attack_drive_for_style(self, me)
 	approach = _keep_outfield_legal(approach)
@@ -1425,6 +1479,13 @@ func _ai_pass_target() -> Player:
 			global_position, recv.global_position, opponents
 		)
 		score += openness * 2.4
+		# Core-loop feel: punish back-passes so attacks advance or end.
+		var attack_sign := 1.0 if team_id == 0 else -1.0
+		var toward := (recv.global_position.z - global_position.z) * attack_sign
+		if toward < -1.2:
+			score -= 4.8
+		elif toward > 1.0:
+			score += 1.6
 		# R4.6a: vs man, strongly prefer clear lanes over contested ones.
 		if Formations.facing_defense_of(self) == Formations.DefenseShape.INDIVIDUAL:
 			if openness < 0.35:
@@ -1451,9 +1512,8 @@ func _ai_try_pass(target: Player) -> bool:
 	var face := face_direction()
 	if try_pass_to(target, match_ball, -1.0, face):
 		_ai_pass_cd = AI_PASS_COOLDOWN
-		_ai_shoot_cd = 0.45
-		_ai_carry_sampling = false
-		_ai_carry_dist = 0.0
+		_ai_shoot_cd = 0.35
+		_ai_reset_possession_tracking()
 		return true
 	return false
 
@@ -1502,8 +1562,7 @@ func _try_sticky_pass_catch() -> void:
 			return
 	if match_ball.try_pickup(self):
 		has_ball = true
-		_ai_carry_dist = 0.0
-		_ai_carry_sampling = false
+		_ai_reset_possession_tracking()
 		begin_catch_settle()
 		possession_changed.emit(true)
 		# Wave 6 R4.8: airborne catch near crease → Kempa redirect (readable, not teleport).
@@ -1546,8 +1605,7 @@ func _on_pickup_body_entered(body: Node3D) -> void:
 			return
 		if ball.try_pickup(self):
 			has_ball = true
-			_ai_carry_dist = 0.0
-			_ai_carry_sampling = false
+			_ai_reset_possession_tracking()
 			begin_catch_settle()
 			if is_goalkeeper and _should_arm_outlet_from_ball(ball):
 				arm_outlet_pass()
@@ -1602,6 +1660,7 @@ func _contest_ball(ball: Ball, is_save: bool) -> void:
 		# Soft gather — try pickup.
 		if ball.try_pickup(self):
 			has_ball = true
+			_ai_reset_possession_tracking()
 			begin_catch_settle()
 			if is_save:
 				_begin_gk_catch_pose()
@@ -1623,6 +1682,7 @@ func _contest_ball(ball: Ball, is_save: bool) -> void:
 	if is_save and (diving or speed < 6.5):
 		if ball.try_pickup(self):
 			has_ball = true
+			_ai_reset_possession_tracking()
 			begin_catch_settle()
 			_begin_gk_catch_pose()
 			arm_outlet_pass()
