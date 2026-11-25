@@ -4362,7 +4362,70 @@ func _ready() -> void:
 		push_error("Smoke shoot-cam: aim point should clamp inside goal width")
 		get_tree().quit(1)
 		return
-	print("Smoke shoot-cam active OK dist=", cam_to_head, " crosshair=", hud.is_goal_crosshair_visible())
+	# Polish: over-shoulder framing + aim FOV.
+	var shoulder_off := 0.0
+	var head_to_goal_flat := Vector3(goal_look.x - head.x, 0.0, goal_look.z - head.z)
+	if head_to_goal_flat.length_squared() > 0.01:
+		head_to_goal_flat = head_to_goal_flat.normalized()
+		var right_axis := head_to_goal_flat.cross(Vector3.UP).normalized()
+		shoulder_off = (desired - head).dot(right_axis)
+		if shoulder_off < 0.25:
+			Input.action_release("shoot")
+			push_error("Smoke shoot-cam polish: expected over-shoulder offset (got %.2f)" % shoulder_off)
+			get_tree().quit(1)
+			return
+	if cam.camera and absf(cam.camera.fov - cam.shoot_cam_fov) > 4.0:
+		Input.action_release("shoot")
+		push_error(
+			"Smoke shoot-cam polish: FOV should settle near shoot_cam_fov (got %.1f want %.1f)"
+			% [cam.camera.fov, cam.shoot_cam_fov]
+		)
+		get_tree().quit(1)
+		return
+	# Stick / mouse aim moves the goal crosshair while charging (does not break hold).
+	var aim_before := match_node._shoot_goal_aim
+	match_node._shoot_aim_mouse_delta = Vector2(40.0, -25.0)
+	match_node._update_shoot_goal_aim(0.05)
+	var aim_after_mouse := match_node._shoot_goal_aim
+	if absf(aim_after_mouse.x - aim_before.x) < 0.05 and absf(aim_after_mouse.y - aim_before.y) < 0.05:
+		Input.action_release("shoot")
+		push_error("Smoke shoot-cam polish: mouse delta should move goal aim while charging")
+		get_tree().quit(1)
+		return
+	# Simulate right-stick look nudge via direct offset (Input.get_axis is device-backed).
+	var stick_before := match_node._shoot_goal_aim
+	match_node._shoot_goal_aim.x = clampf(stick_before.x + 0.35, -Court.GOAL_WIDTH * 0.5, Court.GOAL_WIDTH * 0.5)
+	match_node._shoot_goal_aim.y = clampf(stick_before.y + 0.2, 0.08, Court.GOAL_HEIGHT - 0.05)
+	match_node._clamp_shoot_goal_aim(shooter.team_id)
+	match_node._update_shoot_cam_and_crosshair()
+	if match_node._shoot_goal_aim.distance_to(stick_before) < 0.05:
+		Input.action_release("shoot")
+		push_error("Smoke shoot-cam polish: stick/manual goal aim should move crosshair target")
+		get_tree().quit(1)
+		return
+	if not match_node._charging or not Input.is_action_pressed("shoot"):
+		push_error("Smoke shoot-cam polish: aim nudge must not cancel shoot charge")
+		get_tree().quit(1)
+		return
+	# Wave 6 nudge still blocked while shoot cam owns the frame.
+	var nudge_yaw_before := cam.nudge_yaw
+	cam.apply_nudge_input(1.0, 0.0, 0.0, 0.16)
+	if absf(cam.nudge_yaw - nudge_yaw_before) > 0.001:
+		Input.action_release("shoot")
+		push_error("Smoke shoot-cam polish: nudge must stay blocked during shoot cam")
+		get_tree().quit(1)
+		return
+	var fov_now := cam.camera.fov if cam.camera else -1.0
+	print(
+		"Smoke shoot-cam active OK dist=",
+		cam_to_head,
+		" crosshair=",
+		hud.is_goal_crosshair_visible(),
+		" shoulder=",
+		shoulder_off,
+		" fov=",
+		fov_now
+	)
 
 	# Cancel → restore match cam + hide crosshair.
 	Input.action_release("shoot")
