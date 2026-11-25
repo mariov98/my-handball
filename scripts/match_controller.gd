@@ -377,6 +377,7 @@ func _physics_process(delta: float) -> void:
 	_update_camera_attack_side()
 	_update_camera_nudge(delta)
 	_update_shot_charge(delta)
+	_update_shoot_cam_and_crosshair()
 	_update_dribble_input()
 	_park_bench_players()
 	_update_stamina_hud()
@@ -858,12 +859,17 @@ func _update_sub_hud() -> void:
 
 
 func _cancel_charge() -> void:
+	# Only snap shoot-cam when we actually abort a charge. Release already
+	# starts a settle (or hands off to wing cine) before ball.released fires.
+	var was_charging := _charging
 	_charging = false
 	_charge_held_s = 0.0
 	if controlled_player:
 		controlled_player.clear_shot_charge_motion()
 	if hud and hud.has_method("set_shot_status"):
 		hud.set_shot_status(0.0, false, "", false)
+	if was_charging:
+		_end_shoot_cam_presentation(0.0)
 
 
 func _release_charged_shot() -> void:
@@ -882,6 +888,7 @@ func _try_shoot_charged(held_s: float) -> void:
 	if controlled_player == null or not controlled_player.has_ball:
 		if hud and hud.has_method("set_shot_status"):
 			hud.set_shot_status(0.0, false, "", false)
+		_end_shoot_cam_presentation(0.0)
 		return
 	var charge := ShotCraft.charge_01(held_s)
 	var lob := Input.is_action_pressed("lob")
@@ -924,9 +931,14 @@ func _try_shoot_charged(held_s: float) -> void:
 		_spawn_shot_trace(from, aim, lob, jump_q)
 		# Nearby defending outfield raise hands for the contest window.
 		_nudge_defenders_to_block(controlled_player.team_id, from, aim)
-		# Wave 6 R5.3: brief wing-corridor cinematic (zoom + slow-mo).
+		# Shoot cam: wing finishes hand off to wing cinematic; else brief settle.
 		if wing and camera_rig:
+			_end_shoot_cam_presentation(0.0)
 			camera_rig.trigger_wing_cinematic()
+		else:
+			_end_shoot_cam_presentation(0.32)
+	else:
+		_end_shoot_cam_presentation(0.0)
 	if hud and hud.has_method("set_shot_status"):
 		hud.set_shot_status(0.0, false, "", false)
 
@@ -1122,6 +1134,9 @@ func _update_camera_attack_side() -> void:
 func _update_camera_nudge(delta: float) -> void:
 	if camera_rig == null or match_state == MatchState.MATCH_OVER:
 		return
+	# Shoot close-up owns the frame — don't fight it with nudge.
+	if camera_rig.is_shoot_cam_active():
+		return
 	var yaw := Input.get_axis("camera_yaw_left", "camera_yaw_right")
 	var zoom := Input.get_axis("camera_zoom_in", "camera_zoom_out")
 	var height := Input.get_axis("camera_height_down", "camera_height_up")
@@ -1138,6 +1153,83 @@ func _update_camera_nudge(delta: float) -> void:
 		height = 0.0
 	if absf(yaw) > 0.001 or absf(zoom) > 0.001 or absf(height) > 0.001:
 		camera_rig.apply_nudge_input(yaw, zoom, height, delta)
+
+
+## Shoot cam + goal crosshair while charging (windup / aim). Restores after release/cancel.
+func _update_shoot_cam_and_crosshair() -> void:
+	var aiming := (
+		_charging
+		and match_state == MatchState.LIVE
+		and controlled_player != null
+		and controlled_player.has_ball
+		and not controlled_player.is_faking()
+	)
+	if not aiming:
+		# Reticle is aim-only; shoot-cam settle may still hold the close-up briefly.
+		if hud and hud.has_method("set_goal_crosshair"):
+			hud.set_goal_crosshair(Vector2.ZERO, false)
+		return
+	var lob := Input.is_action_pressed("lob")
+	var aim := _compute_aim(lob)
+	if ThrowMotion.is_wing_finish_context(controlled_player):
+		aim = ThrowMotion.wing_aim_assist(controlled_player, aim)
+	var from := controlled_player.head_world_position()
+	var look := aim_point_on_goal_plane(from, aim, controlled_player.team_id)
+	if camera_rig:
+		if camera_rig.is_shoot_cam_active():
+			camera_rig.update_shoot_cam_look(look)
+		else:
+			camera_rig.begin_shoot_cam(controlled_player, look)
+	_show_goal_crosshair_at(look)
+
+
+func _end_shoot_cam_presentation(settle_s: float) -> void:
+	if hud and hud.has_method("set_goal_crosshair"):
+		hud.set_goal_crosshair(Vector2.ZERO, false)
+	if camera_rig:
+		camera_rig.end_shoot_cam(settle_s)
+
+
+func _show_goal_crosshair_at(world_point: Vector3) -> void:
+	if hud == null or not hud.has_method("set_goal_crosshair"):
+		return
+	if camera_rig == null or camera_rig.camera == null:
+		hud.set_goal_crosshair(Vector2.ZERO, false)
+		return
+	var cam := camera_rig.camera
+	if cam.is_position_behind(world_point):
+		hud.set_goal_crosshair(Vector2.ZERO, false)
+		return
+	var screen := cam.unproject_position(world_point)
+	var vp := get_viewport().get_visible_rect().size
+	if screen.x < -40.0 or screen.y < -40.0 or screen.x > vp.x + 40.0 or screen.y > vp.y + 40.0:
+		hud.set_goal_crosshair(Vector2.ZERO, false)
+		return
+	hud.set_goal_crosshair(screen, true)
+
+
+## Intersect aim ray with the attacked goal plane; clamp to the 3×2 mouth.
+static func aim_point_on_goal_plane(from: Vector3, aim: Vector3, team_id: int) -> Vector3:
+	var goal_z := Court.HALF_LENGTH - 0.5 if team_id == 0 else -(Court.HALF_LENGTH - 0.5)
+	var dir := aim
+	if dir.length_squared() < 0.0001:
+		dir = Vector3(0.0, 0.12, signf(goal_z))
+	dir = dir.normalized()
+	var hit: Vector3
+	if absf(dir.z) < 0.001:
+		hit = Vector3(from.x, from.y, goal_z)
+	else:
+		var t := (goal_z - from.z) / dir.z
+		if t < 0.05:
+			# Aiming away from goal — fall back to mouth center.
+			hit = Vector3(0.0, Court.GOAL_HEIGHT * 0.55, goal_z)
+		else:
+			hit = from + dir * t
+	var half_w := Court.GOAL_WIDTH * 0.5
+	hit.x = clampf(hit.x, -half_w, half_w)
+	hit.y = clampf(hit.y, 0.08, Court.GOAL_HEIGHT - 0.05)
+	hit.z = goal_z
+	return hit
 
 
 func _on_ball_picked_up(player: Player) -> void:

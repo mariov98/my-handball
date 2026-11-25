@@ -1705,6 +1705,16 @@ func get_head_region() -> Area3D:
 	return _head_region
 
 
+## Live head center for shoot-cam close-up (falls back to rest height).
+func head_world_position() -> Vector3:
+	if _head != null and is_instance_valid(_head):
+		return _head.global_position
+	var region := get_head_region()
+	if region != null and is_instance_valid(region):
+		return region.global_position
+	return global_position + Vector3(0.0, 1.78, 0.0)
+
+
 ## Independent upper-body yaw vs feet (Wave 2 pass/shoot windup).
 func set_torso_yaw_offset(yaw: float) -> void:
 	_torso_yaw_offset = yaw
