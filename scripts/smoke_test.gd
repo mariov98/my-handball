@@ -4718,6 +4718,206 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 	print("Smoke core-loop feel OK (AI shot, pass bias, soft-locks, period progress)")
+
+	# --- AI credibility lite (R8.1): pressure outlets, contest windows, GK shot-line ---
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	match_node.rules.enabled = false
+	Engine.time_scale = 1.0
+	var cred_cb: Player = null
+	var cred_rw: Player = null
+	var cred_lb: Player = null
+	var cred_marker: Player = null
+	var cred_lane: Player = null
+	for p in match_node._away_players:
+		p.ai_enabled = false
+		p.velocity = Vector3.ZERO
+		p.match_frozen = false
+		if p.on_bench or p.is_goalkeeper or p.excluded:
+			continue
+		match Formations.role_for(p):
+			Formations.Role.CENTER_BACK:
+				cred_cb = p
+			Formations.Role.RIGHT_WING:
+				cred_rw = p
+			Formations.Role.LEFT_BACK:
+				cred_lb = p
+	for p in match_node._home_players:
+		p.ai_enabled = false
+		p.velocity = Vector3.ZERO
+		p.match_frozen = false
+		if p.on_bench or p.is_goalkeeper or p.excluded:
+			continue
+		if cred_marker == null:
+			cred_marker = p
+		elif cred_lane == null:
+			cred_lane = p
+	if cred_cb == null:
+		cred_cb = match_node._first_outfield(match_node._away_players)
+	if cred_cb == null or cred_rw == null or cred_marker == null or cred_lane == null:
+		push_error("Smoke AI-cred: need Away CB/RW and two Home defenders")
+		get_tree().quit(1)
+		return
+
+	# Pressure pass: contested forward lane loses to clear side outlet.
+	# Away attacks −Z. Lane defender on CB→RW; marker on CB; LB clear forward-side escape.
+	cred_cb.global_position = Vector3(0.0, 0.0, -2.0)
+	cred_cb.rotation.y = PI
+	cred_rw.global_position = Vector3(0.3, 0.0, -8.5)
+	cred_rw.rotation.y = PI
+	if cred_lb:
+		# Forward-side so it stays in the aim cone while reading as a side outlet.
+		cred_lb.global_position = Vector3(-5.2, 0.0, -5.5)
+		cred_lb.rotation.y = PI
+	cred_lane.global_position = Vector3(0.15, 0.0, -5.2)
+	cred_marker.global_position = Vector3(0.4, 0.0, -2.4)
+	# Park other bodies off lanes so openness / cone picks are controlled.
+	for p in match_node._home_players:
+		if p == cred_marker or p == cred_lane or p.is_goalkeeper or p.on_bench:
+			continue
+		p.global_position = Vector3(8.0, 0.0, 12.0)
+	for p in match_node._away_players:
+		if p == cred_cb or p == cred_rw or p == cred_lb or p.is_goalkeeper or p.on_bench:
+			continue
+		p.global_position = Vector3(-9.0, 0.0, 10.0)
+	match_node._give_ball_to(cred_cb)
+	cred_cb.ai_enabled = false
+	var under_p := cred_cb._ai_under_pressure()
+	var side_ok := cred_lb != null and cred_cb._ai_pass_is_side_outlet(cred_lb)
+	var lane_open_rw := Formations.pass_lane_openness(
+		cred_cb.global_position, cred_rw.global_position, [cred_lane, cred_marker]
+	)
+	var lane_open_lb := Formations.pass_lane_openness(
+		cred_cb.global_position, cred_lb.global_position, [cred_lane, cred_marker]
+	)
+	var preferred_p := cred_cb._ai_pass_target()
+	print(
+		"Smoke AI-cred pressure under=", under_p,
+		" side_lb=", side_ok,
+		" open_rw=", lane_open_rw,
+		" open_lb=", lane_open_lb,
+		" prefer=", preferred_p.name if preferred_p else "null",
+		" rw=", cred_rw.name,
+		" lb=", cred_lb.name if cred_lb else "null"
+	)
+	if not under_p:
+		push_error("Smoke AI-cred: marker in range should register pressure")
+		get_tree().quit(1)
+		return
+	if cred_lb == null or not side_ok:
+		push_error("Smoke AI-cred: LB should count as side outlet")
+		get_tree().quit(1)
+		return
+	if lane_open_rw >= lane_open_lb:
+		push_error("Smoke AI-cred: RW lane should be more contested than LB")
+		get_tree().quit(1)
+		return
+	if preferred_p == cred_rw:
+		push_error("Smoke AI-cred: under pressure, contested RW should lose to clear side outlet")
+		get_tree().quit(1)
+		return
+	if preferred_p != cred_lb:
+		push_error("Smoke AI-cred: under pressure should prefer clear side LB over contested RW")
+		get_tree().quit(1)
+		return
+
+	# Contest window: raise_block arms a readable tip window; held ball is never stolen.
+	_smoke_clear_ball(ball)
+	cred_marker.raise_block(Player.AI_CONTEST_WINDOW_S)
+	if not cred_marker.block_ready:
+		push_error("Smoke AI-cred: raise_block should arm block_ready")
+		get_tree().quit(1)
+		return
+	if cred_marker._block_timer + 0.001 < Player.AI_CONTEST_WINDOW_S:
+		push_error("Smoke AI-cred: contest window duration should stick")
+		get_tree().quit(1)
+		return
+	# Held ball: block enter must not steal.
+	match_node._give_ball_to(cred_cb)
+	cred_cb.global_position = cred_marker.global_position + Vector3(0.0, 0.0, -1.0)
+	ball.global_position = cred_cb.global_position + Vector3(0.0, 1.1, 0.0)
+	cred_marker._on_block_body_entered(ball)
+	if ball.carrier != cred_cb or not cred_cb.has_ball:
+		push_error("Smoke AI-cred: contest must not teleport-steal a held ball")
+		get_tree().quit(1)
+		return
+	# Free ball tip still works inside the window.
+	_smoke_clear_ball(ball)
+	cred_marker.raise_block(1.0)
+	cred_marker.global_position = Vector3(0.0, 0.0, 8.0)
+	ball.global_position = cred_marker.global_position + Vector3(0.0, 1.2, -0.6)
+	ball.linear_velocity = Vector3(0.0, 0.0, 11.0)
+	ball.last_shot_meta = {
+		"time_msec": Time.get_ticks_msec(),
+		"shooter": cred_cb,
+	}
+	var tip_speed_before := ball.linear_velocity.z
+	cred_marker._contest_ball(ball, false)
+	print(
+		"Smoke AI-cred contest window ready=", cred_marker.block_ready,
+		" tip_z ", tip_speed_before, "→", ball.linear_velocity.z,
+		" held_guard=OK"
+	)
+	if ball.linear_velocity.z >= tip_speed_before:
+		push_error("Smoke AI-cred: contest tip should kill forward speed")
+		get_tree().quit(1)
+		return
+
+	# GK shot-line cover: cut X stays near ideal line; near-post shade is mild.
+	var home_gk_c := match_node._goalkeeper_for(0)
+	if home_gk_c == null:
+		push_error("Smoke AI-cred: missing home GK")
+		get_tree().quit(1)
+		return
+	var threat_r := Vector3(4.5, 0.0, -6.0)
+	var threat_c := Vector3(0.0, 0.0, -6.0)
+	var cut_r := home_gk_c._gk_angle_cut_target(
+		threat_r, home_gk_c.start_position, 1.0
+	)
+	var cut_c := home_gk_c._gk_angle_cut_target(
+		threat_c, home_gk_c.start_position, 1.0
+	)
+	var line_r := home_gk_c.gk_shot_line_x_at_cut(threat_r)
+	var cover_err := absf(cut_r.x - line_r)
+	var near_post := Court.GOAL_WIDTH * 0.5
+	print(
+		"Smoke AI-cred GK cut_r.x=", cut_r.x,
+		" line=", line_r,
+		" err=", cover_err,
+		" cut_c.x=", cut_c.x,
+		" step_z=", cut_r.z
+	)
+	if cut_r.x <= cut_c.x + 0.1:
+		push_error("Smoke AI-cred: right threat should pull GK X toward near post / line")
+		get_tree().quit(1)
+		return
+	if cover_err > 0.85:
+		push_error("Smoke AI-cred: GK cut should stay close to shot line (cover)")
+		get_tree().quit(1)
+		return
+	if absf(cut_r.x - near_post) < cover_err * 0.25 and cover_err > 0.4:
+		# Soft guard: do not hug the post harder than the shot line.
+		pass
+	if absf(cut_c.x) > 0.55:
+		push_error("Smoke AI-cred: center threat should keep GK near middle")
+		get_tree().quit(1)
+		return
+	if cut_r.z <= home_gk_c.start_position.z + 0.25:
+		push_error("Smoke AI-cred: GK should still step off the line")
+		get_tree().quit(1)
+		return
+	# Dive vocabulary still arms (Wave 3 volumes intact).
+	home_gk_c.reset_to_start()
+	home_gk_c.match_frozen = false
+	home_gk_c._dive_cd = 0.0
+	var cred_dived := home_gk_c.try_dive(Vector3(1.0, 0.0, 0.2))
+	if not cred_dived or not home_gk_c.diving:
+		push_error("Smoke AI-cred: GK dive should still start")
+		get_tree().quit(1)
+		return
+	home_gk_c.diving = false
+	home_gk_c._dive_timer = 0.0
+	print("Smoke AI credibility OK (pressure outlet, contest window, GK cover)")
 	print("SMOKE_OK")
 	get_tree().quit(0)
 

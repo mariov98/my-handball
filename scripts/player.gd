@@ -42,6 +42,7 @@ enum HairStyle { SHORT = 0, MID = 1, LONG = 2, BALD = 3 }
 
 # AI tuning — pressure on defense, beatable on the break.
 # Core-loop feel: open 9 m / crease shots; pass under pressure; avoid stall back-passes.
+# AI credibility: pressure outlets, readable contest windows, GK shot-line cover.
 const AI_CHASE_SPEED_SCALE := 0.88
 const AI_BLOCK_SPEED_SCALE := 0.92
 const AI_ATTACK_SPEED_SCALE := 0.84
@@ -61,6 +62,14 @@ const AI_STEP_WARN_DIST := 2.5
 const AI_POSSESSION_FORCE_S := 3.6
 ## Only circulate when this far from the attacked goal (was 8.5 — stalled 9 m looks).
 const AI_CIRCULATE_DIST := 12.0
+## Readable contest window while marking / closing out (not a teleport steal).
+const AI_CONTEST_WINDOW_S := 0.62
+const AI_CONTEST_CLOSE_M := 4.2
+## Contested free-ball age windows (shot vs pass) — tips only while block_ready.
+const CONTEST_SHOT_AGE_MS := 1300
+const CONTEST_PASS_AGE_MS := 900
+## Lane openness below this under pressure → treat as contested hold (prefer other outlet).
+const AI_PRESSURE_LANE_MIN := 0.40
 
 # Phase 3 GK dive
 const DIVE_DURATION := 0.55
@@ -70,6 +79,8 @@ const DIVE_UP := 3.0
 const GK_LATERAL_BOOST := 1.18
 const AI_DIVE_REACT_DIST := 11.5
 const AI_DIVE_MIN_BALL_SPEED := 7.0
+## Mild near-post shade — keep body on the shot line (credibility).
+const GK_NEAR_POST_BIAS := 0.22
 ## Phase F: catch settle (brief move penalty) + GK outlet delay.
 const CATCH_SETTLE_S := 0.38
 const CATCH_SETTLE_SPEED := 0.52
@@ -398,6 +409,23 @@ func _physics_process(delta: float) -> void:
 	if planar.length() > FACE_THRESHOLD and not diving and _js_plant_t <= 0.0 and not fake_active:
 		var target_yaw := atan2(planar.x, planar.z)
 		rotation.y = lerp_angle(rotation.y, target_yaw, 1.0 - exp(-12.0 * delta))
+	elif (
+		is_goalkeeper
+		and not diving
+		and not on_bench
+		and not excluded
+		and match_ball != null
+		and planar.length() <= FACE_THRESHOLD
+	):
+		# Set GK faces the threat so the body covers the shot line.
+		var threat_look: Vector3 = match_ball.global_position
+		if match_ball.carrier != null and match_ball.carrier.team_id != team_id:
+			threat_look = match_ball.carrier.global_position
+		var look: Vector3 = threat_look - global_position
+		look.y = 0.0
+		if look.length_squared() > 0.25:
+			var face_yaw := atan2(look.x, look.z)
+			rotation.y = lerp_angle(rotation.y, face_yaw, 1.0 - exp(-8.0 * delta))
 
 	if on_bench or excluded:
 		rotation.y = Court.bench_yaw(team_id)
@@ -1080,7 +1108,7 @@ func _ai_gk_wish() -> Vector3:
 	return _steer_toward(target)
 
 
-## Cut the angle: advance off the line toward the threat, bias near post.
+## Cut the angle: sit on shooter→goal line with mild near-post shade.
 func _gk_angle_cut_target(threat_pos: Vector3, home: Vector3, toward_court: float) -> Vector3:
 	var goal_z := home.z
 	var goal_center := Vector3(0.0, 0.0, goal_z)
@@ -1090,12 +1118,13 @@ func _gk_angle_cut_target(threat_pos: Vector3, home: Vector3, toward_court: floa
 	var near_post_x := 0.0
 	if absf(threat_pos.x) > 0.65:
 		near_post_x = signf(threat_pos.x) * (Court.GOAL_WIDTH * 0.5)
-	# Interpolate along shooter → goal, then bias X toward near post.
-	var cut := threat_pos.lerp(goal_center, lerpf(0.72, 0.88, depth_frac))
-	cut.x = lerpf(cut.x, near_post_x, 0.38)
+	# Sit harder on the shot line (higher lerp → closer to goal, body covers).
+	var cut := threat_pos.lerp(goal_center, lerpf(0.78, 0.92, depth_frac))
+	# Mild near-post shade — do not walk off the shot line.
+	cut.x = lerpf(cut.x, near_post_x, GK_NEAR_POST_BIAS)
 	cut.x = clampf(cut.x, -3.4, 3.4)
 	# Step off the goal line as the threat closes (angle cut).
-	var step := lerpf(0.55, 2.35, depth_frac)
+	var step := lerpf(0.65, 2.55, depth_frac)
 	cut.z = goal_z + toward_court * step
 	if team_id == 0:
 		cut.z = clampf(cut.z, -18.5, -14.0)
@@ -1103,6 +1132,19 @@ func _gk_angle_cut_target(threat_pos: Vector3, home: Vector3, toward_court: floa
 		cut.z = clampf(cut.z, 14.0, 18.5)
 	cut.y = 0.0
 	return cut
+
+
+## Ideal planar X of shooter→goal-mouth at the GK cut depth (smoke / cover check).
+func gk_shot_line_x_at_cut(threat_pos: Vector3) -> float:
+	var home := start_position
+	var toward_court := 1.0 if team_id == 0 else -1.0
+	var cut := _gk_angle_cut_target(threat_pos, home, toward_court)
+	var goal_z := home.z
+	var gap_z := goal_z - threat_pos.z
+	if absf(gap_z) < 0.05:
+		return clampf(threat_pos.x, -3.4, 3.4)
+	var t := clampf((cut.z - threat_pos.z) / gap_z, 0.0, 1.0)
+	return clampf(lerpf(threat_pos.x, 0.0, t), -3.4, 3.4)
 
 
 func _predict_gk_intercept(ball_pos: Vector3, ball_vel: Vector3) -> Vector3:
@@ -1158,11 +1200,38 @@ func _ai_defend_block(carrier: Player) -> Vector3:
 	var carrier_pos := carrier.global_position
 	carrier_pos.y = 0.0
 	slot = _keep_outfield_legal(slot)
-	var close := carrier_pos.distance_to(global_position) < 3.8
+	var close := carrier_pos.distance_to(global_position) < AI_CONTEST_CLOSE_M
 	var marking_carrier := mark != null and mark == carrier
+	# Readable contest window while pressuring the carrier (arms up — not a steal).
 	if carrier.has_ball and (close or marking_carrier):
-		raise_block(0.2)
+		raise_block(AI_CONTEST_WINDOW_S)
+	elif match_ball != null and match_ball.carrier == null:
+		# Tip window on free shots/passes flying through our lane.
+		_ai_contest_free_ball_window()
 	return _steer_toward(slot) * AI_BLOCK_SPEED_SCALE
+
+
+## Raise a short contest window when a free ball is approaching through our corridor.
+func _ai_contest_free_ball_window() -> void:
+	if match_ball == null or diving or match_frozen:
+		return
+	var vel := match_ball.linear_velocity
+	var speed := vel.length()
+	if speed < 5.0:
+		return
+	var to_me := global_position - match_ball.global_position
+	to_me.y = 0.0
+	if to_me.length_squared() < 0.01:
+		return
+	# Approaching and within a readable tip range.
+	if vel.dot(to_me) <= 0.0:
+		return
+	var lateral := absf(
+		Vector3(vel.x, 0.0, vel.z).normalized().cross(to_me.normalized()).y
+	) * to_me.length()
+	if to_me.length() > 5.5 or lateral > 1.55:
+		return
+	raise_block(AI_CONTEST_WINDOW_S * 0.85)
 
 
 func _ai_support_attack(carrier: Player) -> Vector3:
@@ -1282,6 +1351,16 @@ func _ai_pass_is_forward(target: Player) -> bool:
 	return dz >= -0.35
 
 
+## Safe side outlet: enough lateral escape without dumping backward.
+func _ai_pass_is_side_outlet(target: Player) -> bool:
+	if target == null:
+		return false
+	var attack_sign := 1.0 if team_id == 0 else -1.0
+	var dz := (target.global_position.z - global_position.z) * attack_sign
+	var dx := absf(target.global_position.x - global_position.x)
+	return dz >= -0.85 and dx >= 2.0
+
+
 func _ai_try_shoot_at_goal(dist: float, nine_m: bool) -> bool:
 	if match_ball == null or _ai_shoot_cd > 0.0 or fake_active:
 		return false
@@ -1363,18 +1442,21 @@ func _ai_attack_with_ball(_delta: float) -> Vector3:
 	if match_ball != null and should_shoot and not fake_active:
 		if _ai_try_shoot_at_goal(dist, nine_m):
 			return Vector3.ZERO
-	# Prefer pass under pressure / far from goal / force with a forward escape.
-	# Wave 6 R4.6a: vs man, avoid contested lanes when an open receiver exists.
+	# Prefer pass under pressure / far from goal / force with a forward/side escape.
+	# Credibility: under mark, clear outlets beat contested holds.
 	var facing_man := Formations.facing_defense_of(self) == Formations.DefenseShape.INDIVIDUAL
+	var side_outlet := _ai_pass_is_side_outlet(pass_target)
+	var safe_outlet := forward_pass or side_outlet
 	var prefer_pass := pass_target != null and not open_shot and (
-		(under_pressure and not (crease_look and shot_lane >= 0.55))
-		or (force_release and forward_pass)
-		or (step_warn and under_pressure and forward_pass)
+		(under_pressure and safe_outlet and not (crease_look and shot_lane >= 0.55))
+		or (force_release and safe_outlet)
+		or (step_warn and under_pressure and safe_outlet)
 		or (dist > AI_CIRCULATE_DIST and forward_pass)
-		or (facing_man and under_pressure and forward_pass)
+		or (facing_man and under_pressure and safe_outlet)
 	)
 	# Endless back-passes kill the attack — shoot instead when in range.
-	if prefer_pass and not forward_pass and dist <= AI_SHOOT_RANGE:
+	# Side outlets under pressure stay legal (escape the mark).
+	if prefer_pass and not forward_pass and not side_outlet and dist <= AI_SHOOT_RANGE:
 		prefer_pass = false
 		if match_ball != null and not fake_active and _ai_try_shoot_at_goal(dist, nine_m):
 			return Vector3.ZERO
@@ -1463,7 +1545,8 @@ func _ai_pass_target() -> Player:
 	else:
 		face = face.normalized()
 	var opponents := _ai_opponent_roster()
-	# Wave 6: score open lanes / Kempa jumpers, not only cone geometry.
+	var under_pressure := _ai_under_pressure()
+	# Wave 6 + credibility: open lanes / pressure outlets / Kempa jumpers.
 	var best: Player = null
 	var best_score := -INF
 	for mate in roster:
@@ -1486,6 +1569,16 @@ func _ai_pass_target() -> Player:
 			score -= 4.8
 		elif toward > 1.0:
 			score += 1.6
+		# Under mark: prefer clear forward/side outlets over contested holds.
+		if under_pressure:
+			if openness < AI_PRESSURE_LANE_MIN:
+				score -= 4.5
+			else:
+				score += openness * 2.2
+			if _ai_pass_is_side_outlet(recv) and openness >= AI_PRESSURE_LANE_MIN:
+				score += 2.4
+			if toward > 0.5 and openness >= AI_PRESSURE_LANE_MIN:
+				score += 1.8
 		# R4.6a: vs man, strongly prefer clear lanes over contested ones.
 		if Formations.facing_defense_of(self) == Formations.DefenseShape.INDIVIDUAL:
 			if openness < 0.35:
@@ -1639,15 +1732,23 @@ func _on_block_body_entered(body: Node3D) -> void:
 	if not (body is Ball):
 		return
 	var ball := body as Ball
+	# Never teleport-steal a held ball — contests are free-ball tip windows only.
 	if ball.carrier != null:
 		return
 	if ball._last_carrier != null and ball._last_carrier.team_id == team_id:
 		return
-	# Fresh shot window (~1.1s) or fast ball.
+	# Readable contest window: fresh shot / pass age, or fast free ball.
+	var age_ms := 0
 	var age_ok := true
 	if ball.last_shot_meta.has("time_msec"):
-		age_ok = Time.get_ticks_msec() - int(ball.last_shot_meta["time_msec"]) < 1100
-	if not age_ok and ball.linear_velocity.length() < 7.0:
+		age_ms = Time.get_ticks_msec() - int(ball.last_shot_meta["time_msec"])
+		var age_limit := CONTEST_PASS_AGE_MS if ball.is_pass_in_flight() else CONTEST_SHOT_AGE_MS
+		age_ok = age_ms < age_limit
+	var speed := ball.linear_velocity.length()
+	if not age_ok and speed < 7.0:
+		return
+	# Passes can be tipped a bit slower than shots while still in the window.
+	if ball.is_pass_in_flight() and not age_ok and speed < 5.0:
 		return
 	_contest_ball(ball, false)
 

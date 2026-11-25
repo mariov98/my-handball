@@ -425,7 +425,7 @@ resources/        materials / physics (reserved)
 godot --path . -- --smoke
 ```
 
-Expect `SMOKE_OK` after Phase 1–5 + Phase A–G + Waves 0–6 + shoot-cam + core-loop feel checks (AI shot aggression, soft-lock recoveries, period progress).
+Expect `SMOKE_OK` after Phase 1–5 + Phase A–G + Waves 0–6 + shoot-cam + core-loop feel + AI credibility checks (pressure outlets, contest windows, GK shot-line cover).
 
 ## License
 
