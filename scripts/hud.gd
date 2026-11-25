@@ -16,6 +16,11 @@ const COLOR_BANNER_TRAVEL := Color(1.0, 0.42, 0.32, 1.0)
 const COLOR_PASSIVE := Color(1.0, 0.72, 0.45, 1.0)
 const COLOR_GOAL_HOME := Color(0.45, 0.85, 1.0, 1.0)
 const COLOR_GOAL_AWAY := Color(1.0, 0.72, 0.35, 1.0)
+const COLOR_EXCLUSION := Color(1.0, 0.78, 0.35, 1.0)
+const COLOR_EXCLUSION_LOW := Color(1.0, 0.55, 0.3, 1.0)
+const COLOR_EXCLUSION_RED := Color(1.0, 0.38, 0.32, 1.0)
+## Default 2′ exclusion length for pip fill (match-clock seconds).
+const EXCLUSION_PIP_MAX_S := 120.0
 
 @onready var score_label: Label = $Root/ScoreLabel
 @onready var clock_label: Label = $Root/ClockLabel
@@ -33,6 +38,7 @@ const COLOR_GOAL_AWAY := Color(1.0, 0.72, 0.35, 1.0)
 var shapes_label: Label
 var stamina_label: Label
 var sub_label: Label
+var exclusion_label: Label
 var _goal_crosshair: Control
 
 var _steps_pulse: Tween
@@ -58,6 +64,7 @@ func _ready() -> void:
 	_ensure_shapes_label()
 	_ensure_stamina_label()
 	_ensure_sub_label()
+	_ensure_exclusion_label()
 	_ensure_goal_crosshair()
 
 
@@ -275,7 +282,7 @@ func set_hold_status(
 		hold_label.add_theme_color_override("font_color", COLOR_HOLD_IDLE)
 
 
-## Secondary rules line (passive only) — keep steps out of this to avoid clutter.
+## Secondary rules line (passive / 7 m ready) — exclusion clocks use set_exclusion_status.
 ## Phase C: "Passive (lite)" + receive count after warn so the hybrid model is readable.
 func set_rules_status(text: String) -> void:
 	rules_label.text = text
@@ -284,6 +291,73 @@ func set_rules_status(text: String) -> void:
 		rules_label.add_theme_color_override("font_color", COLOR_PASSIVE)
 	else:
 		rules_label.add_theme_color_override("font_color", Color(1.0, 0.92, 0.55, 1.0))
+
+
+## Persistent 2′ / RED exclusion clock pip(s). `rows` is Array of Dictionaries:
+## { "label": String, "team_id": int, "remaining": float, "red": bool, "max_s": float }
+## Cleared (hidden) when empty — both teams can appear at once.
+func set_exclusion_status(rows: Array) -> void:
+	_ensure_exclusion_label()
+	if exclusion_label == null:
+		return
+	if rows.is_empty():
+		exclusion_label.visible = false
+		exclusion_label.text = ""
+		return
+	var lines: PackedStringArray = []
+	var any_red := false
+	var any_low := false
+	for row in rows:
+		if typeof(row) != TYPE_DICTIONARY:
+			continue
+		var d: Dictionary = row
+		var who := str(d.get("label", d.get("name", "?")))
+		var team_id := int(d.get("team_id", 0))
+		var team := "H" if team_id == 0 else "A"
+		if bool(d.get("red", false)):
+			any_red = true
+			lines.append("RED %s %s" % [team, who])
+			continue
+		var rem := maxf(0.0, float(d.get("remaining", 0.0)))
+		var max_s := maxf(1.0, float(d.get("max_s", EXCLUSION_PIP_MAX_S)))
+		if rem <= 30.0:
+			any_low = true
+		var total := int(ceil(rem))
+		var clock := "%d:%02d" % [total / 60, total % 60]
+		var pips_total := 10
+		var filled := int(ceil((rem / max_s) * float(pips_total)))
+		filled = clampi(filled, 0, pips_total)
+		var pip := ""
+		for i in range(pips_total):
+			pip += "●" if i < filled else "○"
+		lines.append("2′ %s %s  %s  %s" % [team, who, clock, pip])
+	if lines.is_empty():
+		exclusion_label.visible = false
+		exclusion_label.text = ""
+		return
+	exclusion_label.visible = true
+	exclusion_label.text = "\n".join(lines)
+	if any_red:
+		exclusion_label.add_theme_color_override("font_color", COLOR_EXCLUSION_RED)
+	elif any_low:
+		exclusion_label.add_theme_color_override("font_color", COLOR_EXCLUSION_LOW)
+	else:
+		exclusion_label.add_theme_color_override("font_color", COLOR_EXCLUSION)
+
+
+func is_exclusion_pip_visible() -> bool:
+	return (
+		exclusion_label != null
+		and is_instance_valid(exclusion_label)
+		and exclusion_label.visible
+		and not exclusion_label.text.is_empty()
+	)
+
+
+func get_exclusion_pip_text() -> String:
+	if exclusion_label == null or not is_instance_valid(exclusion_label):
+		return ""
+	return exclusion_label.text
 
 
 ## Punchy goal banner + full-screen flash. `scoring_team_id` tints Home/Away.
@@ -530,6 +604,29 @@ func _ensure_sub_label() -> void:
 	sub_label.add_theme_constant_override("shadow_offset_y", 1)
 	sub_label.text = "SUB on whistle · , cycle"
 	$Root.add_child(sub_label)
+
+
+## Persistent 2′ / RED pip under the rules line — survives after the flash banner fades.
+func _ensure_exclusion_label() -> void:
+	if exclusion_label and is_instance_valid(exclusion_label):
+		return
+	exclusion_label = get_node_or_null("Root/ExclusionLabel") as Label
+	if exclusion_label:
+		exclusion_label.visible = false
+		return
+	exclusion_label = Label.new()
+	exclusion_label.name = "ExclusionLabel"
+	exclusion_label.visible = false
+	# Stack under RulesLabel so passive/7m stay above; multi-line for both teams.
+	exclusion_label.position = Vector2(16, 82)
+	exclusion_label.size = Vector2(420, 56)
+	exclusion_label.add_theme_font_size_override("font_size", 18)
+	exclusion_label.add_theme_color_override("font_color", COLOR_EXCLUSION)
+	exclusion_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.75))
+	exclusion_label.add_theme_constant_override("shadow_offset_x", 2)
+	exclusion_label.add_theme_constant_override("shadow_offset_y", 2)
+	exclusion_label.text = ""
+	$Root.add_child(exclusion_label)
 
 
 ## Compact goal-plane reticle — readable, not a cluttered HUD badge.

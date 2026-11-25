@@ -1725,6 +1725,22 @@ func _nearest_outfield(team_id: int, spot: Vector3) -> Player:
 	return best
 
 
+## Short HUD label for exclusion / red pip (role when on-court known, else name).
+func _exclusion_hud_label(player: Player) -> String:
+	if player == null:
+		return "?"
+	if player.is_goalkeeper:
+		return "GK"
+	var role := Formations.role_for(player)
+	var role_txt := Formations.role_label_hud(role)
+	if not role_txt.is_empty() and not player.on_bench:
+		return role_txt
+	# Bench / parked: keep a readable roster tag.
+	if not player.name.is_empty():
+		return str(player.name)
+	return "#%d" % (player.player_index + 1)
+
+
 ## Phase D: park fouler on the bench with AI off for exclusion_seconds of match clock.
 func _begin_exclusion(fouler: Player) -> void:
 	if fouler == null or fouler.is_goalkeeper or fouler.disqualified:
@@ -1746,6 +1762,7 @@ func _begin_exclusion(fouler: Player) -> void:
 		if fallback:
 			_set_controlled(fallback)
 	_configure_ai()
+	_update_rules_hud()
 	print(
 		"EXCLUSION lite: %s benched for %.0fs"
 		% [fouler.name, exclusion_seconds]
@@ -1775,6 +1792,7 @@ func _begin_red_card(fouler: Player) -> void:
 		if fallback:
 			_set_controlled(fallback)
 	_configure_ai()
+	_update_rules_hud()
 	print("RED CARD: %s disqualified (head contact)" % fouler.name)
 	if hud and hud.has_method("flash_rule"):
 		hud.flash_rule("RED — head contact", "red_card")
@@ -1815,6 +1833,7 @@ func _end_exclusion(player: Player) -> void:
 	player.velocity = Vector3.ZERO
 	_configure_ai()
 	_refresh_home_ai()
+	_update_rules_hud()
 	print("EXCLUSION ended: %s returns" % player.name)
 
 
@@ -1891,12 +1910,27 @@ func _update_rules_hud() -> void:
 		)
 	elif carrying and rules.get_passive_timer() > 3.0:
 		parts.append("Passive (lite) %.0fs" % rules.get_passive_timer())
-	# Wave 4: exclusion / red clocks (R3.5–R3.7 HUD).
-	for p in _all_players():
-		if p.disqualified:
-			parts.append("RED %s" % p.name)
-		elif p.excluded and p.exclusion_remaining > 0.0 and p.exclusion_remaining < 9000.0:
-			parts.append("2′ %s %.0fs" % [p.name, p.exclusion_remaining])
+	# Persistent 2′ / RED pip (R6.3 / R3.5–R3.7) — both teams; not only a flash banner.
+	if hud.has_method("set_exclusion_status"):
+		var excl_rows: Array = []
+		for p in _all_players():
+			if p.disqualified:
+				excl_rows.append({
+					"label": _exclusion_hud_label(p),
+					"team_id": p.team_id,
+					"remaining": 0.0,
+					"red": true,
+					"max_s": exclusion_seconds,
+				})
+			elif p.excluded and p.exclusion_remaining > 0.0 and p.exclusion_remaining < 9000.0:
+				excl_rows.append({
+					"label": _exclusion_hud_label(p),
+					"team_id": p.team_id,
+					"remaining": p.exclusion_remaining,
+					"red": false,
+					"max_s": exclusion_seconds,
+				})
+		hud.set_exclusion_status(excl_rows)
 	if _seven_m_live:
 		var left := maxf(0.0, HandballRules.SEVEN_M_READY_LIMIT_S - _seven_m_timer)
 		parts.append("7m %.0fs" % left)
