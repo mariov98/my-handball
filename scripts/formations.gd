@@ -933,6 +933,18 @@ static func should_take_nine_meter_shot(
 	return false
 
 
+## Openness of a shot corridor toward the attacked goal mouth (1 = clear).
+static func shot_lane_openness(
+	from_pos: Vector3,
+	team_id: int,
+	opponents: Array,
+	corridor_half: float = 1.25
+) -> float:
+	var goal_z := 19.5 if team_id == 0 else -19.5
+	var goal := Vector3(0.0, 0.0, goal_z)
+	return pass_lane_openness(from_pos, goal, opponents, corridor_half)
+
+
 ## Planar openness of a pass lane (1 = clear, 0 = contested). R4.6a.
 static func pass_lane_openness(
 	from_pos: Vector3,

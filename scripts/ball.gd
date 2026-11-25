@@ -69,16 +69,29 @@ const _RESCUE_HALF_WIDTH := 10.0
 const _RESCUE_HALF_LENGTH := 20.0
 
 func _rescue_if_lost() -> void:
-	var under_floor := global_position.y < -0.35
-	var above_hall := global_position.y > 22.0
-	var far_oob := (
-		absf(global_position.x) > _RESCUE_HALF_WIDTH + 8.0
-		or absf(global_position.z) > _RESCUE_HALF_LENGTH + 8.0
+	var pos := global_position
+	var nan_lost := (
+		is_nan(pos.x) or is_nan(pos.y) or is_nan(pos.z)
+		or is_inf(pos.x) or is_inf(pos.y) or is_inf(pos.z)
 	)
-	if not under_floor and not above_hall and not far_oob:
+	var under_floor := (not nan_lost) and pos.y < -0.35
+	var above_hall := (not nan_lost) and pos.y > 22.0
+	var far_oob := (not nan_lost) and (
+		absf(pos.x) > _RESCUE_HALF_WIDTH + 8.0
+		or absf(pos.z) > _RESCUE_HALF_LENGTH + 8.0
+	)
+	# Also catch a free ball clipped into the floor mesh (below resting radius).
+	var buried := (
+		carrier == null
+		and not nan_lost
+		and pos.y < 0.02
+		and linear_velocity.length() < 0.12
+		and not freeze
+	)
+	if not under_floor and not above_hall and not far_oob and not nan_lost and not buried:
 		return
-	var rx := clampf(global_position.x, -_RESCUE_HALF_WIDTH + 0.8, _RESCUE_HALF_WIDTH - 0.8)
-	var rz := clampf(global_position.z, -_RESCUE_HALF_LENGTH + 1.2, _RESCUE_HALF_LENGTH - 1.2)
+	var rx := 0.0 if nan_lost else clampf(pos.x, -_RESCUE_HALF_WIDTH + 0.8, _RESCUE_HALF_WIDTH - 0.8)
+	var rz := 0.0 if nan_lost else clampf(pos.z, -_RESCUE_HALF_LENGTH + 1.2, _RESCUE_HALF_LENGTH - 1.2)
 	# If fully lost (NaN / extreme), snap to center.
 	if is_nan(rx) or is_nan(rz) or is_inf(rx) or is_inf(rz):
 		rx = 0.0

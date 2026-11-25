@@ -217,7 +217,7 @@ Builds on the first-cut soft pass. Feel over features; Phase B owns dribble / 3 
 | **Pass harden** | RMB/G/RB always passes; steal/cancel shoot-charge without releasing a powered shot. |
 | **Light lead assist** | Aim cone + slight lead on the receiver; soft in-flight steer + sticky teammate catch. |
 | **Show for pass** | Uncontrolled Home teammates step into open wing/CB lanes when a mate has the ball. |
-| **Away pressure pass** | Away prefers a teammate pass under pressure or near the step warning before forcing a shot. |
+| **Away pressure pass** | Away prefers a **forward** teammate pass under pressure / step warning; open 9 m and crease looks shoot instead of recycling. |
 
 ## Phase 5 — presentation pass
 
@@ -299,7 +299,7 @@ You control **Home** (blue). **Away** (red) runs formation-aware AI. Both ends o
 |---------|----------|
 | **Clock** | Counts down per period (default **2:00** × **2** halves). Tunable via `period_length_seconds` / `periods_total` on `MatchController`. |
 | **Kickoff / restart** | Opening kickoff to Home. After a goal, the **conceding** team restarts from center with possession. Period 2 kickoff goes to Away. Short freeze + banner, then live play. |
-| **Opponent AI** | Away outfield: chase free ball, hold defense/attack formation slots, **pass under pressure / at step warning**, drive + shoot near the goal (outside 6 m). Tuned to create pressure but stay beatable. Away GK tracks + dives on shots (less omniscient). |
+| **Opponent AI** | Away outfield: chase free ball, hold slots, **forward pass under pressure**, take open **9 m / crease** shots, avoid endless back-passes. Match soft-lock guards recover orphaned balls / carrier desync. Tuned to create pressure but stay beatable. Away GK tracks + dives. |
 | **Camera** | Behind the attack; **goal-centered** in the middle corridor; subtle side yaw about the ball; smooth flip on possession change. |
 | **UI** | Score, clock, period, steps/rules, shot power, GOAL / kickoff / rule / period / full-time banners. |
 
@@ -425,7 +425,7 @@ resources/        materials / physics (reserved)
 godot --path . -- --smoke
 ```
 
-Expect `SMOKE_OK` after Phase 1–5 + Phase A–G + Waves 0–5 checks (pass, dribble/hold helpers, passive, foul ladder / 7 m, shapes, occupation/marking).
+Expect `SMOKE_OK` after Phase 1–5 + Phase A–G + Waves 0–6 + shoot-cam + core-loop feel checks (AI shot aggression, soft-lock recoveries, period progress).
 
 ## License
 

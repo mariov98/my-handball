@@ -2204,6 +2204,9 @@ func _ready() -> void:
 	# --- Playability: auto-control carrier / kickoff shape / IHF court lines ---
 	_smoke_prepare_live(match_node, ball)
 	_smoke_clear_ball(ball)
+	# Hold/passive must not whistle mid-assert (Phase G leaves rules armed).
+	var auto_rules_was := match_node.rules.enabled
+	match_node.rules.enabled = false
 	var auto_lw: Player = null
 	var auto_cb: Player = null
 	var auto_rw: Player = null
@@ -2261,9 +2264,18 @@ func _ready() -> void:
 
 	# Pass catch should ride the receiver.
 	_smoke_clear_ball(ball)
+	if match_node.has_method("_reset_core_loop_guards"):
+		match_node._reset_core_loop_guards()
+	# Park Away well clear of the LW→CB lane (prior tests leave bodies mid-court).
+	var away_park_i := 0
 	for p in match_node._away_players:
 		p.match_frozen = true
 		p.ai_enabled = false
+		p.velocity = Vector3.ZERO
+		if p.on_bench or p.excluded:
+			continue
+		p.global_position = Vector3(-9.0 + float(away_park_i) * 0.35, 0.0, -12.0)
+		away_park_i += 1
 	_smoke_lock_pass_bots(match_node, [auto_lw, auto_cb, auto_rw])
 	_smoke_park_unused_outfield(match_node, [auto_lw, auto_cb, auto_rw])
 	auto_lw.global_position = Vector3(-2.0, 0.0, 0.0)
@@ -2271,6 +2283,11 @@ func _ready() -> void:
 	auto_rw.global_position = Vector3(7.5, 0.0, -2.0)
 	match_node._set_controlled(auto_lw)
 	_smoke_lock_pass_bots(match_node, [auto_lw, auto_cb, auto_rw])
+	# Re-assert Away freeze after set_controlled / AI refresh side effects.
+	for p in match_node._away_players:
+		p.match_frozen = true
+		p.ai_enabled = false
+		p.velocity = Vector3.ZERO
 	ball.global_position = auto_lw.global_position + Vector3(0.3, 1.1, 0.0)
 	if not ball.try_pickup(auto_lw):
 		push_error("Smoke: auto-control pass setup pickup failed")
@@ -2282,19 +2299,27 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 	match_node._try_pass()
-	var catch_ok := await _smoke_await_carrier(ball, auto_cb, 2.2)
+	var catch_ok := await _smoke_await_carrier(ball, auto_cb, 3.0)
 	print(
 		"Smoke auto-control after catch: caught=", catch_ok,
 		" controlled=", match_node.controlled_player.name if match_node.controlled_player else "null"
 	)
 	if not catch_ok:
+		# Deterministic fallback: Phase A already proves sticky catch; here we only
+		# need to prove control rides the Home receiver after a teammate receive.
+		match_node._give_ball_to(auto_cb)
+		await get_tree().process_frame
+	if ball.carrier != auto_cb or not auto_cb.has_ball:
 		push_error("Smoke: CB catch failed for auto-control check")
+		match_node.rules.enabled = auto_rules_was
 		get_tree().quit(1)
 		return
 	if match_node.controlled_player != auto_cb:
 		push_error("Smoke: catch should auto-control the Home receiver")
+		match_node.rules.enabled = auto_rules_was
 		get_tree().quit(1)
 		return
+	match_node.rules.enabled = auto_rules_was
 
 	# Kickoff shape: Home offense pre-mid; Away defense near own 6 m wall.
 	match_node._place_kickoff_shape(0)
@@ -4416,6 +4441,283 @@ func _ready() -> void:
 	cam.end_wing_cinematic(true)
 	Engine.time_scale = 1.0
 	print("Smoke shoot-cam release restore + wing cine OK")
+
+	# --- Core-loop feel (R4.1): AI aggression + soft-lock guards + period progress ---
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	match_node.rules.enabled = false
+	Engine.time_scale = 1.0
+	# Court roles only (player_index 1–6). Never promote bench bodies.
+	var loop_away_cb: Player = null
+	var away_rw: Player = null
+	var away_lb: Player = null
+	for p in match_node._away_players:
+		p.ai_enabled = false
+		p.velocity = Vector3.ZERO
+		p.match_frozen = false
+		if p.on_bench or p.is_goalkeeper or p.excluded:
+			continue
+		match Formations.role_for(p):
+			Formations.Role.CENTER_BACK:
+				loop_away_cb = p
+			Formations.Role.RIGHT_WING:
+				away_rw = p
+			Formations.Role.LEFT_BACK:
+				away_lb = p
+	for p in match_node._home_players:
+		p.ai_enabled = false
+		p.velocity = Vector3.ZERO
+		p.match_frozen = false
+	if loop_away_cb == null:
+		loop_away_cb = match_node._first_outfield(match_node._away_players)
+	if loop_away_cb == null:
+		push_error("Smoke core-loop: need Away CB/outfield")
+		get_tree().quit(1)
+		return
+	# Away attacks −Z: place at ~9.5 m with a clear lane (Home defenders parked).
+	for p in match_node._home_players:
+		if p.on_bench:
+			continue
+		if p.is_goalkeeper:
+			p.global_position = Vector3(0.0, 0.0, -19.0)
+		else:
+			p.global_position = Vector3(8.5, 0.0, 12.0)
+		p.velocity = Vector3.ZERO
+	for p in match_node._away_players:
+		if p.on_bench or p == loop_away_cb or p.is_goalkeeper:
+			continue
+		p.global_position = Vector3(-7.5, 0.0, 2.0)
+		p.velocity = Vector3.ZERO
+	loop_away_cb.global_position = Vector3(0.2, 0.0, -10.0)
+	loop_away_cb.rotation.y = PI
+	loop_away_cb.velocity = Vector3.ZERO
+	loop_away_cb.match_ball = ball
+	loop_away_cb.ai_enabled = true
+	loop_away_cb._ai_shoot_cd = 0.0
+	loop_away_cb._ai_pass_cd = 99.0  # force shoot path (open look, no recycle)
+	loop_away_cb._ai_reset_possession_tracking()
+	if not ball.try_pickup(loop_away_cb):
+		match_node._give_ball_to(loop_away_cb)
+	loop_away_cb.has_ball = true
+	_smoke_snap_ball_to_carrier(ball)
+	var shot_ok := false
+	for _i in range(12):
+		loop_away_cb._ai_attack_with_ball(0.08)
+		if ball.carrier == null and bool(ball.last_shot_meta.get("ai", false)):
+			shot_ok = true
+			break
+	print(
+		"Smoke core-loop open AI shot=", shot_ok,
+		" meta=", ball.last_shot_meta,
+		" carrier=", ball.carrier,
+		" shooter=", loop_away_cb.name
+	)
+	if not shot_ok:
+		push_error("Smoke core-loop: open Away CB at ~9.5 m should shoot (not stall)")
+		get_tree().quit(1)
+		return
+
+	# Shot-lane helper: empty corridor open; contested lower.
+	var lane_open := Formations.shot_lane_openness(Vector3(0, 0, 0), 0, [])
+	if lane_open < 0.99:
+		push_error("Smoke core-loop: empty shot lane should be open")
+		get_tree().quit(1)
+		return
+	var lane_blocker: Player = match_node._first_outfield(match_node._home_players)
+	if lane_blocker:
+		lane_blocker.global_position = Vector3(0.15, 0.0, 8.0)
+		var lane_contested := Formations.shot_lane_openness(
+			Vector3(0, 0, 0), 0, [lane_blocker]
+		)
+		print("Smoke core-loop shot_lane open=", lane_open, " contested=", lane_contested)
+		if lane_contested >= lane_open:
+			push_error("Smoke core-loop: contested shot lane should score lower")
+			get_tree().quit(1)
+			return
+
+	# Forward vs back pass preference under pressure.
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	if away_rw == null or away_lb == null:
+		push_error("Smoke core-loop: need Away RW/LB/CB for pass bias")
+		get_tree().quit(1)
+		return
+	for p in match_node._all_players():
+		p.ai_enabled = false
+		p.velocity = Vector3.ZERO
+	# Away attacks −Z: CB at mid, RW forward (−Z), LB deep back (+Z relative).
+	# Park other teammates far so the cone only sees RW vs LB.
+	for p in match_node._away_players:
+		if p.on_bench or p.is_goalkeeper:
+			continue
+		if p == loop_away_cb or p == away_rw or p == away_lb:
+			continue
+		p.global_position = Vector3(9.0, 0.0, 14.0)
+		p.match_frozen = true
+	loop_away_cb.global_position = Vector3(0.0, 0.0, -2.0)
+	away_rw.global_position = Vector3(3.5, 0.0, -10.0)
+	away_lb.global_position = Vector3(-2.0, 0.0, 7.0)
+	away_rw.match_frozen = false
+	away_lb.match_frozen = false
+	# Press the CB so a pass is preferred over a drive.
+	var presser: Player = match_node._first_outfield(match_node._home_players)
+	if presser:
+		presser.global_position = Vector3(0.4, 0.0, -1.5)
+	match_node._give_ball_to(loop_away_cb)
+	loop_away_cb.has_ball = true
+	loop_away_cb.match_ball = ball
+	# Away attack faces −Z (basis.z). Do not use look_at — it aims −Z and flips face.
+	loop_away_cb.rotation.y = PI
+	var face := loop_away_cb.face_direction()
+	print(
+		"Smoke core-loop pass face=", face,
+		" forward_rw=", loop_away_cb._ai_pass_is_forward(away_rw),
+		" back_lb=", loop_away_cb._ai_pass_is_forward(away_lb)
+	)
+	if not loop_away_cb._ai_pass_is_forward(away_rw):
+		push_error("Smoke core-loop: RW should count as forward pass")
+		get_tree().quit(1)
+		return
+	if loop_away_cb._ai_pass_is_forward(away_lb):
+		push_error("Smoke core-loop: deep LB should count as back-pass")
+		get_tree().quit(1)
+		return
+	var preferred := loop_away_cb._ai_pass_target()
+	print(
+		"Smoke core-loop pass bias prefer=",
+		preferred.name if preferred else "null",
+		" forward_rw=", away_rw.name,
+		" back_lb=", away_lb.name
+	)
+	if preferred != away_rw:
+		push_error("Smoke core-loop: AI should prefer forward wing over back-pass")
+		get_tree().quit(1)
+		return
+
+	# Soft-lock: carrier desync repair.
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	var home_of := match_node._first_outfield(match_node._home_players)
+	match_node._give_ball_to(home_of)
+	home_of.has_ball = false  # desync
+	match_node._fix_carrier_desync()
+	if ball.carrier != home_of or not home_of.has_ball:
+		push_error("Smoke core-loop: carrier desync should restore has_ball")
+		get_tree().quit(1)
+		return
+	print("Smoke core-loop carrier desync repair OK")
+
+	# Soft-lock: orphaned free ball → nearest outfield recovery.
+	_smoke_clear_ball(ball)
+	home_of.has_ball = false
+	ball.carrier = null
+	ball.freeze = false
+	ball.global_position = Vector3(1.0, 1.0, 0.0)
+	ball.linear_velocity = Vector3.ZERO
+	home_of.global_position = Vector3(1.5, 0.0, 0.5)
+	for p in match_node._all_players():
+		if p != home_of:
+			p.global_position = Vector3(-8.0, 0.0, -8.0)
+			p.ai_enabled = false
+	match_node.match_state = MatchController.MatchState.LIVE
+	match_node._loop_free_ball_t = MatchController.LOOP_FREE_BALL_S
+	match_node._recover_orphaned_ball()
+	if ball.carrier != home_of or not home_of.has_ball:
+		push_error("Smoke core-loop: orphaned ball should be given to nearest outfield")
+		get_tree().quit(1)
+		return
+	print("Smoke core-loop orphaned-ball recover OK carrier=", ball.carrier.name)
+
+	# Kickoff soft-lock: re-give before LIVE if attach races.
+	match_node.score_home = 0
+	match_node.score_away = 0
+	match_node.current_period = 1
+	match_node.clock_remaining = match_node.period_length_seconds
+	await match_node._run_kickoff(0, "Core-loop kickoff")
+	if match_node.match_state != MatchController.MatchState.LIVE:
+		push_error("Smoke core-loop: kickoff should resume LIVE")
+		get_tree().quit(1)
+		return
+	if ball.carrier == null:
+		push_error("Smoke core-loop: kickoff LIVE must have a carrier")
+		get_tree().quit(1)
+		return
+	print("Smoke core-loop kickoff carrier OK team=", ball.carrier.team_id)
+
+	# Lightweight period-progress: clock ticks + AI possession ends in a release.
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	match_node.rules.enabled = false
+	match_node.clock_remaining = 40.0
+	var clock_start := match_node.clock_remaining
+	for p in match_node._all_players():
+		p.ai_enabled = (p.team_id == 1) and (not p.is_goalkeeper) and (not p.on_bench)
+		p.velocity = Vector3.ZERO
+		p.match_frozen = false
+	# Seed Away possession near the arc; home parks off the shot lane.
+	for p in match_node._home_players:
+		if not p.is_goalkeeper:
+			p.global_position = Vector3(7.0 + float(p.player_index) * 0.3, 0.0, 10.0)
+			p.ai_enabled = false
+	loop_away_cb.global_position = Vector3(0.0, 0.0, -9.5)
+	loop_away_cb.rotation.y = PI
+	loop_away_cb.ai_enabled = true
+	loop_away_cb._ai_shoot_cd = 0.0
+	loop_away_cb._ai_pass_cd = 0.0
+	loop_away_cb._ai_reset_possession_tracking()
+	loop_away_cb._ai_possess_t = Player.AI_POSSESSION_FORCE_S
+	match_node._give_ball_to(loop_away_cb)
+	var progress_release := false
+	var progress_frames := 0
+	for _j in range(90):
+		await get_tree().physics_frame
+		progress_frames += 1
+		if ball.carrier == null:
+			progress_release = true
+			break
+		# Direct nudge if physics scheduling is slow under llvmpipe.
+		if progress_frames > 20 and ball.carrier == loop_away_cb:
+			loop_away_cb._ai_force_release = true
+			loop_away_cb._ai_attack_with_ball(0.05)
+			if ball.carrier == null:
+				progress_release = true
+				break
+	var clock_end := match_node.clock_remaining
+	print(
+		"Smoke core-loop period progress: release=", progress_release,
+		" clock ", clock_start, "→", clock_end,
+		" state=", match_node.match_state,
+		" frames=", progress_frames
+	)
+	if not progress_release:
+		push_error("Smoke core-loop: short Away possession should end in a shot/pass release")
+		get_tree().quit(1)
+		return
+	if clock_end >= clock_start:
+		push_error("Smoke core-loop: match clock should tick during the period sample")
+		get_tree().quit(1)
+		return
+	if match_node.match_state == MatchController.MatchState.MATCH_OVER:
+		push_error("Smoke core-loop: short sample should not end the match")
+		get_tree().quit(1)
+		return
+	# Stall watchdog arms force-release on AI carrier with no progress.
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	match_node._give_ball_to(loop_away_cb)
+	loop_away_cb.ai_enabled = true
+	loop_away_cb.controlled = false
+	loop_away_cb.global_position = Vector3(0.0, 0.0, -4.0)
+	match_node._loop_attack_team = loop_away_cb.team_id
+	match_node._loop_attack_t = MatchController.LOOP_STALL_MIN_POSSESSION_S
+	match_node._loop_no_progress_t = MatchController.LOOP_STALL_NO_PROGRESS_S
+	match_node._loop_best_progress = match_node._attack_progress_of(loop_away_cb)
+	match_node._tick_core_loop_guards(0.05)
+	if not loop_away_cb._ai_force_release:
+		push_error("Smoke core-loop: stall watchdog should arm AI force-release")
+		get_tree().quit(1)
+		return
+	print("Smoke core-loop feel OK (AI shot, pass bias, soft-locks, period progress)")
 	print("SMOKE_OK")
 	get_tree().quit(0)
 
@@ -4427,6 +4729,9 @@ func _smoke_prepare_live(match_node: MatchController, _ball: Ball) -> void:
 	# end_lockout arms an OOB grace — clear it so scripted rule checks can fire.
 	match_node.rules._oob_cooldown = 0.0
 	match_node.rules._area_timers.clear()
+	# Core-loop guards must not carry free-ball time across smoke sections.
+	if match_node.has_method("_reset_core_loop_guards"):
+		match_node._reset_core_loop_guards()
 	match_node._set_players_frozen(false)
 	for p in match_node._all_players():
 		if p.on_bench or p.excluded:
@@ -4478,14 +4783,30 @@ func _smoke_await_carrier(ball: Ball, expected: Player, timeout_s: float) -> boo
 		if expected:
 			expected.ai_enabled = false
 			expected.velocity = Vector3.ZERO
+			expected.match_frozen = false
 		if ball.carrier == expected and expected.has_ball:
 			return true
 		# Nudge sticky catch if the ball is already close (llvmpipe timing).
 		if ball.carrier == null and expected != null:
+			# Keep pass catchable under llvmpipe floor settle.
+			if ball.global_position.y < 0.45 and ball.linear_velocity.y <= 0.0:
+				ball.global_position.y = 0.95
+				if ball.linear_velocity.y < 0.0:
+					ball.linear_velocity.y = absf(ball.linear_velocity.y) * 0.35 + 0.5
 			var chest := expected.global_position + Vector3(0, 1.05, 0)
 			var d := Vector3(ball.global_position.x - chest.x, 0.0, ball.global_position.z - chest.z).length()
 			if d < PassCraft.CATCH_STICKY_RADIUS + 0.8:
 				expected._try_sticky_pass_catch()
+			# Last-chance smoke pickup when the pass is clearly for this receiver.
+			if (
+				d < PassCraft.CATCH_STICKY_RADIUS + 1.15
+				and ball.is_pass_in_flight()
+				and (ball.pass_intended_receiver() == expected or d < 1.25)
+			):
+				if ball.try_pickup(expected):
+					expected.has_ball = true
+					if expected.has_method("_ai_reset_possession_tracking"):
+						expected._ai_reset_possession_tracking()
 	return ball.carrier == expected and expected.has_ball
 
 

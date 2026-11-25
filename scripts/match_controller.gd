@@ -18,6 +18,11 @@ const BLOCK_TRACE_LEN := 9.5
 ## Soft-pass impulse band (kept in sync with PassCraft.IMPULSE_*).
 const PASS_IMPULSE_MIN := 8.5
 const PASS_IMPULSE_MAX := 13.0
+## Core-loop feel: free ball / stalled attack soft-lock guards (R4.1).
+const LOOP_FREE_BALL_S := 3.6
+const LOOP_STALL_NO_PROGRESS_S := 6.5
+const LOOP_STALL_MIN_POSSESSION_S := 4.5
+const LOOP_PROGRESS_EPS_M := 0.85
 
 @export var home_team_path: NodePath
 @export var away_team_path: NodePath
@@ -69,6 +74,12 @@ var _block_trace: BlockTrace
 var _seven_m_live: bool = false
 var _seven_m_timer: float = 0.0
 var _seven_m_award_team: int = 0
+## Core-loop soft-lock tracking (free ball / dead attack).
+var _loop_free_ball_t: float = 0.0
+var _loop_attack_team: int = -1
+var _loop_attack_t: float = 0.0
+var _loop_best_progress: float = -INF
+var _loop_no_progress_t: float = 0.0
 
 @onready var _home_root: Node = get_node(home_team_path)
 @onready var _away_root: Node = get_node(away_team_path)
@@ -389,6 +400,7 @@ func _physics_process(delta: float) -> void:
 		hud.set_clock(clock_remaining)
 	_tick_exclusions(delta)
 	_tick_seven_m_ready(delta)
+	_tick_core_loop_guards(delta)
 	_update_away_shapes()
 	_update_rules_hud()
 	_update_shot_hud()
@@ -1353,6 +1365,7 @@ func _run_rule_restart(code: String, _message: String, awarding_team_id: int, sp
 	rules.end_lockout()
 	_set_players_frozen(false)
 	match_state = MatchState.LIVE
+	_reset_core_loop_guards()
 	# Wave 4 / R3.11: arm 7 m ready window once the set piece goes live.
 	if Formations.is_seven_meter_code(code):
 		_seven_m_live = true
@@ -1446,6 +1459,141 @@ func _give_ball_to(taker: Player) -> void:
 		ball.picked_up.emit(taker)
 	taker.has_ball = true
 	taker.dribbling = false
+	if taker.has_method("_ai_reset_possession_tracking"):
+		taker._ai_reset_possession_tracking()
+
+
+func _reset_core_loop_guards() -> void:
+	_loop_free_ball_t = 0.0
+	_loop_attack_team = -1
+	_loop_attack_t = 0.0
+	_loop_best_progress = -INF
+	_loop_no_progress_t = 0.0
+
+
+## Attack progress: higher when closer to the opponent goal (planar).
+func _attack_progress_of(carrier: Player) -> float:
+	if carrier == null:
+		return -INF
+	var goal_z := 20.0 if carrier.team_id == 0 else -20.0
+	return -absf(carrier.global_position.z - goal_z)
+
+
+## R4.1 soft-lock / dead-attack guards while LIVE.
+func _tick_core_loop_guards(delta: float) -> void:
+	if match_state != MatchState.LIVE or ball == null:
+		return
+	# Ball under floor / far OOB / NaN — only when free (possessed ball follows attach).
+	if ball.carrier == null and ball.has_method("_rescue_if_lost"):
+		ball._rescue_if_lost()
+	_fix_carrier_desync()
+	if ball.carrier == null:
+		# Passes/shots in flight are not soft-locks — only recover near-stuck free balls.
+		var in_flight := (
+			ball.is_pass_in_flight()
+			or ball.linear_velocity.length() > 1.25
+			or ball.global_position.y > 1.9
+		)
+		if in_flight:
+			_loop_free_ball_t = 0.0
+		else:
+			_loop_free_ball_t += delta
+		_loop_attack_team = -1
+		_loop_attack_t = 0.0
+		_loop_no_progress_t = 0.0
+		_loop_best_progress = -INF
+		if (not in_flight) and _loop_free_ball_t >= LOOP_FREE_BALL_S:
+			_recover_orphaned_ball()
+			_loop_free_ball_t = 0.0
+		return
+	_loop_free_ball_t = 0.0
+	var carrier: Player = ball.carrier
+	if carrier.team_id != _loop_attack_team:
+		_loop_attack_team = carrier.team_id
+		_loop_attack_t = 0.0
+		_loop_best_progress = _attack_progress_of(carrier)
+		_loop_no_progress_t = 0.0
+		return
+	_loop_attack_t += delta
+	var prog := _attack_progress_of(carrier)
+	if prog > _loop_best_progress + LOOP_PROGRESS_EPS_M:
+		_loop_best_progress = prog
+		_loop_no_progress_t = 0.0
+	else:
+		_loop_no_progress_t += delta
+	# AI dead attack: nudge a forced release so possessions end in shot/turnover.
+	if (
+		carrier.ai_enabled
+		and not carrier.controlled
+		and not carrier.is_goalkeeper
+		and _loop_attack_t >= LOOP_STALL_MIN_POSSESSION_S
+		and _loop_no_progress_t >= LOOP_STALL_NO_PROGRESS_S
+	):
+		carrier._ai_force_release = true
+		carrier._ai_possess_t = maxf(carrier._ai_possess_t, Player.AI_POSSESSION_FORCE_S)
+		_loop_no_progress_t = 0.0
+
+
+## has_ball / carrier mismatches leave the match with no usable control.
+func _fix_carrier_desync() -> void:
+	if ball == null:
+		return
+	# Ball thinks it has a carrier that disagrees / is gone.
+	if ball.carrier != null:
+		var c: Player = ball.carrier
+		if not is_instance_valid(c) or c.excluded or c.on_bench:
+			_clear_possession()
+			return
+		if not c.has_ball:
+			c.has_ball = true
+			c.dribbling = false
+		# Clear stray has_ball on others.
+		for p in _all_players():
+			if p != c and p.has_ball:
+				p.has_ball = false
+				p.dribbling = false
+		return
+	# Orphan has_ball with no carrier — drop the flag; free-ball chase resumes.
+	for p in _all_players():
+		if p.has_ball:
+			p.has_ball = false
+			p.dribbling = false
+
+
+## Free ball stuck in play too long → give to nearest live outfielder.
+func _recover_orphaned_ball() -> void:
+	if ball == null or match_state != MatchState.LIVE:
+		return
+	if ball.carrier != null:
+		return
+	if ball.has_method("_rescue_if_lost"):
+		ball._rescue_if_lost()
+	var best: Player = null
+	var best_d := INF
+	for p in _all_players():
+		if p == null or p.is_goalkeeper or p.excluded or p.on_bench or p.match_frozen:
+			continue
+		var d := p.global_position.distance_squared_to(ball.global_position)
+		if d < best_d:
+			best_d = d
+			best = p
+	if best == null:
+		# Absolute fallback: any on-court body.
+		for p in _all_players():
+			if p != null and not p.excluded and not p.on_bench:
+				best = p
+				break
+	if best == null:
+		return
+	_give_ball_to(best)
+	rules.on_pickup(best)
+	_attack_team_id = best.team_id
+	if best.team_id == 0:
+		_set_controlled(best)
+	_reset_core_loop_guards()
+	print("CORE LOOP: recovered orphaned ball → %s" % best.name)
+	if hud and hud.has_method("flash_rule"):
+		hud.flash_rule("Ball recovered", "restart")
 
 
 func _goalkeeper_for(team_id: int) -> Player:
@@ -1741,9 +1889,14 @@ func _run_kickoff(kickoff_team_id: int, reason: String = "Kickoff") -> void:
 	await get_tree().create_timer(KICKOFF_FREEZE).timeout
 	if match_state == MatchState.MATCH_OVER:
 		return
+	# Soft-lock guard: same as rule restart — never go LIVE with no carrier.
+	if taker != null and (ball.carrier != taker or not taker.has_ball):
+		_give_ball_to(taker)
+		rules.on_pickup(taker)
 	rules.end_lockout()
 	_set_players_frozen(false)
 	match_state = MatchState.LIVE
+	_reset_core_loop_guards()
 	_update_rules_hud()
 
 
