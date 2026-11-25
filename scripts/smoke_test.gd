@@ -1565,6 +1565,47 @@ func _ready() -> void:
 		return
 	print("Smoke Phase D 7m placement + GK-only + exclusion OK")
 
+	# R6.3: persistent exclusion clock pip while serving 2′ (not only a flash banner).
+	pen_def.exclusion_remaining = maxf(pen_def.exclusion_remaining, 90.0)
+	match_node._update_rules_hud()
+	var excl_hud := match_node.hud
+	if (
+		excl_hud == null
+		or not excl_hud.has_method("is_exclusion_pip_visible")
+		or not excl_hud.is_exclusion_pip_visible()
+	):
+		push_error("Smoke: exclusion HUD pip should show while a player is excluded")
+		get_tree().quit(1)
+		return
+	if not excl_hud.has_method("get_exclusion_pip_text"):
+		push_error("Smoke: HUD missing get_exclusion_pip_text")
+		get_tree().quit(1)
+		return
+	var excl_pip: String = str(excl_hud.get_exclusion_pip_text())
+	if not excl_pip.contains("2′"):
+		push_error("Smoke: exclusion pip should show 2′ countdown, got '%s'" % excl_pip)
+		get_tree().quit(1)
+		return
+	if not (excl_pip.contains("1:") or excl_pip.contains("0:")):
+		push_error("Smoke: exclusion pip should show mm:ss remaining, got '%s'" % excl_pip)
+		get_tree().quit(1)
+		return
+	# Both-teams pip: stage a Home exclusion alongside the Away one.
+	var home_excl: Player = match_node._first_outfield(match_node._home_players)
+	if home_excl != null and home_excl != pen_def:
+		match_node._begin_exclusion(home_excl)
+		home_excl.exclusion_remaining = 60.0
+		match_node._update_rules_hud()
+		excl_pip = str(excl_hud.get_exclusion_pip_text())
+		if not excl_pip.contains("H") or not excl_pip.contains("A"):
+			push_error("Smoke: exclusion pip should list both teams, got '%s'" % excl_pip)
+			get_tree().quit(1)
+			return
+		# Clear the staged Home exclusion before the return test.
+		home_excl.exclusion_remaining = 0.0
+		match_node._end_exclusion(home_excl)
+	print("Smoke Phase D exclusion HUD pip OK text=", excl_pip.replace("\n", " | "))
+
 	# Exclusion expires on short timer.
 	pen_def.exclusion_remaining = 0.05
 	match_node.match_state = MatchController.MatchState.LIVE
@@ -1573,6 +1614,11 @@ func _ready() -> void:
 		match_node._tick_exclusions(0.02)
 	if pen_def.excluded:
 		push_error("Smoke: exclusion should end when timer elapses")
+		get_tree().quit(1)
+		return
+	match_node._update_rules_hud()
+	if excl_hud.has_method("is_exclusion_pip_visible") and excl_hud.is_exclusion_pip_visible():
+		push_error("Smoke: exclusion pip should clear when exclusion ends")
 		get_tree().quit(1)
 		return
 	print("Smoke Phase D exclusion return OK")

@@ -145,7 +145,7 @@ Audits Phase B–D rules up to the requirements checklist bar. Feel-accurate fir
 | **Clear chance → 7 m** | Airborne + behind/side ≤~8 m; grounded behind ≤~7 m; illegal crease defense during shot windup. | **heuristic** |
 | **FT / 9 m** | Deep fouls snap to the **9 m** line; wall still forms outside. | **approx** |
 | **7 m set piece** | Taker on mark; GK on 4 m; ~**5 s** ready limit → goal throw to defense if stalled. | **approx** ready timer |
-| **HUD** | Exclusion clocks (`2′ Name Ns`), `RED Name`, `7m Ns` on the rules line. | — |
+| **HUD** | Persistent **2′ exclusion pip** (mm:ss + drain bars, both teams) + `RED` rows; `7m Ns` stays on the rules line. Flash banner still fires on whistle. | — |
 
 ### Still healthy after Wave 4
 
@@ -289,7 +289,7 @@ These are **handball-informed approximations** for a playable prototype — reco
 | **Restarts** | Throw-in / goal throw / free throw (traveling, passive, 6 m, foul) / **7 m** with short freeze + banner + set-piece placement. **Kickoff after goals** (and period starts) from Phase 1 is unchanged in timing. Deep FTs snap to **9 m**; throw-in / FT walls keep ~**3 m** gap. |
 | **Contact / foul ladder (Phase D + Wave 4)** | Windup contact near 6–9 m → FT; head/neck touch → 2′; head hit → red; push from behind → 2′; clear-chance heuristic → 7 m (+ exclusion). |
 
-HUD shows a large glanceable **Steps n/3** (color + pulse per plant), a **Hold** pip/timer beside it (`DRIBBLE` / `AUTO`), a **Passive (lite)** line, and exclusion / red / 7 m ready clocks. Traveling / 3 s / double dribble / foul / 7 m use red free-throw banners.
+HUD shows a large glanceable **Steps n/3** (color + pulse per plant), a **Hold** pip/timer beside it (`DRIBBLE` / `AUTO`), a **Passive (lite)** line, a persistent **2′ exclusion pip** (mm:ss + drain bars for both teams; `RED` rows for DQs), and 7 m ready clocks. Traveling / 3 s / double dribble / foul / 7 m use red free-throw banners.
 
 ## Phase 1 — mini match (still in)
 
