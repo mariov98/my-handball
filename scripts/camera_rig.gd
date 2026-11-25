@@ -45,14 +45,18 @@ class_name CameraRig
 @export var wing_cinematic_height: float = -1.2
 @export var wing_cinematic_time_scale: float = 0.48
 
-## Shoot close-up (behind head → goal). Metres behind / above the head.
-@export var shoot_cam_back: float = 1.55
-@export var shoot_cam_up: float = 0.28
-@export var shoot_cam_shoulder: float = 0.22
-@export var shoot_cam_position_lerp: float = 9.5
-@export var shoot_cam_rotation_lerp: float = 10.0
-@export var shoot_cam_fov: float = 52.0
+## Shoot close-up (over-shoulder behind head → attacked goal).
+@export var shoot_cam_back: float = 1.38
+@export var shoot_cam_up: float = 0.14
+@export var shoot_cam_shoulder: float = 0.42
+@export var shoot_cam_position_lerp: float = 12.5
+@export var shoot_cam_rotation_lerp: float = 14.0
+## Softer blend while holding the close-up after release.
+@export var shoot_cam_settle_position_lerp: float = 6.5
+@export var shoot_cam_settle_rotation_lerp: float = 7.0
+@export var shoot_cam_fov: float = 46.0
 @export var match_cam_fov: float = 48.0
+@export var shoot_cam_fov_lerp: float = 8.0
 
 var ball: Node3D
 ## Smoothed attack facing: +1 home attacks +Z; -1 away attacks -Z.
@@ -73,6 +77,7 @@ var _shoot_cam_active: bool = false
 var _shoot_cam_settle_t: float = 0.0
 var _shoot_subject: Node3D = null
 var _shoot_look: Vector3 = Vector3(0.0, 1.2, 19.5)
+var _fov_target: float = 48.0
 
 @onready var camera: Camera3D = $Camera3D
 
@@ -84,6 +89,7 @@ func setup(ball_node: Node3D, home_attacks_positive_z: bool = true) -> void:
 	reset_nudge()
 	end_wing_cinematic(true)
 	end_shoot_cam(0.0)
+	_fov_target = match_cam_fov
 	if camera:
 		camera.fov = match_cam_fov
 	if ball:
@@ -173,7 +179,7 @@ func end_wing_cinematic(force_restore_time: bool = false) -> void:
 				Engine.time_scale = 1.0
 
 
-## Shoot close-up: behind shooter's head, looking at the goal / aim point.
+## Shoot close-up: over-shoulder behind head, looking at the goal / aim point.
 func begin_shoot_cam(subject: Node3D, look_point: Vector3) -> void:
 	if subject == null:
 		return
@@ -181,8 +187,7 @@ func begin_shoot_cam(subject: Node3D, look_point: Vector3) -> void:
 	_shoot_look = look_point
 	_shoot_cam_settle_t = 0.0
 	_shoot_cam_active = true
-	if camera:
-		camera.fov = shoot_cam_fov
+	_fov_target = shoot_cam_fov
 
 
 func update_shoot_cam_look(look_point: Vector3) -> void:
@@ -193,11 +198,15 @@ func update_shoot_cam_look(look_point: Vector3) -> void:
 func end_shoot_cam(settle_s: float = 0.0) -> void:
 	if settle_s > 0.001 and _shoot_cam_active and _shoot_subject != null:
 		_shoot_cam_settle_t = settle_s
+		# Start blending FOV back toward match while the close-up holds.
+		_fov_target = match_cam_fov
 		return
 	_shoot_cam_active = false
 	_shoot_cam_settle_t = 0.0
 	_shoot_subject = null
-	if camera and not _wing_cine_active:
+	_fov_target = match_cam_fov
+	if camera and not _wing_cine_active and absf(camera.fov - match_cam_fov) > 0.05:
+		# Snap only when settle was skipped (cancel) so match cam is immediate.
 		camera.fov = match_cam_fov
 
 
@@ -213,8 +222,13 @@ func get_shoot_look() -> Vector3:
 	return _shoot_look
 
 
+func get_shoot_cam_fov() -> float:
+	return shoot_cam_fov
+
+
 func _physics_process(delta: float) -> void:
 	if ball == null and not _shoot_cam_active:
+		_blend_fov(delta)
 		return
 
 	# Wing cinematic ticks in scaled time; snap back after release window.
@@ -236,13 +250,19 @@ func _physics_process(delta: float) -> void:
 	var look: Vector3
 	var pos_lerp := position_lerp
 	var rot_lerp := rotation_lerp
+	var settling := _shoot_cam_active and _shoot_cam_settle_t > 0.0
 	if _shoot_cam_active and _shoot_subject != null and is_instance_valid(_shoot_subject):
 		desired = _shoot_desired_position(_shoot_subject)
 		look = _shoot_look
-		pos_lerp = shoot_cam_position_lerp
-		rot_lerp = shoot_cam_rotation_lerp
+		if settling:
+			pos_lerp = shoot_cam_settle_position_lerp
+			rot_lerp = shoot_cam_settle_rotation_lerp
+		else:
+			pos_lerp = shoot_cam_position_lerp
+			rot_lerp = shoot_cam_rotation_lerp
 	else:
 		if ball == null:
+			_blend_fov(delta)
 			return
 		var ball_pos := ball.global_position
 		desired = _desired_position(ball_pos)
@@ -253,15 +273,24 @@ func _physics_process(delta: float) -> void:
 	var from := global_position
 	var to_look := look - from
 	if to_look.length_squared() < 0.0001:
+		_blend_fov(delta)
 		return
 	var target_basis := Basis.looking_at(to_look.normalized(), Vector3.UP)
 	var current_q := global_transform.basis.get_rotation_quaternion()
 	var target_q := target_basis.get_rotation_quaternion()
 	var blended := current_q.slerp(target_q, 1.0 - exp(-rot_lerp * delta))
 	global_transform.basis = Basis(blended)
+	_blend_fov(delta)
 
 
-## Close-up a bit behind the head, looking toward the attacked goal.
+func _blend_fov(delta: float) -> void:
+	if camera == null:
+		return
+	var rate := shoot_cam_fov_lerp
+	camera.fov = lerpf(camera.fov, _fov_target, 1.0 - exp(-rate * delta))
+
+
+## Over-shoulder close-up behind the head, looking toward the attacked goal.
 func _shoot_desired_position(subject: Node3D) -> Vector3:
 	var head := _subject_head_pos(subject)
 	var to_goal := _shoot_look - head
@@ -274,7 +303,7 @@ func _shoot_desired_position(subject: Node3D) -> Vector3:
 		right = Vector3.RIGHT
 	else:
 		right = right.normalized()
-	# Slight shoulder offset so the head doesn't fully occlude the goal mouth.
+	# Stronger shoulder bias so the head sits left-of-frame and the mouth stays readable.
 	return head - flat * shoot_cam_back + Vector3.UP * shoot_cam_up + right * shoot_cam_shoulder
 
 

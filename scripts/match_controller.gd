@@ -39,6 +39,10 @@ const LOOP_PROGRESS_EPS_M := 0.85
 @export var exclusion_on_seven_m: bool = true
 ## Wave 4: soft auto-dribble near 3 s / last step when legal (never double-dribble).
 @export var auto_dribble_assist: bool = true
+## Metres per second on the goal mouth for full stick deflection while charging.
+@export var shoot_aim_stick_speed: float = 2.4
+## Metres per pixel of mouse motion on the goal mouth while charging.
+@export var shoot_aim_mouse_sens: float = 0.012
 
 var aim_mode: AimMode = AimMode.FACE
 var controlled_player: Player = null
@@ -69,6 +73,11 @@ var _charging: bool = false
 var _charge_held_s: float = 0.0
 ## After a pass steals the hold, ignore shoot until the shoot action is released.
 var _pass_suppress_shoot: bool = false
+## While charging: aim point on the attacked goal plane (stick / mouse move the crosshair).
+var _shoot_goal_aim: Vector3 = Vector3.ZERO
+var _shoot_goal_aim_active: bool = false
+## Accumulated mouse motion while charging (applied in physics; does not affect shoot release).
+var _shoot_aim_mouse_delta: Vector2 = Vector2.ZERO
 var _block_trace: BlockTrace
 ## Wave 4: live 7 m ready window (taker must shoot before limit).
 var _seven_m_live: bool = false
@@ -372,6 +381,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		if controlled_player and controlled_player.has_ball:
 			_charging = true
 			_charge_held_s = 0.0
+			_clear_shoot_goal_aim()
 			get_viewport().set_input_as_handled()
 		return
 	if event.is_action_released("shoot"):
@@ -382,6 +392,11 @@ func _unhandled_input(event: InputEvent) -> void:
 			else:
 				_release_charged_shot()
 			get_viewport().set_input_as_handled()
+		return
+	# Relative mouse aim on the goal while charging (does not consume shoot release).
+	if event is InputEventMouseMotion and _charging and match_state == MatchState.LIVE:
+		var motion := event as InputEventMouseMotion
+		_shoot_aim_mouse_delta += motion.relative
 
 
 func _physics_process(delta: float) -> void:
@@ -876,6 +891,7 @@ func _cancel_charge() -> void:
 	var was_charging := _charging
 	_charging = false
 	_charge_held_s = 0.0
+	_clear_shoot_goal_aim()
 	if controlled_player:
 		controlled_player.clear_shot_charge_motion()
 	if hud and hud.has_method("set_shot_status"):
@@ -894,6 +910,7 @@ func _release_charged_shot() -> void:
 	_charging = false
 	_charge_held_s = 0.0
 	_try_shoot_charged(held)
+	_clear_shoot_goal_aim()
 
 
 func _try_shoot_charged(held_s: float) -> void:
@@ -906,7 +923,8 @@ func _try_shoot_charged(held_s: float) -> void:
 	var lob := Input.is_action_pressed("lob")
 	var aim := _compute_aim(lob)
 	var wing := ThrowMotion.is_wing_finish_context(controlled_player)
-	if wing:
+	# Goal-plane aim (stick/mouse while charging) already encodes wing seed; don't re-warp.
+	if wing and not _shoot_goal_aim_active:
 		aim = ThrowMotion.wing_aim_assist(controlled_player, aim)
 	var jump_q := ShotCraft.jump_shot_quality(controlled_player)
 	var impulse := ShotCraft.impulse_for_charge(charge, lob)
@@ -948,7 +966,7 @@ func _try_shoot_charged(held_s: float) -> void:
 			_end_shoot_cam_presentation(0.0)
 			camera_rig.trigger_wing_cinematic()
 		else:
-			_end_shoot_cam_presentation(0.32)
+			_end_shoot_cam_presentation(0.38)
 	else:
 		_end_shoot_cam_presentation(0.0)
 	if hud and hud.has_method("set_shot_status"):
@@ -1018,6 +1036,15 @@ func _best_pass_target(passer: Player, aim_hint: Vector3 = Vector3.ZERO) -> Play
 
 
 func _compute_aim(lob: bool = false) -> Vector3:
+	# While charging with a goal-plane aim point, that is the primary shot aim.
+	if _shoot_goal_aim_active and controlled_player != null:
+		var from_g: Vector3 = controlled_player.global_position + Vector3(0, 1.2, 0)
+		var target_g := _shoot_goal_aim
+		if lob:
+			target_g.y = minf(target_g.y + 0.45, Court.GOAL_HEIGHT - 0.05)
+		var dir_g: Vector3 = target_g - from_g
+		if dir_g.length_squared() > 0.01:
+			return dir_g.normalized()
 	if aim_mode == AimMode.MOUSE_COURT:
 		var hit: Variant = _mouse_on_court()
 		if typeof(hit) == TYPE_VECTOR3:
@@ -1181,18 +1208,98 @@ func _update_shoot_cam_and_crosshair() -> void:
 		if hud and hud.has_method("set_goal_crosshair"):
 			hud.set_goal_crosshair(Vector2.ZERO, false)
 		return
-	var lob := Input.is_action_pressed("lob")
-	var aim := _compute_aim(lob)
-	if ThrowMotion.is_wing_finish_context(controlled_player):
-		aim = ThrowMotion.wing_aim_assist(controlled_player, aim)
-	var from := controlled_player.head_world_position()
-	var look := aim_point_on_goal_plane(from, aim, controlled_player.team_id)
+	_update_shoot_goal_aim(get_physics_process_delta_time())
+	var look := _shoot_goal_aim if _shoot_goal_aim_active else _seed_shoot_goal_aim()
 	if camera_rig:
 		if camera_rig.is_shoot_cam_active():
 			camera_rig.update_shoot_cam_look(look)
 		else:
 			camera_rig.begin_shoot_cam(controlled_player, look)
 	_show_goal_crosshair_at(look)
+
+
+## Seed / nudge the on-goal aim point from face/mouse, then stick + mouse delta.
+func _update_shoot_goal_aim(delta: float) -> void:
+	if controlled_player == null:
+		return
+	if not _shoot_goal_aim_active:
+		_seed_shoot_goal_aim()
+	# Right stick / look axes move the crosshair on the goal mouth (nudge is blocked).
+	var stick_x := Input.get_axis("look_left", "look_right")
+	var stick_y := Input.get_axis("look_up", "look_down")
+	if absf(stick_x) < 0.08:
+		stick_x = 0.0
+	if absf(stick_y) < 0.08:
+		stick_y = 0.0
+	if absf(stick_x) > 0.001 or absf(stick_y) > 0.001:
+		_shoot_goal_aim.x += stick_x * shoot_aim_stick_speed * delta
+		# Stick up raises the aim on the mouth.
+		_shoot_goal_aim.y -= stick_y * shoot_aim_stick_speed * delta
+	# Relative mouse motion while charging.
+	if _shoot_aim_mouse_delta.length_squared() > 0.0001:
+		_shoot_goal_aim.x += _shoot_aim_mouse_delta.x * shoot_aim_mouse_sens
+		_shoot_goal_aim.y -= _shoot_aim_mouse_delta.y * shoot_aim_mouse_sens
+		_shoot_aim_mouse_delta = Vector2.ZERO
+	# Absolute mouse ∩ goal plane when Mouse aim mode is on (precise).
+	if aim_mode == AimMode.MOUSE_COURT:
+		var mouse_goal: Variant = _mouse_on_goal_plane(controlled_player.team_id)
+		if typeof(mouse_goal) == TYPE_VECTOR3:
+			_shoot_goal_aim = mouse_goal as Vector3
+	_clamp_shoot_goal_aim(controlled_player.team_id)
+
+
+func _seed_shoot_goal_aim() -> Vector3:
+	var lob := Input.is_action_pressed("lob")
+	# Temporarily ignore goal-aim so seed uses face / mouse-court base.
+	var was_active := _shoot_goal_aim_active
+	_shoot_goal_aim_active = false
+	var aim := _compute_aim(lob)
+	_shoot_goal_aim_active = was_active
+	if ThrowMotion.is_wing_finish_context(controlled_player):
+		aim = ThrowMotion.wing_aim_assist(controlled_player, aim)
+	var from := controlled_player.head_world_position()
+	_shoot_goal_aim = aim_point_on_goal_plane(from, aim, controlled_player.team_id)
+	_shoot_goal_aim_active = true
+	_shoot_aim_mouse_delta = Vector2.ZERO
+	return _shoot_goal_aim
+
+
+func _clamp_shoot_goal_aim(team_id: int) -> void:
+	var goal_z := Court.HALF_LENGTH - 0.5 if team_id == 0 else -(Court.HALF_LENGTH - 0.5)
+	var half_w := Court.GOAL_WIDTH * 0.5
+	_shoot_goal_aim.x = clampf(_shoot_goal_aim.x, -half_w, half_w)
+	_shoot_goal_aim.y = clampf(_shoot_goal_aim.y, 0.08, Court.GOAL_HEIGHT - 0.05)
+	_shoot_goal_aim.z = goal_z
+
+
+func _clear_shoot_goal_aim() -> void:
+	_shoot_goal_aim_active = false
+	_shoot_aim_mouse_delta = Vector2.ZERO
+
+
+## Mouse ray ∩ attacked goal plane, clamped to the 3×2 mouth. Null if no hit.
+func _mouse_on_goal_plane(team_id: int) -> Variant:
+	if camera_rig == null or camera_rig.camera == null:
+		return null
+	var cam := camera_rig.camera
+	var mouse := get_viewport().get_mouse_position()
+	var from := cam.project_ray_origin(mouse)
+	var ray_dir := cam.project_ray_normal(mouse)
+	var goal_z := Court.HALF_LENGTH - 0.5 if team_id == 0 else -(Court.HALF_LENGTH - 0.5)
+	if absf(ray_dir.z) < 0.0001:
+		return null
+	var t := (goal_z - from.z) / ray_dir.z
+	if t < 0.05:
+		return null
+	var hit: Vector3 = from + ray_dir * t
+	var half_w := Court.GOAL_WIDTH * 0.5
+	# Only snap when the ray is near the mouth (avoid yanking aim off-screen).
+	if absf(hit.x) > half_w + 0.85 or hit.y < -0.4 or hit.y > Court.GOAL_HEIGHT + 0.85:
+		return null
+	hit.x = clampf(hit.x, -half_w, half_w)
+	hit.y = clampf(hit.y, 0.08, Court.GOAL_HEIGHT - 0.05)
+	hit.z = goal_z
+	return hit
 
 
 func _end_shoot_cam_presentation(settle_s: float) -> void:
