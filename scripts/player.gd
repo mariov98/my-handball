@@ -237,6 +237,18 @@ var _js_was_airborne: bool = false
 var _outlet_pending: bool = false
 var _outlet_timer: float = 0.0
 var _outlet_cd: float = 0.0
+## Pivot / free foot teaching (R1.6 / R1.7) — synced from HandballRules while holding.
+const PIVOT_NONE := -1
+const PIVOT_LEFT := 0
+const PIVOT_RIGHT := 1
+var pivot_foot: int = PIVOT_NONE
+var _shoe_mat_l: StandardMaterial3D
+var _shoe_mat_r: StandardMaterial3D
+var _pivot_ring: MeshInstance3D
+var _pivot_ring_mat: StandardMaterial3D
+const PIVOT_SHOE := Color(0.95, 0.72, 0.22)
+const FREE_SHOE := Color(0.12, 0.12, 0.14)
+const PIVOT_RING_COLOR := Color(0.98, 0.78, 0.28, 0.55)
 
 @onready var ball_attach: Marker3D = $BallAttach
 @onready var pickup_area: Area3D = $PickupArea
@@ -434,6 +446,7 @@ func _physics_process(delta: float) -> void:
 			velocity.y = 0.0
 	_tick_throw_motion(delta)
 	_update_locomotion_anim(delta, planar.length())
+	_apply_pivot_plant_visual(delta, planar.length())
 	_update_arm_pose(delta)
 	_apply_throw_pose(delta)
 	_apply_fake_pose(delta)
@@ -484,10 +497,45 @@ func try_shoot(
 
 func begin_catch_settle() -> void:
 	_catch_settle_t = CATCH_SETTLE_S
+	# Catch land plant: establish a readable pivot if rules haven't synced yet.
+	if pivot_foot == PIVOT_NONE and not is_goalkeeper:
+		pivot_foot = preferred_catch_pivot_foot()
+	_flash_catch_plant_pose()
 
 
 func is_catch_settling() -> bool:
 	return _catch_settle_t > 0.0
+
+
+## Prefer the more-forward shoe for catch/gather plant (R1.7 / R2.8).
+func preferred_catch_pivot_foot() -> int:
+	var foot_l := find_child("ShoeL", true, false) as Node3D
+	var foot_r := find_child("ShoeR", true, false) as Node3D
+	if foot_l == null or foot_r == null:
+		return PIVOT_RIGHT
+	var forward := face_direction()
+	forward.y = 0.0
+	if forward.length_squared() < 0.01:
+		forward = Vector3(0.0, 0.0, 1.0)
+	forward = forward.normalized()
+	var origin := Vector3(global_position.x, 0.0, global_position.z)
+	var l_fwd := (Vector3(foot_l.global_position.x, 0.0, foot_l.global_position.z) - origin).dot(forward)
+	var r_fwd := (Vector3(foot_r.global_position.x, 0.0, foot_r.global_position.z) - origin).dot(forward)
+	if l_fwd > r_fwd + 0.02:
+		return PIVOT_LEFT
+	return PIVOT_RIGHT
+
+
+func set_pivot_foot(foot: int) -> void:
+	pivot_foot = foot
+
+
+func get_pivot_foot() -> int:
+	return pivot_foot
+
+
+func clear_pivot_foot() -> void:
+	pivot_foot = PIVOT_NONE
 
 
 ## Wave 6 R4.8: after an airborne catch near goal, redirect toward goal (readable motion).
@@ -930,6 +978,7 @@ func reset_to_start() -> void:
 	visible = true
 	_catch_settle_t = 0.0
 	_js_plant_t = 0.0
+	clear_pivot_foot()
 	_js_was_airborne = false
 	jump_shot_active = false
 	jump_shot_air_s = 0.0
@@ -1936,7 +1985,11 @@ func _begin_land_pose() -> void:
 	throw_phase = ThrowMotion.Phase.LAND
 	throw_t = 0.0
 	throw_motion_active = true
-	_throw_pose_cache = ThrowMotion.pose_land(_torso_yaw_offset)
+	# Land plant: bias weight onto the pivot / preferred catch foot (R1.7 / R2.8).
+	if has_ball and not dribbling and not is_goalkeeper:
+		if pivot_foot == PIVOT_NONE:
+			pivot_foot = preferred_catch_pivot_foot()
+	_throw_pose_cache = ThrowMotion.pose_land(_torso_yaw_offset, pivot_foot)
 
 
 func _begin_throw_from_release(
@@ -2538,13 +2591,20 @@ func _apply_team_material() -> void:
 		if sh:
 			sh.material_override = sock_mat
 
-	var shoe_mat := StandardMaterial3D.new()
-	shoe_mat.albedo_color = Color(0.12, 0.12, 0.14)
-	shoe_mat.roughness = 0.6
-	for shoe_name in ["ShoeL", "ShoeR"]:
-		var shoe := find_child(shoe_name, true, false) as MeshInstance3D
-		if shoe:
-			shoe.material_override = shoe_mat
+	_shoe_mat_l = StandardMaterial3D.new()
+	_shoe_mat_l.albedo_color = FREE_SHOE
+	_shoe_mat_l.roughness = 0.6
+	_shoe_mat_r = StandardMaterial3D.new()
+	_shoe_mat_r.albedo_color = FREE_SHOE
+	_shoe_mat_r.roughness = 0.6
+	var shoe_l := find_child("ShoeL", true, false) as MeshInstance3D
+	var shoe_r := find_child("ShoeR", true, false) as MeshInstance3D
+	if shoe_l:
+		shoe_l.material_override = _shoe_mat_l
+	if shoe_r:
+		shoe_r.material_override = _shoe_mat_r
+	_ensure_pivot_ring()
+	_refresh_pivot_shoe_mats()
 	set_selection_highlight(controlled)
 
 
@@ -2634,9 +2694,13 @@ func _update_locomotion_anim(delta: float, speed: float) -> void:
 			_upper_body.position.y = lerpf(_upper_body.position.y, _upper_base_y - 0.2, 1.0 - exp(-10.0 * delta))
 		return
 	# Throw / fake / jump / GK craft owns arms, torso settle, and plant legs.
+	# Catch settle still lets pivot plant pose own the legs below.
 	if throw_motion_active or fake_active or (jump_shot_active and has_ball):
 		return
 	if is_goalkeeper and gk_stance != GkMotion.Stance.IDLE:
+		return
+	# Holding without dribble: pivot plant pose owns legs (R1.6 teaching).
+	if has_ball and not dribbling and pivot_foot != PIVOT_NONE and not is_goalkeeper:
 		return
 
 	var blend := 1.0 - exp(-12.0 * delta)
@@ -2669,6 +2733,138 @@ func _update_locomotion_anim(delta: float, speed: float) -> void:
 			_arm_r.rotation.x = lerpf(_arm_r.rotation.x, 0.0, blend)
 			if not is_goalkeeper:
 				_pose_arms_rest()
+
+
+## Pivot foot planted vs free foot lifted / swinging while holding (R1.6 / R1.7).
+func _apply_pivot_plant_visual(delta: float, speed: float) -> void:
+	_refresh_pivot_shoe_mats()
+	_update_pivot_ring(delta)
+	if on_bench or excluded or diving or is_goalkeeper:
+		return
+	if not has_ball or dribbling or pivot_foot == PIVOT_NONE:
+		return
+	if throw_motion_active or fake_active or (jump_shot_active and has_ball and _js_plant_t <= 0.0):
+		# Jump plant still reads pivot; other throw/fake owns legs.
+		if not (jump_shot_active and _js_plant_t > 0.0):
+			return
+	if _leg_l == null or _leg_r == null:
+		return
+
+	var blend := 1.0 - exp(-14.0 * delta)
+	var settling := _catch_settle_t > 0.0
+	var planting := _js_plant_t > 0.0
+	var pivoting := speed < 0.85 or settling or planting
+	var plant_x := 0.08 if settling or planting else 0.02
+	var free_lift := 0.55 if settling else (0.42 if pivoting else 0.0)
+	var free_swing := 0.0
+	if not pivoting and speed > 0.8:
+		_bob_phase += delta * BOB_SPEED * clampf(speed / SPEED, 0.45, 1.25)
+		free_swing = sin(_bob_phase) * JOG_LEG_SWING * 0.85
+		free_lift = maxf(0.18, absf(free_swing) * 0.35)
+
+	var pivot_is_left := pivot_foot == PIVOT_LEFT
+	if pivot_is_left:
+		_leg_l.rotation.x = lerpf(_leg_l.rotation.x, plant_x, blend)
+		_leg_r.rotation.x = lerpf(_leg_r.rotation.x, -free_lift + free_swing, blend)
+	else:
+		_leg_r.rotation.x = lerpf(_leg_r.rotation.x, plant_x, blend)
+		_leg_l.rotation.x = lerpf(_leg_l.rotation.x, -free_lift - free_swing, blend)
+
+	if _upper_body and (settling or planting):
+		var crouch := -0.06 if settling else -0.04
+		_upper_body.position.y = lerpf(_upper_body.position.y, _upper_base_y + crouch, blend)
+
+
+func _flash_catch_plant_pose() -> void:
+	if _leg_l == null or _leg_r == null or is_goalkeeper:
+		return
+	var pivot_is_left := pivot_foot == PIVOT_LEFT
+	if pivot_is_left:
+		_leg_l.rotation.x = 0.12
+		_leg_r.rotation.x = -0.62
+	else:
+		_leg_r.rotation.x = 0.12
+		_leg_l.rotation.x = -0.62
+	if _upper_body:
+		_upper_body.position.y = _upper_base_y - 0.07
+	_refresh_pivot_shoe_mats()
+
+
+func _refresh_pivot_shoe_mats() -> void:
+	if _shoe_mat_l == null or _shoe_mat_r == null:
+		return
+	var show_pivot := (
+		has_ball
+		and not dribbling
+		and not is_goalkeeper
+		and not on_bench
+		and not excluded
+		and pivot_foot != PIVOT_NONE
+	)
+	if not show_pivot:
+		_shoe_mat_l.albedo_color = FREE_SHOE
+		_shoe_mat_r.albedo_color = FREE_SHOE
+		_shoe_mat_l.emission_enabled = false
+		_shoe_mat_r.emission_enabled = false
+		return
+	var pivot_is_left := pivot_foot == PIVOT_LEFT
+	_shoe_mat_l.albedo_color = PIVOT_SHOE if pivot_is_left else FREE_SHOE
+	_shoe_mat_r.albedo_color = PIVOT_SHOE if not pivot_is_left else FREE_SHOE
+	_shoe_mat_l.emission_enabled = pivot_is_left
+	_shoe_mat_r.emission_enabled = not pivot_is_left
+	if pivot_is_left:
+		_shoe_mat_l.emission = PIVOT_SHOE
+		_shoe_mat_l.emission_energy_multiplier = 0.55
+	else:
+		_shoe_mat_r.emission = PIVOT_SHOE
+		_shoe_mat_r.emission_energy_multiplier = 0.55
+
+
+func _ensure_pivot_ring() -> void:
+	if _pivot_ring != null and is_instance_valid(_pivot_ring):
+		return
+	_pivot_ring = MeshInstance3D.new()
+	_pivot_ring.name = "PivotRing"
+	var cyl := CylinderMesh.new()
+	cyl.top_radius = 0.22
+	cyl.bottom_radius = 0.22
+	cyl.height = 0.02
+	cyl.radial_segments = 16
+	_pivot_ring.mesh = cyl
+	_pivot_ring_mat = StandardMaterial3D.new()
+	_pivot_ring_mat.albedo_color = PIVOT_RING_COLOR
+	_pivot_ring_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_pivot_ring_mat.emission_enabled = true
+	_pivot_ring_mat.emission = Color(0.95, 0.7, 0.2)
+	_pivot_ring_mat.emission_energy_multiplier = 0.4
+	_pivot_ring_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_pivot_ring.material_override = _pivot_ring_mat
+	_pivot_ring.visible = false
+	add_child(_pivot_ring)
+
+
+func _update_pivot_ring(_delta: float) -> void:
+	_ensure_pivot_ring()
+	var show_ring := (
+		has_ball
+		and not dribbling
+		and not is_goalkeeper
+		and not on_bench
+		and not excluded
+		and pivot_foot != PIVOT_NONE
+		and (is_on_floor() or global_position.y < 0.25)
+	)
+	_pivot_ring.visible = show_ring
+	if not show_ring:
+		return
+	var shoe_name := "ShoeL" if pivot_foot == PIVOT_LEFT else "ShoeR"
+	var shoe := find_child(shoe_name, true, false) as Node3D
+	if shoe == null:
+		_pivot_ring.visible = false
+		return
+	var sole := shoe.global_position
+	_pivot_ring.global_position = Vector3(sole.x, 0.012, sole.z)
+	_pivot_ring.global_rotation = Vector3.ZERO
 
 
 func _pose_hands_from_arms() -> void:

@@ -394,13 +394,22 @@ static func pose_jump_air(torso_yaw: float, window: bool, for_pass: bool) -> Dic
 	return p
 
 
-static func pose_land(torso_yaw: float) -> Dictionary:
+## Land plant: weight on pivot foot (0=L, 1=R, else balanced crouch). Readable for R1.7 / R2.8.
+static func pose_land(torso_yaw: float, pivot_foot: int = -1) -> Dictionary:
 	var p := pose_rest()
 	p["torso_yaw"] = torso_yaw * 0.15
 	p["torso_pitch"] = 0.14
 	p["upper_y_off"] = -0.08
-	p["leg_l_x"] = -0.55
-	p["leg_r_x"] = -0.40
+	if pivot_foot == 0:
+		# Left planted, right free / recovering.
+		p["leg_l_x"] = 0.12
+		p["leg_r_x"] = -0.72
+	elif pivot_foot == 1:
+		p["leg_r_x"] = 0.12
+		p["leg_l_x"] = -0.72
+	else:
+		p["leg_l_x"] = -0.55
+		p["leg_r_x"] = -0.40
 	p["arm_r_pos"] = Vector3(0.35, 1.15, 0.15)
 	p["arm_r_rot"] = Vector3(15, -10, -5)
 	p["hand_r_pos"] = Vector3(0.40, 1.00, 0.25)

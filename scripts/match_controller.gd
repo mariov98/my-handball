@@ -258,6 +258,8 @@ func _wire_rules() -> void:
 	rules.rule_warning.connect(_on_rule_warning)
 	rules.rule_violation.connect(_on_rule_violation)
 	rules.step_taken.connect(_on_step_taken)
+	if rules.has_signal("foot_planted"):
+		rules.foot_planted.connect(_on_foot_planted)
 	for p in _all_players():
 		if not p.block_attempted.is_connected(_on_block_attempted):
 			p.block_attempted.connect(_on_block_attempted)
@@ -486,6 +488,8 @@ func _update_dribble_input() -> void:
 		if not p.dribbling:
 			if rules.try_begin_dribble(p):
 				p.dribbling = true
+				if p.has_method("clear_pivot_foot"):
+					p.clear_pivot_foot()
 			# Double-dribble violation is handled by rules → restart.
 		elif rules.last_dribble_was_assist:
 			# Player takes over the soft-assist stream; release will gather.
@@ -511,6 +515,8 @@ func _try_soft_auto_dribble() -> void:
 		return
 	if rules.try_auto_dribble_assist(carrier):
 		carrier.dribbling = true
+		if carrier.has_method("clear_pivot_foot"):
+			carrier.clear_pivot_foot()
 		_update_rules_hud()
 
 
@@ -520,6 +526,7 @@ func _end_controlled_dribble() -> void:
 		return
 	p.dribbling = false
 	rules.end_dribble(p)
+	_sync_carrier_pivot(p)
 	_update_rules_hud()
 
 
@@ -1353,6 +1360,7 @@ static func aim_point_on_goal_plane(from: Vector3, aim: Vector3, team_id: int) -
 
 func _on_ball_picked_up(player: Player) -> void:
 	rules.on_pickup(player)
+	_sync_carrier_pivot(player)
 	_attack_team_id = player.team_id
 	# Team control: while Home has the ball, always ride the carrier
 	# (pickup, catch, GK gather, restart give). Never force Away control.
@@ -1366,6 +1374,8 @@ func _on_ball_released(player: Player) -> void:
 	if player == controlled_player:
 		_cancel_charge()
 	rules.on_release(player)
+	if player != null and player.has_method("clear_pivot_foot"):
+		player.clear_pivot_foot()
 	# Phase C: non-pass shot attempt clears passive (clarification lite).
 	var is_pass := bool(ball.last_shot_meta.get("pass", false))
 	if not is_pass:
@@ -1375,7 +1385,20 @@ func _on_ball_released(player: Player) -> void:
 
 func _on_step_taken(_steps: int) -> void:
 	_steps_hud_pulse = true
+	_sync_carrier_pivot(ball.carrier if ball else null)
 	_update_rules_hud()
+
+
+func _on_foot_planted(_steps: int, _reception_zero: bool) -> void:
+	_sync_carrier_pivot(ball.carrier if ball else null)
+	_update_rules_hud()
+
+
+func _sync_carrier_pivot(carrier: Player) -> void:
+	if carrier == null:
+		return
+	if carrier.has_method("set_pivot_foot"):
+		carrier.set_pivot_foot(rules.get_pivot_foot())
 
 
 func _on_rule_warning(code: String, message: String) -> void:
@@ -1878,12 +1901,25 @@ func _update_rules_hud() -> void:
 	if hud.has_method("set_steps_status"):
 		var pulse := _steps_hud_pulse
 		_steps_hud_pulse = false
+		var drib_now := false
+		if carrying and ball.carrier != null:
+			drib_now = rules.is_dribbling() or ball.carrier.dribbling
+		# Subtle pivot cue beside Steps while holding without dribbling (R1.6 teaching).
+		var pivot_label := ""
+		if carrying and not drib_now:
+			pivot_label = rules.pivot_foot_label()
+			_sync_carrier_pivot(ball.carrier)
+		elif ball != null and ball.carrier != null and ball.carrier.has_method("clear_pivot_foot"):
+			if drib_now or not carrying:
+				if drib_now:
+					ball.carrier.clear_pivot_foot()
 		hud.set_steps_status(
 			rules.get_steps(),
 			HandballRules.MAX_STEPS,
 			rules.is_steps_warned(),
 			carrying,
-			pulse
+			pulse,
+			pivot_label
 		)
 	if hud.has_method("set_hold_status"):
 		if carrying:

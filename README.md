@@ -281,7 +281,7 @@ These are **handball-informed approximations** for a playable prototype — reco
 
 | Rule | How it feels in play |
 |------|----------------------|
-| **Steps / traveling** | Discrete foot-plants while moving with the ball (~1.8 m gait). Catch gets a **reception zero** (first plant free). Stop / slow = **pivot** (gait pauses; taken steps stay). HUD ticks **Steps n/3** each plant; at 3 a **Last step** warning; a 4th plant → **TRAVELING** free throw. **Jump-shot** (airborne) and **dribbling** do not add steps. Gathering a dribble resets steps. |
+| **Steps / traveling** | Discrete foot-plants while moving with the ball (~1.8 m gait). Catch gets a **reception zero** (first plant free). Stop / slow = **pivot** (gait pauses; taken steps stay). HUD ticks **Steps n/3** each plant (plus a subtle **Pivot L/R** cue while holding); at 3 a **Last step** warning; a 4th plant → **TRAVELING** free throw. **Jump-shot** (airborne) and **dribbling** do not add steps. Gathering a dribble resets steps. While holding without dribbling, the **pivot foot** (warm shoe + floor ring) stays distinct from the free foot so the 3-step rule teaches itself. |
 | **3-second hold / dribble** | Hold ≤ **3 s** without dribble / pass / shot → free throw. Hold **V** / **R3** to bounce (pauses the clock). Catch the dribble → new 3 s + steps; a second stream after gather → **double dribble**. Wave 4 soft assist may auto-start a legal dribble near the limit (`Hold · AUTO`). |
 | **Passive play (lite)** | **IHF-inspired hybrid (Phase C):** stall without progress ~**7 s** → **Passive (lite)** warn. After warn, same-team receives count; **5th receive** without a shot → free throw. Meaningful progress (~1.5 m closer) resets/delays the *warn* only. Shot attempt clears; GK possession exempt. |
 | **Out of bounds** | Soft sideline / end-line bounds inside the walls. Sideline → **throw-in** for the other team. End line outside the goal mouth: attack last touch → **goal throw** (defending GK); defense last touch → corner-style **throw-in**. |
@@ -289,7 +289,7 @@ These are **handball-informed approximations** for a playable prototype — reco
 | **Restarts** | Throw-in / goal throw / free throw (traveling, passive, 6 m, foul) / **7 m** with short freeze + banner + set-piece placement. **Kickoff after goals** (and period starts) from Phase 1 is unchanged in timing. Deep FTs snap to **9 m**; throw-in / FT walls keep ~**3 m** gap. |
 | **Contact / foul ladder (Phase D + Wave 4)** | Windup contact near 6–9 m → FT; head/neck touch → 2′; head hit → red; push from behind → 2′; clear-chance heuristic → 7 m (+ exclusion). |
 
-HUD shows a large glanceable **Steps n/3** (color + pulse per plant), a **Hold** pip/timer beside it (`DRIBBLE` / `AUTO`), a **Passive (lite)** line, a persistent **2′ exclusion pip** (mm:ss + drain bars for both teams; `RED` rows for DQs), and 7 m ready clocks. Traveling / 3 s / double dribble / foul / 7 m use red free-throw banners.
+HUD shows a large glanceable **Steps n/3** (color + pulse per plant; **Pivot L/R** while holding without dribbling), a **Hold** pip/timer beside it (`DRIBBLE` / `AUTO`), a **Passive (lite)** line, a persistent **2′ exclusion pip** (mm:ss + drain bars for both teams; `RED` rows for DQs), and 7 m ready clocks. Traveling / 3 s / double dribble / foul / 7 m use red free-throw banners.
 
 ## Phase 1 — mini match (still in)
 
