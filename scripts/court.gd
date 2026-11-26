@@ -47,7 +47,8 @@ static func seven_meter_spot(defending_team_id: int) -> Vector3:
 
 
 ## Substitute / exclusion spot on the team bench, outside the 40×20.
-## Home bench is on −X, away on +X, each in its own half. `slot` 0–1 are subs; 2+ exclusions.
+## Home bench is on −X, away on +X, each in its own half.
+## `slot` 0–1 outfield subs, 2 reserve GK; 3+ exclusions / parked.
 static func bench_marker(team_id: int, slot: int = 0) -> Vector3:
 	var side := -1.0 if team_id == 0 else 1.0
 	var z_base := -2.6 if team_id == 0 else 2.6

@@ -41,7 +41,10 @@ var stamina_label: Label
 var sub_label: Label
 var exclusion_label: Label
 var wall_cue_label: Label
+var meta_label: Label
 var _goal_crosshair: Control
+var _help_overlay: ColorRect
+var _help_text: Label
 
 var _steps_pulse: Tween
 var _goal_tween: Tween
@@ -60,7 +63,7 @@ func _ready() -> void:
 	if power_bar:
 		power_bar.visible = false
 		power_bar.value = 0.0
-	help_label.text = "WASD · Shift sprint · Space jump · V dribble · LMB/E shoot · RMB/G PASS (+B bounce / +F lob) · C dive · Q cycle · R best · 1/2 shapes · ,/. sub on whistle"
+	help_label.text = "Esc/F1 help+remap · WASD · Shift sprint · Space jump · V dribble · LMB/E shoot · RMB/G PASS · ,/. sub (GK ok) · Q cycle"
 	_ensure_flash_overlay()
 	_ensure_hold_label()
 	_ensure_shapes_label()
@@ -68,7 +71,9 @@ func _ready() -> void:
 	_ensure_sub_label()
 	_ensure_exclusion_label()
 	_ensure_wall_cue_label()
+	_ensure_meta_label()
 	_ensure_goal_crosshair()
+	_ensure_help_overlay()
 
 
 func set_score(home: int, away: int) -> void:
@@ -126,7 +131,7 @@ func set_stamina(amount_01: float, sprinting: bool = false) -> void:
 		stamina_label.add_theme_color_override("font_color", Color(0.85, 0.95, 0.9, 0.9))
 
 
-## Phase G: dead-ball sub hint.
+## Phase G: dead-ball sub hint (includes stamina % / GK candidate).
 func set_sub_status(can_sub: bool, bench_label: String, bench_count: int) -> void:
 	_ensure_sub_label()
 	if sub_label == null:
@@ -145,6 +150,35 @@ func set_sub_status(can_sub: bool, bench_label: String, bench_count: int) -> voi
 			(" · %s" % bench_label) if not bench_label.is_empty() else ""
 		)
 		sub_label.add_theme_color_override("font_color", Color(0.75, 0.82, 0.9, 0.75))
+
+
+## §10 lite career / mode strip.
+func set_meta_status(mode: String, detail: String, hotseat: bool, kit: int) -> void:
+	_ensure_meta_label()
+	if meta_label == null:
+		return
+	meta_label.visible = true
+	meta_label.text = "%s · %s · kit %d%s" % [
+		mode,
+		detail,
+		kit,
+		" · HOTSEAT" if hotseat else "",
+	]
+
+
+## R7.1 help / remap overlay.
+func set_help_overlay(visible_now: bool, text: String) -> void:
+	_ensure_help_overlay()
+	if _help_overlay == null:
+		return
+	_help_overlay.visible = visible_now
+	if _help_text:
+		_help_text.visible = visible_now
+		_help_text.text = text
+
+
+func is_help_overlay_visible() -> bool:
+	return _help_overlay != null and is_instance_valid(_help_overlay) and _help_overlay.visible
 
 
 ## Goal-mouth aim reticle while shooting (screen-space over projected aim).
@@ -670,6 +704,57 @@ func _ensure_exclusion_label() -> void:
 	exclusion_label.add_theme_constant_override("shadow_offset_y", 2)
 	exclusion_label.text = ""
 	$Root.add_child(exclusion_label)
+
+
+func _ensure_meta_label() -> void:
+	if meta_label and is_instance_valid(meta_label):
+		return
+	meta_label = get_node_or_null("Root/MetaLabel") as Label
+	if meta_label:
+		return
+	meta_label = Label.new()
+	meta_label.name = "MetaLabel"
+	meta_label.visible = true
+	meta_label.position = Vector2(200, 78)
+	meta_label.size = Vector2(520, 24)
+	meta_label.add_theme_font_size_override("font_size", 14)
+	meta_label.add_theme_color_override("font_color", Color(0.78, 0.88, 0.95, 0.85))
+	meta_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.6))
+	meta_label.add_theme_constant_override("shadow_offset_x", 1)
+	meta_label.add_theme_constant_override("shadow_offset_y", 1)
+	meta_label.text = "Friendly · Season 0W-0D-0L · kit 0"
+	$Root.add_child(meta_label)
+
+
+func _ensure_help_overlay() -> void:
+	if _help_overlay and is_instance_valid(_help_overlay):
+		return
+	_help_overlay = get_node_or_null("Root/HelpOverlay") as ColorRect
+	if _help_overlay:
+		_help_text = get_node_or_null("Root/HelpOverlayText") as Label
+		_help_overlay.visible = false
+		if _help_text:
+			_help_text.visible = false
+		return
+	_help_overlay = ColorRect.new()
+	_help_overlay.name = "HelpOverlay"
+	_help_overlay.visible = false
+	_help_overlay.color = Color(0.04, 0.06, 0.1, 0.82)
+	_help_overlay.position = Vector2(40, 40)
+	_help_overlay.size = Vector2(1200, 640)
+	_help_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	_help_overlay.z_index = 40
+	$Root.add_child(_help_overlay)
+	_help_text = Label.new()
+	_help_text.name = "HelpOverlayText"
+	_help_text.visible = false
+	_help_text.position = Vector2(56, 52)
+	_help_text.size = Vector2(1160, 620)
+	_help_text.add_theme_font_size_override("font_size", 15)
+	_help_text.add_theme_color_override("font_color", Color(0.92, 0.96, 1.0, 1.0))
+	_help_text.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	_help_text.z_index = 41
+	$Root.add_child(_help_text)
 
 
 ## Subtle 3 m wall pip — sits under exclusion so it does not crowd Steps/Hold.

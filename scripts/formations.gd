@@ -400,7 +400,42 @@ static func paired_attack_role(def_role: Role) -> Role:
 			return Role.CENTER_BACK
 
 
+## True when `screener` stands in the corridor between defender and mark (lite pick).
+static func is_screened_from(defender: Player, mark: Player, screener: Player) -> bool:
+	if defender == null or mark == null or screener == null:
+		return false
+	if screener == mark or screener.team_id != mark.team_id:
+		return false
+	if screener.is_goalkeeper or screener.excluded or screener.on_bench:
+		return false
+	var a := Vector3(defender.global_position.x, 0.0, defender.global_position.z)
+	var b := Vector3(mark.global_position.x, 0.0, mark.global_position.z)
+	var s := Vector3(screener.global_position.x, 0.0, screener.global_position.z)
+	var ab := b - a
+	var ab_len := ab.length()
+	if ab_len < 1.2 or ab_len > 9.0:
+		return false
+	var t := clampf((s - a).dot(ab) / (ab_len * ab_len), 0.12, 0.88)
+	var closest := a + ab * t
+	var lateral := s.distance_to(closest)
+	# Tight corridor ≈ body width; screen must be closer to the line than the mark gap.
+	return lateral < 1.15 and s.distance_to(a) < ab_len - 0.4
+
+
+## Attackers crossing each other's lanes (forces switch under man / help under zone).
+static func is_crossing_pair(a: Player, b: Player) -> bool:
+	if a == null or b == null or a.team_id != b.team_id:
+		return false
+	if a.is_goalkeeper or b.is_goalkeeper or a.excluded or b.excluded:
+		return false
+	var dx := absf(a.global_position.x - b.global_position.x)
+	var dz := absf(a.global_position.z - b.global_position.z)
+	# Lateral exchange near the same depth = cross.
+	return dx < 2.4 and dz < 3.2 and dx + dz > 1.1
+
+
 ## Pick the opponent this defender should mark (same role preferred; nearest fallback).
+## R4.4: screens / crosses break the assignment → switch onto screener or crossing cutter.
 static func find_mark_target(defender: Player, opponents: Array) -> Player:
 	if defender == null or defender.is_goalkeeper:
 		return null
@@ -422,7 +457,43 @@ static func find_mark_target(defender: Player, opponents: Array) -> Player:
 		if d < nearest_d:
 			nearest_d = d
 			nearest = opp
-	return same_role if same_role else nearest
+	var primary := same_role if same_role else nearest
+	if primary == null:
+		return null
+	# Screen breakdown: if a teammate of the mark seals the lane, switch onto the screener
+	# (man) or the nearest free cutter (zone stay soft-helps elsewhere).
+	var shape := defense_shape_of(defender)
+	for item in opponents:
+		if not (item is Player):
+			continue
+		var screener := item as Player
+		if screener == null or screener == primary:
+			continue
+		if not is_screened_from(defender, primary, screener):
+			continue
+		if shape == DefenseShape.INDIVIDUAL:
+			return screener
+		# Zone: switch if screener is the more dangerous (closer to own goal).
+		var own_goal_z := -20.0 if defender.team_id == 0 else 20.0
+		if absf(screener.global_position.z - own_goal_z) < absf(primary.global_position.z - own_goal_z) + 0.8:
+			return screener
+		# Soft stay on primary but caller still shades help via find_help_threat.
+		break
+	# Cross breakdown: paired attackers exchanging lanes → chase the cutter who entered our lane.
+	var home_lane := _defense_home_lane_x(role_for(defender))
+	for item in opponents:
+		if not (item is Player):
+			continue
+		var cutter := item as Player
+		if cutter == null or cutter == primary or cutter.is_goalkeeper or cutter.excluded or cutter.on_bench:
+			continue
+		if cutter.team_id == defender.team_id:
+			continue
+		if not is_crossing_pair(primary, cutter):
+			continue
+		if absf(cutter.global_position.x - home_lane) < absf(primary.global_position.x - home_lane):
+			return cutter
+	return primary
 
 
 ## Most dangerous help threat: opponent pivot or deep cutter near own goal (not the primary mark).
@@ -511,6 +582,9 @@ static func defense_mark_slot(
 		var home_lane := _defense_home_lane_x(role)
 		if absf(mark_pos.x - home_lane) > 3.5 and same_side:
 			blend = maxf(blend, 0.7 if shape != DefenseShape.INDIVIDUAL else 0.88)
+		# Screened-off: mark assignment already swapped in find_mark_target; glue harder after switch.
+		if shape == DefenseShape.INDIVIDUAL:
+			blend = maxf(blend, 0.9)
 		base.x = lerpf(base.x, press.x, blend)
 		base.z = lerpf(base.z, press.z, blend * 0.85)
 		# Man defense: help is lighter — stay with your man.
