@@ -3511,6 +3511,77 @@ func _ready() -> void:
 		get_tree().quit(1)
 		return
 
+	# R3.1: HUD + floor ring while 3 m wall is forming / active; clears after throw.
+	if not Formations.uses_three_meter_wall("traveling"):
+		push_error("Smoke Wave4: free-throw codes should use 3 m wall cue")
+		get_tree().quit(1)
+		return
+	if not Formations.uses_three_meter_wall("throw_in"):
+		push_error("Smoke Wave4: throw-in should use 3 m wall cue")
+		get_tree().quit(1)
+		return
+	if Formations.uses_three_meter_wall("seven_m"):
+		push_error("Smoke Wave4: 7 m should not use 3 m wall cue")
+		get_tree().quit(1)
+		return
+	var cue_spot := Vector3(1.2, 0.0, 11.5)
+	var cue_taker := match_node._nearest_outfield(1, cue_spot)
+	if cue_taker == null:
+		push_error("Smoke Wave4: no taker for wall cue")
+		get_tree().quit(1)
+		return
+	match_node._place_set_piece("traveling", 1, cue_spot, cue_taker)
+	# Hold RULE_RESTART so physics won't clear the cue before asserts.
+	match_node.match_state = MatchController.MatchState.RULE_RESTART
+	match_node._begin_wall_cue(cue_spot, Formations.WALL_GAP_M, 1)
+	if not match_node.is_wall_cue_active():
+		push_error("Smoke Wave4: wall cue should be active while forming")
+		get_tree().quit(1)
+		return
+	if not match_node.is_wall_cue_ring_visible():
+		push_error("Smoke Wave4: floor ring should show while wall cue active")
+		get_tree().quit(1)
+		return
+	if absf(match_node.get_wall_cue_gap() - Formations.WALL_GAP_M) > 0.05:
+		push_error("Smoke Wave4: wall cue gap should match WALL_GAP_M")
+		get_tree().quit(1)
+		return
+	var wall_hud := match_node.hud
+	if (
+		wall_hud == null
+		or not wall_hud.has_method("is_wall_cue_visible")
+		or not wall_hud.is_wall_cue_visible()
+	):
+		push_error("Smoke Wave4: HUD 3 m wall pip should show while wall active")
+		get_tree().quit(1)
+		return
+	var wall_pip := ""
+	if wall_hud.has_method("get_wall_cue_text"):
+		wall_pip = str(wall_hud.get_wall_cue_text())
+	if not wall_pip.contains("3 m"):
+		push_error("Smoke Wave4: wall HUD pip should read 3 m wall")
+		get_tree().quit(1)
+		return
+	# Throw-in uses the shorter restart gap on the cue ring.
+	match_node._begin_wall_cue(ti_spot, Formations.RESTART_GAP_M, 0)
+	if absf(match_node.get_wall_cue_gap() - Formations.RESTART_GAP_M) > 0.05:
+		push_error("Smoke Wave4: throw-in wall cue should use RESTART_GAP_M")
+		get_tree().quit(1)
+		return
+	# LIVE + lost ball → cue clears (rule no longer applies).
+	match_node.match_state = MatchController.MatchState.LIVE
+	_smoke_clear_ball(ball)
+	match_node._tick_wall_cue()
+	if match_node.is_wall_cue_active() or match_node.is_wall_cue_ring_visible():
+		push_error("Smoke Wave4: wall cue should clear after throw / free ball")
+		get_tree().quit(1)
+		return
+	if wall_hud.has_method("is_wall_cue_visible") and wall_hud.is_wall_cue_visible():
+		push_error("Smoke Wave4: HUD wall pip should hide when cue clears")
+		get_tree().quit(1)
+		return
+	print("Smoke Wave4 3 m wall cue OK pip=", wall_pip, " gap_ft=", Formations.WALL_GAP_M)
+
 	# R3.7: push/pull from behind → 2 min + FT (not clear-chance distance).
 	_smoke_prepare_live(match_node, ball)
 	_smoke_clear_ball(ball)
