@@ -46,8 +46,9 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 | **Camera reset** | **Home** or **0** | — |
 | **Wing cinematic toggle** | **4** | — |
 | **Sprint** (drains stamina) | Hold **Shift** | Hold **Back** / Select |
-| **Cycle bench** (sub candidate) | **,** (comma) | D-pad Right (dead ball / no ball) |
-| **Confirm sub** (dead ball only) | **.** (period) | **Start** |
+| **Cycle bench** (sub candidate; stamina-sorted; GK when controlling GK) | **,** (comma) | D-pad Right (dead ball / no ball) |
+| **Confirm sub** (dead ball; OF↔OF or GK↔GK) | **.** (period) | **Start** |
+| **Help / remap / meta** | **Esc** or **F1** | — |
 
 **Binding notes (Wave 0):** Shoot is the **RT axis** (not L3). Lob is **LT only** so it does not share **Back/Select** with sprint. Pass (RB) always cancels a shoot charge and never fires the shot. Dribble stays on **V / R3** so it does not fight shoot, pass, jump, or lob.
 
@@ -97,21 +98,23 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 - Jump plant is a short grounded stick, not full three-step drive animation.
 - Bounce pass = floor redirect hop (**approx**), not true spin/palm.
 - Outlet is AI-only after saves; human GK keeps distribution manual.
-- No career / season — later Phase G slices.
+- Career / season / training lite: open with **Esc** (see Phase G table).
 
 ## Phase G — sim depth (first playable slice)
 
 | Feature | How it feels in play |
 |---------|----------------------|
-| **Full 7** | On court: **GK + LW / LB / CB / RB / RW / Pivot**. Plus **2** bench outfielders per side. |
+| **Full 7** | On court: **GK + LW / LB / CB / RB / RW / Pivot**. Bench: **2** outfielders + **1** reserve GK per side. |
 | **Stamina** | Sprint / jump / shot drain; soft speed + accuracy when low; recover off-ball / faster on bench. |
-| **Subs** | Dead-ball only: **,** cycle bench · **.** confirm (controlled outfielder ↔ bench). |
+| **Subs** | Dead-ball only: **,** cycle bench · **.** confirm. OF↔OF or GK↔reserve GK. Bench pick shows stamina %. |
 | **Shapes** | Wide/Crash and Flat/OneUp still work — now with real backs + line player. |
+| **Help / remap** | **Esc** / **F1** opens help + remappable keys (saved to `user://input_remap.cfg`). |
+| **Meta lite** | Esc menu: **M** season/friendly/training · **T** shoot drill · **H** local hotseat · **K** kit pack. |
 
 ### Intentional simplifications (Phase G)
 
-- No career / season / timeouts UI.
-- No GK sub; bench is outfield-only (2).
+- Season mode is a lite W–D–L record (not a full league calendar).
+- No online multiplayer (local hotseat only).
 - Subs blocked while LIVE (whistle windows only).
 - Sprint is hold-Shift lite — not full energy systems / fatigue injury.
 

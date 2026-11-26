@@ -966,7 +966,7 @@ func reset_to_start() -> void:
 	if disqualified:
 		excluded = true
 		exclusion_remaining = maxf(exclusion_remaining, 1.0)
-		global_position = Court.bench_marker(team_id, 2 + maxi(0, player_index % 4))
+		global_position = Court.bench_marker(team_id, 3 + maxi(0, player_index % 4))
 	else:
 		excluded = false
 		exclusion_remaining = 0.0

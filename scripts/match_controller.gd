@@ -3,7 +3,8 @@ class_name MatchController
 
 ## Routes input, possession, team switch, scoring, clock, kickoff, AI, Phase 2–5
 ## rules/tactics/presentation, Phase D contact / 7 m / exclusion, Phase E shapes,
-## Phase G sim depth (7-man roster, stamina, dead-ball substitutions).
+## Phase G sim depth (7-man roster, stamina, dead-ball substitutions),
+## Wave 7 closure: GK sub, remap/help, career/training lite, audio, hotseat.
 
 enum AimMode { FACE, MOUSE_COURT }
 enum MatchState { PRE_KICKOFF, LIVE, GOAL_PAUSE, PERIOD_BREAK, MATCH_OVER, RULE_RESTART }
@@ -96,6 +97,13 @@ var _loop_attack_team: int = -1
 var _loop_attack_t: float = 0.0
 var _loop_best_progress: float = -INF
 var _loop_no_progress_t: float = 0.0
+## Esc help / remap / meta menu.
+var _help_open: bool = false
+var _remap_waiting: bool = false
+var _remap_action_i: int = 0
+var _match_audio: MatchAudio
+## Away hotseat control (local 2P substitute for online).
+var away_controlled_player: Player = null
 
 @onready var _home_root: Node = get_node(home_team_path)
 @onready var _away_root: Node = get_node(away_team_path)
@@ -105,6 +113,8 @@ var _loop_no_progress_t: float = 0.0
 
 
 func _ready() -> void:
+	MetaMode.load_career()
+	InputSettings.load_remaps()
 	clock_remaining = period_length_seconds
 	_spawn_roster()
 	_collect_players()
@@ -112,12 +122,14 @@ func _ready() -> void:
 	_wire_rules()
 	_configure_ai()
 	_setup_block_trace()
+	_setup_match_audio()
 	camera_rig.setup(ball, true)
 	_refresh_hud()
 	_sync_team_shapes()
+	_update_meta_hud()
 	print(
-		"MyHandball Phase G sim ready. Period=%ds x%d. Roster 7+2. Sprint Shift · Sub ,/. on whistle."
-		% [int(period_length_seconds), periods_total]
+		"MyHandball ready. Period=%ds x%d. Roster 7+3 (2 OF + GK bench). Esc help/remap. Mode=%s."
+		% [int(period_length_seconds), periods_total, MetaMode.mode_label()]
 	)
 	var user_args := OS.get_cmdline_user_args()
 	if "--smoke" in user_args:
@@ -180,13 +192,19 @@ func _ready() -> void:
 	await _run_kickoff(0, "Kickoff")
 
 
+func _setup_match_audio() -> void:
+	_match_audio = MatchAudio.new()
+	_match_audio.name = "MatchAudio"
+	add_child(_match_audio)
+
+
 func _spawn_roster() -> void:
 	if player_scene == null:
 		player_scene = load("res://scenes/actors/player.tscn") as PackedScene
-	# Home attacks +Z. Phase G: full 7 on court (GK+LW/LB/CB/RB/RW/P) + 2 bench.
+	# Home attacks +Z. Full 7 on court + bench: 2 outfield + 1 reserve GK (§10 / R4.10).
 	# Spawn mirrors kickoff feel: Home offense pre-mid; Away defense on own 6 m wall.
-	var home_color := Color(0.12, 0.42, 0.92)
-	var away_color := Color(0.92, 0.16, 0.14)
+	var home_color := MetaMode.kit_tint_for_team(0)
+	var away_color := MetaMode.kit_tint_for_team(1)
 	var home_spots: Array = [
 		{"pos": Vector3(0, 0, -17.5), "yaw": 0.0, "gk": true, "idx": 0},
 		{"pos": Vector3(-6.8, 0, -5.8), "yaw": 0.0, "gk": false, "idx": 1}, # LW
@@ -197,6 +215,7 @@ func _spawn_roster() -> void:
 		{"pos": Vector3(0.0, 0, -6.6), "yaw": 0.0, "gk": false, "idx": 6}, # Pivot
 		{"pos": Court.bench_marker(0, 0), "yaw": 0.0, "gk": false, "idx": 7, "bench": true, "slot": 0},
 		{"pos": Court.bench_marker(0, 1), "yaw": 0.0, "gk": false, "idx": 8, "bench": true, "slot": 1},
+		{"pos": Court.bench_marker(0, 2), "yaw": 0.0, "gk": true, "idx": 9, "bench": true, "slot": 2},
 	]
 	# Away default spawn = defensive wall just outside own 6 m (z≈+12.4).
 	# Lanes match Formations absolute X (LW negative, RW positive).
@@ -210,6 +229,7 @@ func _spawn_roster() -> void:
 		{"pos": Vector3(1.1, 0, 12.4), "yaw": PI, "gk": false, "idx": 6}, # Pivot
 		{"pos": Court.bench_marker(1, 0), "yaw": PI, "gk": false, "idx": 7, "bench": true, "slot": 0},
 		{"pos": Court.bench_marker(1, 1), "yaw": PI, "gk": false, "idx": 8, "bench": true, "slot": 1},
+		{"pos": Court.bench_marker(1, 2), "yaw": PI, "gk": true, "idx": 9, "bench": true, "slot": 2},
 	]
 	for spot in home_spots:
 		_spawn_player(_home_root, 0, home_color, spot)
@@ -279,6 +299,19 @@ func _setup_block_trace() -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	# Help / remap overlay (Esc or F1 / toggle_help). Works even at MATCH_OVER.
+	if _help_open:
+		_handle_help_input(event)
+		return
+	if event.is_action_pressed("toggle_help") or (
+		event is InputEventKey
+		and event.pressed
+		and not event.echo
+		and (event as InputEventKey).physical_keycode == KEY_ESCAPE
+	):
+		_open_help_menu()
+		get_viewport().set_input_as_handled()
+		return
 	if match_state == MatchState.MATCH_OVER:
 		return
 	if event.is_action_pressed("toggle_aim_mode"):
@@ -409,6 +442,9 @@ func _unhandled_input(event: InputEvent) -> void:
 
 
 func _physics_process(delta: float) -> void:
+	if _help_open:
+		_park_bench_players()
+		return
 	_update_camera_attack_side()
 	_update_camera_nudge(delta)
 	_update_shot_charge(delta)
@@ -762,6 +798,17 @@ func _bench_players(team_id: int) -> Array[Player]:
 	return out
 
 
+## Bench candidates matching the controlled player's GK/outfield role (R4.10).
+## Sorted freshest-first so stamina influences sub value (R4.10 / R4.11).
+func _bench_candidates_for_sub(team_id: int, want_gk: bool) -> Array[Player]:
+	var out: Array[Player] = []
+	for p in _bench_players(team_id):
+		if p.is_goalkeeper == want_gk:
+			out.append(p)
+	out.sort_custom(func(a: Player, b: Player) -> bool: return a.stamina > b.stamina)
+	return out
+
+
 func _can_substitute_now() -> bool:
 	# Dead ball / whistle windows only (Phase G first slice).
 	return match_state in [
@@ -773,7 +820,8 @@ func _can_substitute_now() -> bool:
 
 
 func _cycle_bench_select() -> void:
-	var bench := _bench_players(controlled_team_id)
+	var want_gk := controlled_player != null and controlled_player.is_goalkeeper
+	var bench := _bench_candidates_for_sub(controlled_team_id, want_gk)
 	if bench.is_empty():
 		_bench_select_i = 0
 		_update_sub_hud()
@@ -782,27 +830,30 @@ func _cycle_bench_select() -> void:
 	_update_sub_hud()
 	if hud and hud.has_method("flash_rule"):
 		var pick := bench[_bench_select_i]
-		hud.flash_rule("Bench → #%d" % (pick.player_index + 1), "sub")
+		var stam := int(round(pick.stamina_01() * 100.0))
+		var kind := "GK" if pick.is_goalkeeper else "OF"
+		hud.flash_rule("Bench → %s #%d · %d%%" % [kind, pick.player_index + 1, stam], "sub")
 
 
 func _selected_bench_player() -> Player:
-	var bench := _bench_players(controlled_team_id)
+	var want_gk := controlled_player != null and controlled_player.is_goalkeeper
+	var bench := _bench_candidates_for_sub(controlled_team_id, want_gk)
 	if bench.is_empty():
 		return null
 	_bench_select_i = clampi(_bench_select_i, 0, bench.size() - 1)
 	return bench[_bench_select_i]
 
 
-## Swap controlled on-court outfielder with selected bench player (dead ball only).
+## Swap controlled on-court player with matching bench (OF↔OF or GK↔GK). Dead ball only.
 func _try_substitution() -> void:
 	if not _can_substitute_now():
 		if hud and hud.has_method("flash_rule"):
 			hud.flash_rule("Subs only on whistle", "sub")
 		return
 	var outgoing := controlled_player
-	if outgoing == null or outgoing.is_goalkeeper or outgoing.on_bench or outgoing.excluded:
+	if outgoing == null or outgoing.on_bench or outgoing.excluded:
 		if hud and hud.has_method("flash_rule"):
-			hud.flash_rule("Select an outfielder to sub out", "sub")
+			hud.flash_rule("Select a player to sub out", "sub")
 		return
 	if outgoing.has_ball:
 		if hud and hud.has_method("flash_rule"):
@@ -811,18 +862,29 @@ func _try_substitution() -> void:
 	var incoming := _selected_bench_player()
 	if incoming == null:
 		if hud and hud.has_method("flash_rule"):
-			hud.flash_rule("No bench player", "sub")
+			hud.flash_rule(
+				"No reserve GK" if outgoing.is_goalkeeper else "No bench outfielder",
+				"sub"
+			)
+		return
+	if incoming.is_goalkeeper != outgoing.is_goalkeeper:
+		if hud and hud.has_method("flash_rule"):
+			hud.flash_rule("GK subs only with reserve GK", "sub")
 		return
 	_swap_players_for_sub(outgoing, incoming)
 	if hud and hud.has_method("flash_rule"):
+		var role_txt := (
+			"GK" if incoming.is_goalkeeper
+			else Formations.role_label(Formations.role_for(incoming))
+		)
 		hud.flash_rule(
-			"SUB %s ↔ #%d"
-			% [Formations.role_label(Formations.role_for(incoming)), incoming.player_index + 1],
+			"SUB %s ↔ #%d (%d%%)"
+			% [role_txt, incoming.player_index + 1, int(round(incoming.stamina_01() * 100.0))],
 			"sub"
 		)
 	print(
-		"SUB: %s off, %s on (role idx %d)"
-		% [outgoing.name, incoming.name, incoming.player_index]
+		"SUB: %s off, %s on (role idx %d, gk=%s)"
+		% [outgoing.name, incoming.name, incoming.player_index, str(incoming.is_goalkeeper)]
 	)
 
 
@@ -832,13 +894,16 @@ func _swap_players_for_sub(outgoing: Player, incoming: Player) -> void:
 	var out_start := outgoing.start_position
 	var out_yaw := outgoing.rotation.y
 	var out_start_yaw := outgoing.start_yaw
+	var out_was_gk := outgoing.is_goalkeeper
 	var in_slot := incoming.bench_slot
 	var in_idx := incoming.player_index
+	var in_was_gk := incoming.is_goalkeeper
 
 	# Outgoing → bench (keeps a high bench index for identity; role rides with index swap).
 	outgoing.on_bench = true
 	outgoing.player_index = in_idx
 	outgoing.bench_slot = in_slot
+	outgoing.is_goalkeeper = in_was_gk
 	outgoing.ai_enabled = false
 	outgoing.controlled = false
 	outgoing.velocity = Vector3.ZERO
@@ -847,10 +912,11 @@ func _swap_players_for_sub(outgoing: Player, incoming: Player) -> void:
 	outgoing.start_position = outgoing.global_position
 	outgoing.start_yaw = outgoing.rotation.y
 
-	# Incoming inherits the court role / slot.
+	# Incoming inherits the court role / slot / GK flag.
 	incoming.on_bench = false
 	incoming.player_index = out_idx
 	incoming.bench_slot = 0
+	incoming.is_goalkeeper = out_was_gk
 	incoming.global_position = out_pos
 	incoming.start_position = out_start
 	incoming.start_yaw = out_start_yaw
@@ -892,12 +958,17 @@ func _update_sub_hud() -> void:
 	if hud == null or not hud.has_method("set_sub_status"):
 		return
 	var can_sub := _can_substitute_now()
-	var bench := _bench_players(controlled_team_id)
+	var want_gk := controlled_player != null and controlled_player.is_goalkeeper
+	var bench := _bench_candidates_for_sub(controlled_team_id, want_gk)
 	var label := ""
+	if controlled_player != null and controlled_player.stamina_01() < 0.35 and can_sub:
+		label = "tired — sub?"
 	if not bench.is_empty():
 		var pick := _selected_bench_player()
 		if pick:
-			label = "Bench #%d" % (pick.player_index + 1)
+			var stam := int(round(pick.stamina_01() * 100.0))
+			var kind := "GK" if pick.is_goalkeeper else "OF"
+			label = "%s #%d %d%%" % [kind, pick.player_index + 1, stam]
 	hud.set_sub_status(can_sub, label, bench.size())
 
 
@@ -1421,6 +1492,8 @@ func _on_rule_violation(code: String, message: String, awarding_team_id: int, sp
 	if match_state != MatchState.LIVE:
 		return
 	print("RULE [%s]: %s → team %d @ %s" % [code, message, awarding_team_id, str(spot)])
+	if _match_audio:
+		_match_audio.play_whistle()
 	if hud and hud.has_method("flash_rule"):
 		hud.flash_rule(message, code)
 	_clear_seven_m_ready()
@@ -1525,7 +1598,7 @@ func _place_set_piece(code: String, awarding_team_id: int, spot: Vector3, taker:
 	for p in _all_players():
 		var place := Formations.set_piece_slot(p, code, awarding_team_id, spot, taker)
 		if p.excluded:
-			place = Court.bench_marker(p.team_id, 2 + maxi(0, p.player_index % 4))
+			place = Court.bench_marker(p.team_id, 3 + maxi(0, p.player_index % 4))
 		elif p.on_bench:
 			place = Court.bench_marker(p.team_id, maxi(0, p.bench_slot))
 		p.global_position = place
@@ -2101,6 +2174,11 @@ func _on_goal_scored(scoring_team_id: int, goal_owner_team_id: int) -> void:
 	print("GOAL! Home %d — Away %d (kickoff → team %d)" % [score_home, score_away, goal_owner_team_id])
 	if hud and hud.has_method("set_score"):
 		hud.set_score(score_home, score_away)
+	if _match_audio:
+		_match_audio.play_goal_cheer()
+	if MetaMode.play_mode == MetaMode.PlayMode.TRAINING and scoring_team_id == 0:
+		MetaMode.training_goals += 1
+		_update_meta_hud()
 	# Phase 5 juice: slow-mo + punchy banner / screen flash (wall-clock pause).
 	Engine.time_scale = GOAL_SLOWMO_SCALE
 	if hud and hud.has_method("flash_goal"):
@@ -2124,9 +2202,14 @@ func _on_period_expired() -> void:
 	print("Period %d ended. Score Home %d — Away %d" % [current_period, score_home, score_away])
 	if current_period >= periods_total:
 		match_state = MatchState.MATCH_OVER
+		MetaMode.record_match_result(score_home, score_away)
+		_update_meta_hud()
 		if hud and hud.has_method("flash_match_over"):
 			hud.flash_match_over(score_home, score_away)
-		print("MATCH OVER. Final Home %d — Away %d" % [score_home, score_away])
+		print(
+			"MATCH OVER. Final Home %d — Away %d · %s"
+			% [score_home, score_away, MetaMode.season_summary()]
+		)
 		_set_players_frozen(true)
 		return
 	if hud and hud.has_method("flash_period_end"):
@@ -2295,3 +2378,188 @@ func _first_outfield(roster: Array[Player]) -> Player:
 
 func _aim_mode_label() -> String:
 	return "Aim: Face" if aim_mode == AimMode.FACE else "Aim: Mouse"
+
+
+func _update_meta_hud() -> void:
+	if hud == null or not hud.has_method("set_meta_status"):
+		return
+	var extra := MetaMode.season_summary()
+	if MetaMode.play_mode == MetaMode.PlayMode.TRAINING:
+		extra = "Drill shots→goals %d/%d" % [MetaMode.training_goals, maxi(1, MetaMode.training_shots)]
+	hud.set_meta_status(
+		MetaMode.mode_label(),
+		extra,
+		MetaMode.hotseat_enabled,
+		MetaMode.kit_variant
+	)
+
+
+func _open_help_menu() -> void:
+	_help_open = true
+	_remap_waiting = false
+	# Soft overlay — do not pause the tree (keeps clock/smoke stable).
+	_set_players_frozen(true)
+	if hud and hud.has_method("set_help_overlay"):
+		hud.set_help_overlay(true, _help_overlay_text())
+
+
+func _close_help_menu() -> void:
+	_help_open = false
+	_remap_waiting = false
+	if match_state == MatchState.LIVE:
+		_set_players_frozen(false)
+	if hud and hud.has_method("set_help_overlay"):
+		hud.set_help_overlay(false, "")
+
+
+func _help_overlay_text() -> String:
+	var lines: PackedStringArray = []
+	lines.append("=== MyHandball help / settings (Esc closes) ===")
+	lines.append("Mode: %s · %s · Kit pack %d · Hotseat %s" % [
+		MetaMode.mode_label(),
+		MetaMode.season_summary(),
+		MetaMode.kit_variant,
+		"ON" if MetaMode.hotseat_enabled else "OFF",
+	])
+	lines.append("M cycle mode · H hotseat · K kit pack · T start training drill")
+	lines.append("↑↓ select action · Enter rebind · R reset selected key")
+	lines.append("--- Remap list ---")
+	var i := 0
+	for action in InputSettings.REMAP_ACTIONS:
+		var mark := ">" if i == _remap_action_i else " "
+		var wait := "  << press new key >>" if _remap_waiting and i == _remap_action_i else ""
+		lines.append("%s %s = %s%s" % [mark, action, InputSettings.action_label(action), wait])
+		i += 1
+	for tip in InputSettings.help_lines():
+		lines.append(tip)
+	return "\n".join(lines)
+
+
+func _handle_help_input(event: InputEvent) -> void:
+	if not (event is InputEventKey and event.pressed and not event.echo):
+		if event.is_action_pressed("toggle_help"):
+			_close_help_menu()
+			get_viewport().set_input_as_handled()
+		return
+	var key := event as InputEventKey
+	var code := key.physical_keycode if key.physical_keycode != KEY_NONE else key.keycode
+	if _remap_waiting:
+		var action := InputSettings.REMAP_ACTIONS[_remap_action_i]
+		if InputSettings.rebind_action_to_event(action, event):
+			_remap_waiting = false
+			if hud and hud.has_method("set_help_overlay"):
+				hud.set_help_overlay(true, _help_overlay_text())
+			if hud and hud.has_method("flash_rule"):
+				hud.flash_rule("Rebound %s" % action, "sub")
+		get_viewport().set_input_as_handled()
+		return
+	if code == KEY_ESCAPE or event.is_action_pressed("toggle_help"):
+		_close_help_menu()
+		get_viewport().set_input_as_handled()
+		return
+	if code == KEY_UP or code == KEY_W:
+		_remap_action_i = (_remap_action_i - 1 + InputSettings.REMAP_ACTIONS.size()) % InputSettings.REMAP_ACTIONS.size()
+	elif code == KEY_DOWN or code == KEY_S:
+		_remap_action_i = (_remap_action_i + 1) % InputSettings.REMAP_ACTIONS.size()
+	elif code == KEY_ENTER or code == KEY_KP_ENTER:
+		_remap_waiting = true
+	elif code == KEY_R:
+		InputSettings.reset_action_defaults(InputSettings.REMAP_ACTIONS[_remap_action_i])
+		# Soft note: full defaults need project reload; clear saved override.
+		_remap_waiting = false
+	elif code == KEY_M:
+		MetaMode.cycle_play_mode()
+		_update_meta_hud()
+	elif code == KEY_H:
+		MetaMode.toggle_hotseat()
+		_update_meta_hud()
+		if MetaMode.hotseat_enabled:
+			_ensure_away_hotseat()
+		else:
+			away_controlled_player = null
+	elif code == KEY_K:
+		MetaMode.cycle_kit_variant()
+		_apply_kit_variants()
+		_update_meta_hud()
+	elif code == KEY_T:
+		_close_help_menu()
+		_start_training_drill()
+		get_viewport().set_input_as_handled()
+		return
+	if hud and hud.has_method("set_help_overlay"):
+		hud.set_help_overlay(true, _help_overlay_text())
+	get_viewport().set_input_as_handled()
+
+
+func _apply_kit_variants() -> void:
+	var home_c := MetaMode.kit_tint_for_team(0)
+	var away_c := MetaMode.kit_tint_for_team(1)
+	for p in _home_players:
+		p.body_color = home_c.darkened(0.15) if p.is_goalkeeper else home_c
+		if p._body_mat:
+			p._body_mat.albedo_color = p.body_color
+			p._body_mat.emission = p.body_color.darkened(0.25)
+	for p in _away_players:
+		p.body_color = away_c.darkened(0.15) if p.is_goalkeeper else away_c
+		if p._body_mat:
+			p._body_mat.albedo_color = p.body_color
+			p._body_mat.emission = p.body_color.darkened(0.25)
+
+
+func _ensure_away_hotseat() -> void:
+	# Local 2P: Away carrier / CB becomes human-controlled (no online).
+	var pick := _first_outfield(_away_players)
+	if pick == null and not _away_players.is_empty():
+		pick = _away_players[0]
+	away_controlled_player = pick
+	if away_controlled_player:
+		away_controlled_player.ai_enabled = false
+		away_controlled_player.controlled = false  # Home still owns primary controlled flag
+
+
+## §10.1 Training: park most players, CB vs opposing GK shoot drill.
+func _start_training_drill() -> void:
+	MetaMode.play_mode = MetaMode.PlayMode.TRAINING
+	MetaMode.training_shots = 0
+	MetaMode.training_goals = 0
+	MetaMode.save_career()
+	match_state = MatchState.PRE_KICKOFF
+	rules.begin_lockout()
+	_set_players_frozen(true)
+	_clear_possession()
+	var shooter := _home_players[3] if _home_players.size() > 3 else _first_outfield(_home_players)
+	var gk: Player = null
+	for p in _away_players:
+		if p.is_goalkeeper and not p.on_bench:
+			gk = p
+			break
+	for p in _all_players():
+		if p == shooter or p == gk:
+			p.match_frozen = false
+			p.ai_enabled = p == gk
+			continue
+		p.match_frozen = true
+		p.ai_enabled = false
+		if not p.on_bench and not p.excluded:
+			p.global_position = Court.bench_marker(p.team_id, 3 + (p.player_index % 3))
+	if shooter:
+		shooter.global_position = Vector3(0.0, 0.0, 8.0)
+		shooter.rotation.y = 0.0
+		shooter.velocity = Vector3.ZERO
+		_give_ball_to(shooter)
+		_set_controlled(shooter)
+		rules.on_pickup(shooter)
+	if gk:
+		gk.global_position = Vector3(0.0, 0.0, 17.5)
+		gk.rotation.y = PI
+		gk.velocity = Vector3.ZERO
+	camera_rig.set_attack_direction(true)
+	_attack_team_id = 0
+	_refresh_hud()
+	_update_meta_hud()
+	if hud and hud.has_method("flash_rule"):
+		hud.flash_rule("TRAINING — shoot on GK · Esc menu", "shape")
+	rules.end_lockout()
+	_set_players_frozen(false)
+	match_state = MatchState.LIVE
+	print("Training drill started")

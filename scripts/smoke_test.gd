@@ -1554,7 +1554,7 @@ func _ready() -> void:
 		push_error("Smoke: 7 m clear-chance should exclude the fouler")
 		get_tree().quit(1)
 		return
-	var bench := Court.bench_marker(pen_def.team_id, 2 + maxi(0, pen_def.player_index % 4))
+	var bench := Court.bench_marker(pen_def.team_id, 3 + maxi(0, pen_def.player_index % 4))
 	if pen_def.global_position.distance_to(bench) > 1.5:
 		push_error("Smoke: excluded player should sit on bench marker")
 		get_tree().quit(1)
@@ -2107,29 +2107,36 @@ func _ready() -> void:
 	Engine.time_scale = 1.0
 	print("Smoke Phase 5 presentation OK")
 
-	# --- Phase G: roster 7+2, stamina, dead-ball substitutions ---
+	# --- Phase G: roster 7+3 (2 OF + reserve GK), stamina, dead-ball substitutions ---
 	_smoke_prepare_live(match_node, ball)
 	_smoke_clear_ball(ball)
 	var home_court := 0
 	var home_bench := 0
+	var home_bench_gk := 0
 	var roles_seen: Dictionary = {}
 	for p in match_node._home_players:
 		if p.on_bench:
 			home_bench += 1
+			if p.is_goalkeeper:
+				home_bench_gk += 1
 			continue
 		home_court += 1
 		if not p.is_goalkeeper:
 			roles_seen[Formations.role_for(p)] = true
 	print(
 		"Smoke Phase G roster home court=", home_court,
-		" bench=", home_bench, " roles=", roles_seen.size()
+		" bench=", home_bench, " bench_gk=", home_bench_gk, " roles=", roles_seen.size()
 	)
 	if home_court != 7:
 		push_error("Smoke: expected 7 on-court Home players (GK+6)")
 		get_tree().quit(1)
 		return
-	if home_bench < 2:
-		push_error("Smoke: expected ≥2 Home bench players")
+	if home_bench < 3:
+		push_error("Smoke: expected ≥3 Home bench players (2 OF + GK)")
+		get_tree().quit(1)
+		return
+	if home_bench_gk < 1:
+		push_error("Smoke: expected a reserve GK on the Home bench")
 		get_tree().quit(1)
 		return
 	for need_role in [
@@ -2186,21 +2193,25 @@ func _ready() -> void:
 		return
 	print("Smoke Phase G stamina drain/recover OK")
 
-	# Dead-ball sub: controlled outfielder ↔ selected bench.
+	# Dead-ball sub: controlled outfielder ↔ selected OF bench (stamina-sorted).
 	match_node.match_state = MatchController.MatchState.RULE_RESTART
 	match_node._set_players_frozen(true)
 	var out_player := match_node._first_outfield(match_node._home_players)
 	match_node._set_controlled(out_player)
 	var out_role_idx := out_player.player_index
 	var out_name := out_player.name
-	var bench_list := match_node._bench_players(0)
+	var bench_list := match_node._bench_candidates_for_sub(0, false)
 	if bench_list.is_empty():
-		push_error("Smoke: no Home bench for sub")
+		push_error("Smoke: no Home outfield bench for sub")
 		get_tree().quit(1)
 		return
+	# Prefer a known fresher candidate so selection is deterministic.
+	bench_list[0].stamina = 99.0
+	if bench_list.size() > 1:
+		bench_list[1].stamina = 40.0
 	match_node._bench_select_i = 0
-	var in_player: Player = bench_list[0]
-	var in_name := in_player.name
+	var in_player: Player = match_node._selected_bench_player()
+	var in_name: String = in_player.name if in_player != null else "null"
 	if not match_node._can_substitute_now():
 		push_error("Smoke: RULE_RESTART should allow subs")
 		get_tree().quit(1)
@@ -2225,6 +2236,10 @@ func _ready() -> void:
 		return
 	if in_player.on_bench:
 		push_error("Smoke: incoming should leave the bench after sub")
+		get_tree().quit(1)
+		return
+	if in_player.is_goalkeeper:
+		push_error("Smoke: OF sub should not promote a GK onto an outfield role")
 		get_tree().quit(1)
 		return
 	# Live play blocks subs.
@@ -5300,6 +5315,184 @@ func _ready() -> void:
 		"Smoke pivot plant readability OK catch=", catch_pivot,
 		" step→", after_step,
 		" gather=", gather_pivot
+	)
+
+	# --- Requirements closure: remap/help, GK sub, screen mark break, meta lite ---
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+
+	# R7.1 help overlay + remap persistence helpers.
+	if not InputMap.has_action("toggle_help"):
+		push_error("Smoke closure: toggle_help action missing")
+		get_tree().quit(1)
+		return
+	match_node._open_help_menu()
+	if not match_node._help_open or not match_node.hud.is_help_overlay_visible():
+		push_error("Smoke closure: help overlay should open")
+		get_tree().quit(1)
+		return
+	var shoot_before := InputSettings.action_label("shoot")
+	var rebind := InputEventKey.new()
+	rebind.pressed = true
+	rebind.physical_keycode = KEY_P
+	rebind.keycode = KEY_P
+	if not InputSettings.rebind_action_to_event("shoot", rebind):
+		push_error("Smoke closure: rebind shoot failed")
+		get_tree().quit(1)
+		return
+	if not InputSettings.action_has_key("shoot", KEY_P):
+		push_error("Smoke closure: shoot should include remapped P key")
+		get_tree().quit(1)
+		return
+	if InputSettings.action_label("shoot") != "P":
+		push_error("Smoke closure: shoot label should prefer keyboard P")
+		get_tree().quit(1)
+		return
+	# Restore a usable shoot key for any later asserts.
+	var restore := InputEventKey.new()
+	restore.pressed = true
+	restore.physical_keycode = KEY_E
+	restore.keycode = KEY_E
+	InputSettings.rebind_action_to_event("shoot", restore)
+	match_node._close_help_menu()
+	if match_node._help_open or match_node.hud.is_help_overlay_visible():
+		push_error("Smoke closure: help overlay should close")
+		get_tree().quit(1)
+		return
+	print("Smoke closure help/remap OK was=", shoot_before, " now=", InputSettings.action_label("shoot"))
+
+	# R4.10 GK ↔ reserve GK sub.
+	match_node.match_state = MatchController.MatchState.RULE_RESTART
+	match_node._set_players_frozen(true)
+	var court_gk: Player = null
+	for p in match_node._home_players:
+		if p.is_goalkeeper and not p.on_bench and not p.excluded:
+			court_gk = p
+			break
+	if court_gk == null:
+		push_error("Smoke closure: missing on-court Home GK")
+		get_tree().quit(1)
+		return
+	match_node._set_controlled(court_gk)
+	var gk_bench := match_node._bench_candidates_for_sub(0, true)
+	if gk_bench.is_empty():
+		push_error("Smoke closure: missing reserve GK")
+		get_tree().quit(1)
+		return
+	gk_bench[0].stamina = 95.0
+	match_node._bench_select_i = 0
+	var reserve_gk := match_node._selected_bench_player()
+	match_node._try_substitution()
+	print(
+		"Smoke closure GK sub: out=", court_gk.name,
+		" in=", reserve_gk.name if reserve_gk else "null",
+		" controlled_gk=",
+		match_node.controlled_player.is_goalkeeper if match_node.controlled_player else false
+	)
+	if match_node.controlled_player != reserve_gk:
+		push_error("Smoke closure: GK sub should control reserve GK")
+		get_tree().quit(1)
+		return
+	if not match_node.controlled_player.is_goalkeeper:
+		push_error("Smoke closure: incoming GK sub must remain GK")
+		get_tree().quit(1)
+		return
+	if not court_gk.on_bench or not court_gk.is_goalkeeper:
+		push_error("Smoke closure: outgoing GK should sit as reserve GK")
+		get_tree().quit(1)
+		return
+
+	# R4.4 screen / cross mark breakdown (isolated 1v2 geometry).
+	var def_p := match_node._first_outfield(match_node._away_players)
+	var mark_p: Player = null
+	var screen_p: Player = null
+	for p in match_node._home_players:
+		if p.is_goalkeeper or p.on_bench or p.excluded:
+			continue
+		if mark_p == null:
+			mark_p = p
+		elif screen_p == null:
+			screen_p = p
+			break
+	if def_p == null or mark_p == null or screen_p == null:
+		push_error("Smoke closure: need defenders/attackers for screen mark test")
+		get_tree().quit(1)
+		return
+	# Force same-role pair so primary mark is mark_p, then screen blocks the corridor.
+	def_p.player_index = 3
+	mark_p.player_index = 3
+	screen_p.player_index = 6
+	def_p.is_goalkeeper = false
+	mark_p.is_goalkeeper = false
+	screen_p.is_goalkeeper = false
+	def_p.global_position = Vector3(0.0, 0.0, 10.0)
+	mark_p.global_position = Vector3(0.0, 0.0, 4.0)
+	screen_p.global_position = Vector3(0.15, 0.0, 7.0)
+	if not Formations.is_screened_from(def_p, mark_p, screen_p):
+		push_error("Smoke closure: screener should block mark corridor")
+		get_tree().quit(1)
+		return
+	var opps: Array = [mark_p, screen_p]
+	def_p.defense_shape = int(Formations.DefenseShape.INDIVIDUAL)
+	var switched := Formations.find_mark_target(def_p, opps)
+	print(
+		"Smoke closure screen mark → ",
+		switched.name if switched else "null",
+		" expect=", screen_p.name,
+		" screened=", Formations.is_screened_from(def_p, mark_p, screen_p),
+		" shape=", def_p.defense_shape
+	)
+	if switched != screen_p:
+		push_error("Smoke closure: man defense should switch onto screener")
+		get_tree().quit(1)
+		return
+	# Cross: cutter enters defender lane.
+	mark_p.global_position = Vector3(-3.0, 0.0, 6.0)
+	screen_p.global_position = Vector3(-2.2, 0.0, 5.5)
+	def_p.global_position = Vector3(-3.5, 0.0, 11.0)
+	if not Formations.is_crossing_pair(mark_p, screen_p):
+		push_error("Smoke closure: crossing pair helper failed")
+		get_tree().quit(1)
+		return
+	print("Smoke closure screen/cross marking OK")
+
+	# §10 meta: season record + training mode + audio node + kit packs.
+	MetaMode.play_mode = MetaMode.PlayMode.SEASON
+	var wins_before := MetaMode.season_wins
+	MetaMode.record_match_result(2, 1)
+	if MetaMode.season_wins != wins_before + 1:
+		push_error("Smoke closure: season win should record")
+		get_tree().quit(1)
+		return
+	if match_node._match_audio == null:
+		push_error("Smoke closure: MatchAudio missing")
+		get_tree().quit(1)
+		return
+	match_node._match_audio.play_whistle()
+	var kit0 := MetaMode.kit_tint_for_team(0)
+	MetaMode.kit_variant = 1
+	var kit1 := MetaMode.kit_tint_for_team(0)
+	if kit0.is_equal_approx(kit1):
+		push_error("Smoke closure: kit packs should change team tint")
+		get_tree().quit(1)
+		return
+	MetaMode.kit_variant = 0
+	match_node._start_training_drill()
+	if MetaMode.play_mode != MetaMode.PlayMode.TRAINING:
+		push_error("Smoke closure: training mode not set")
+		get_tree().quit(1)
+		return
+	if match_node.controlled_player == null or match_node.controlled_player.is_goalkeeper:
+		push_error("Smoke closure: training should control an outfield shooter")
+		get_tree().quit(1)
+		return
+	if match_node.ball.carrier != match_node.controlled_player:
+		push_error("Smoke closure: training shooter should have the ball")
+		get_tree().quit(1)
+		return
+	print(
+		"Smoke requirements closure OK season_w=", MetaMode.season_wins,
+		" training=", MetaMode.mode_label()
 	)
 
 	print("SMOKE_OK")
