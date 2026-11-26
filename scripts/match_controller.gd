@@ -245,6 +245,7 @@ func _spawn_player(parent: Node, team_id: int, color: Color, spot: Dictionary) -
 	p.on_bench = bool(spot.get("bench", false))
 	p.bench_slot = int(spot.get("slot", maxi(0, int(spot["idx"]) - 7)))
 	p.body_color = color.darkened(0.15) if spot["gk"] else color
+	p.roster_name = _sandbox_roster_name(team_id, int(spot["idx"]), bool(spot["gk"]))
 	var kind := "GK" if spot["gk"] else ("BN" if p.on_bench else "OF")
 	p.name = "%s_%s%d" % [
 		"Home" if team_id == 0 else "Away",
@@ -263,6 +264,23 @@ func _spawn_player(parent: Node, team_id: int, color: Color, spot: Dictionary) -
 		p.visible = true
 
 
+## Sandbox first names by roster slot (indicator uses these when present).
+func _sandbox_roster_name(team_id: int, idx: int, is_gk: bool) -> String:
+	var home := [
+		"Ramos", "Nunes", "Costa", "Silva", "Martins", "Almeida", "Pinto",
+		"Rocha", "Teixeira", "Sousa"
+	]
+	var away := [
+		"Keller", "Brandt", "Hoffmann", "Weber", "Schulz", "Wagner", "Becker",
+		"Klein", "Richter", "Neumann"
+	]
+	var pool: Array = home if team_id == 0 else away
+	var i := clampi(idx, 0, pool.size() - 1)
+	if is_gk and idx == 0:
+		return str(pool[0])
+	return str(pool[i])
+
+
 func _configure_ai() -> void:
 	for p in _home_players:
 		p.match_ball = ball
@@ -270,13 +288,22 @@ func _configure_ai() -> void:
 		p.ai_enabled = (not p.excluded) and (not p.on_bench) and p != controlled_player
 	for p in _away_players:
 		p.match_ball = ball
-		p.ai_enabled = (not p.excluded) and (not p.on_bench)
+		p.ai_enabled = (
+			(not p.excluded)
+			and (not p.on_bench)
+			and p != away_controlled_player
+		)
 
 
 func _refresh_home_ai() -> void:
 	for p in _home_players:
 		p.ai_enabled = (not p.excluded) and (not p.on_bench) and p != controlled_player
 		p.match_ball = ball
+	# Hotseat Away stays human (P2) — never re-enable their AI from Home refresh.
+	if away_controlled_player and MetaMode.hotseat_enabled:
+		away_controlled_player.ai_enabled = false
+		if away_controlled_player.has_method("set_human_pad"):
+			away_controlled_player.set_human_pad(2)
 
 
 func _wire_rules() -> void:
@@ -626,11 +653,17 @@ func _wire_goals() -> void:
 func _set_controlled(player: Player) -> void:
 	if controlled_player:
 		controlled_player.controlled = false
+		if controlled_player.has_method("set_human_pad"):
+			# Keep P2 hotseat pad; only clear the previous P1.
+			if controlled_player.human_pad == 1:
+				controlled_player.set_human_pad(0)
 		if controlled_player.has_method("set_selection_highlight"):
 			controlled_player.set_selection_highlight(false)
 	controlled_player = player
 	controlled_team_id = player.team_id
 	controlled_player.controlled = true
+	if controlled_player.has_method("set_human_pad"):
+		controlled_player.set_human_pad(1)
 	if controlled_player.has_method("set_selection_highlight"):
 		controlled_player.set_selection_highlight(true)
 	_refresh_home_ai()
@@ -645,7 +678,9 @@ func _refresh_controlled_hud() -> void:
 	if not player.is_goalkeeper:
 		var ball_x := ball.global_position.x if ball else 0.0
 		role = Formations.role_label_hud(Formations.role_for(player), ball_x, false)
-	hud.set_controlled("Team %s #%d (%s)" % [
+	var who := player.display_name() if player.has_method("display_name") else role
+	hud.set_controlled("P1 %s · %s #%d (%s)" % [
+		who,
 		"Home" if player.team_id == 0 else "Away",
 		player.player_index + 1,
 		role
@@ -1859,6 +1894,8 @@ func _begin_exclusion(fouler: Player) -> void:
 	fouler.exclusion_remaining = exclusion_seconds
 	fouler.ai_enabled = false
 	fouler.controlled = false
+	if fouler.has_method("set_human_pad"):
+		fouler.set_human_pad(0)
 	fouler.has_ball = false
 	fouler.dribbling = false
 	fouler.velocity = Vector3.ZERO
@@ -1890,6 +1927,8 @@ func _begin_red_card(fouler: Player) -> void:
 	fouler.exclusion_remaining = 9999.0
 	fouler.ai_enabled = false
 	fouler.controlled = false
+	if fouler.has_method("set_human_pad"):
+		fouler.set_human_pad(0)
 	fouler.has_ball = false
 	fouler.dribbling = false
 	fouler.velocity = Vector3.ZERO
@@ -2476,7 +2515,7 @@ func _handle_help_input(event: InputEvent) -> void:
 		if MetaMode.hotseat_enabled:
 			_ensure_away_hotseat()
 		else:
-			away_controlled_player = null
+			_clear_away_hotseat()
 	elif code == KEY_K:
 		MetaMode.cycle_kit_variant()
 		_apply_kit_variants()
@@ -2508,6 +2547,10 @@ func _apply_kit_variants() -> void:
 
 func _ensure_away_hotseat() -> void:
 	# Local 2P: Away carrier / CB becomes human-controlled (no online).
+	# Clear previous P2 indicator if switching pick.
+	if away_controlled_player and away_controlled_player.has_method("set_human_pad"):
+		if away_controlled_player.human_pad == 2:
+			away_controlled_player.set_human_pad(0)
 	var pick := _first_outfield(_away_players)
 	if pick == null and not _away_players.is_empty():
 		pick = _away_players[0]
@@ -2515,6 +2558,20 @@ func _ensure_away_hotseat() -> void:
 	if away_controlled_player:
 		away_controlled_player.ai_enabled = false
 		away_controlled_player.controlled = false  # Home still owns primary controlled flag
+		if away_controlled_player.has_method("set_human_pad"):
+			away_controlled_player.set_human_pad(2)
+
+
+func _clear_away_hotseat() -> void:
+	if away_controlled_player and away_controlled_player.has_method("set_human_pad"):
+		if away_controlled_player.human_pad == 2:
+			away_controlled_player.set_human_pad(0)
+	if away_controlled_player and away_controlled_player != controlled_player:
+		away_controlled_player.ai_enabled = (
+			(not away_controlled_player.excluded)
+			and (not away_controlled_player.on_bench)
+		)
+	away_controlled_player = null
 
 
 ## §10.1 Training: park most players, CB vs opposing GK shoot drill.

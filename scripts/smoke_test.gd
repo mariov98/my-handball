@@ -5495,6 +5495,146 @@ func _ready() -> void:
 		" training=", MetaMode.mode_label()
 	)
 
+	# --- Feel polish + control indicator (R2 / R4.1 / R6.3 / R8.1) ---
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	match_node.rules.enabled = false
+	player = match_node.controlled_player
+	if player == null or player.on_bench or player.is_goalkeeper:
+		player = match_node._first_outfield(match_node._home_players)
+		if player:
+			match_node._set_controlled(player)
+	if player == null:
+		push_error("Smoke feel/indicator: missing Home outfield")
+		get_tree().quit(1)
+		return
+	# Accel vs decel rates should differ (weighted plant stop).
+	if absf(Player.GROUND_ACCEL_RATE - Player.GROUND_DECEL_RATE) < 4.0:
+		push_error("Smoke feel: ground accel/decel should be asymmetric")
+		get_tree().quit(1)
+		return
+	if Player.CATCH_SETTLE_S < 0.42 or Player.CATCH_SETTLE_SPEED > 0.48:
+		push_error("Smoke feel: catch settle should be weightier")
+		get_tree().quit(1)
+		return
+	if ThrowMotion.PASS_WINDUP_S < 0.12 or ThrowMotion.SHOT_FOLLOW_S < 0.34:
+		push_error("Smoke feel: throw windup/follow should read longer")
+		get_tree().quit(1)
+		return
+	if ShotCraft.PLANT_HOLD_S < 0.12:
+		push_error("Smoke feel: jump plant should hold longer")
+		get_tree().quit(1)
+		return
+	if HandballRules.CONTACT_HOLD_S < 0.05 or HandballRules.CONTACT_REACH_M < 1.08:
+		push_error("Smoke feel: contact should carry more weight")
+		get_tree().quit(1)
+		return
+	if Ball.FLIGHT_DRAG < 0.3:
+		push_error("Smoke feel: free-ball flight drag missing")
+		get_tree().quit(1)
+		return
+	if Player.AI_DIVE_MIN_BALL_SPEED > 6.5 or Player.AI_PRESSURE_RANGE < 3.0:
+		push_error("Smoke feel: GK react / AI pressure should be tighter")
+		get_tree().quit(1)
+		return
+	# Control indicator: Home human shows ring + name + P1.
+	match_node._set_controlled(player)
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	if player.human_pad != 1:
+		push_error("Smoke indicator: Home controlled should be P1 (pad=%d)" % player.human_pad)
+		get_tree().quit(1)
+		return
+	var ind := player.find_child("ControlIndicator", true, false) as Node3D
+	if ind == null or not ind.visible:
+		push_error("Smoke indicator: ControlIndicator should be visible under Home human")
+		get_tree().quit(1)
+		return
+	var ind_label := player.find_child("ControlLabel", true, false) as Label3D
+	if ind_label == null:
+		push_error("Smoke indicator: missing ControlLabel")
+		get_tree().quit(1)
+		return
+	var label_txt := ind_label.text
+	print(
+		"Smoke indicator P1: pad=", player.human_pad,
+		" name=", player.display_name(),
+		" label=", label_txt.replace("\n", " / "),
+		" roster=", player.roster_name
+	)
+	if not label_txt.contains("P1"):
+		push_error("Smoke indicator: label must show P1")
+		get_tree().quit(1)
+		return
+	if player.roster_name.strip_edges().is_empty():
+		push_error("Smoke indicator: sandbox roster_name should be set")
+		get_tree().quit(1)
+		return
+	if not label_txt.contains(player.roster_name):
+		push_error("Smoke indicator: label should include roster name")
+		get_tree().quit(1)
+		return
+	# CPU teammate has no pad / no indicator.
+	var cpu_mate: Player = null
+	for p in match_node._home_players:
+		if p != player and not p.is_goalkeeper and not p.on_bench:
+			cpu_mate = p
+			break
+	if cpu_mate == null:
+		push_error("Smoke indicator: need a Home CPU teammate")
+		get_tree().quit(1)
+		return
+	if cpu_mate.human_pad != 0:
+		push_error("Smoke indicator: CPU teammate must not have a pad label")
+		get_tree().quit(1)
+		return
+	var cpu_ind := cpu_mate.find_child("ControlIndicator", true, false) as Node3D
+	if cpu_ind != null and cpu_ind.visible:
+		push_error("Smoke indicator: CPU teammate indicator must be hidden")
+		get_tree().quit(1)
+		return
+	# Switch control → previous P1 clears, new shows.
+	match_node._set_controlled(cpu_mate)
+	await get_tree().physics_frame
+	if player.human_pad != 0 or (ind.visible):
+		# Re-fetch previous player's indicator visibility after switch.
+		ind = player.find_child("ControlIndicator", true, false) as Node3D
+		if player.human_pad != 0 or (ind != null and ind.visible):
+			push_error("Smoke indicator: previous human should clear on switch")
+			get_tree().quit(1)
+			return
+	if cpu_mate.human_pad != 1:
+		push_error("Smoke indicator: new controlled should be P1")
+		get_tree().quit(1)
+		return
+	# Hotseat: Away gets P2; Home keeps P1.
+	match_node._set_controlled(player)
+	MetaMode.hotseat_enabled = true
+	match_node._ensure_away_hotseat()
+	await get_tree().physics_frame
+	var away_p := match_node.away_controlled_player
+	if away_p == null or away_p.human_pad != 2:
+		push_error("Smoke indicator: hotseat Away should show P2")
+		get_tree().quit(1)
+		return
+	if player.human_pad != 1:
+		push_error("Smoke indicator: hotseat should keep Home as P1")
+		get_tree().quit(1)
+		return
+	var away_label := away_p.find_child("ControlLabel", true, false) as Label3D
+	if away_label == null or not away_label.text.contains("P2"):
+		push_error("Smoke indicator: Away hotseat label must contain P2")
+		get_tree().quit(1)
+		return
+	MetaMode.hotseat_enabled = false
+	match_node._clear_away_hotseat()
+	await get_tree().physics_frame
+	if away_p.human_pad != 0:
+		push_error("Smoke indicator: clearing hotseat should drop P2")
+		get_tree().quit(1)
+		return
+	print("Smoke feel + control indicator OK")
+
 	print("SMOKE_OK")
 	get_tree().quit(0)
 

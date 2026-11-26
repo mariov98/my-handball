@@ -51,9 +51,9 @@ const STEPS_ASSIST_AT := 3
 ## Master switch for hold/step auto-dribble helpers (never forces a double-dribble).
 const AUTO_DRIBBLE_ASSIST := true
 
-## Phase D / Wave 4 contact (tunable feel knobs).
+## Phase D / Wave 4 contact (tunable feel knobs — weightier body checks).
 ## Defender reach-in / body-check volume while attacker windups near 6–9 m.
-const CONTACT_REACH_M := 1.05
+const CONTACT_REACH_M := 1.12
 ## Arc band from defending goal end where contact during windup is a foul.
 const FOUL_ARC_MIN_M := 6.0
 const FOUL_ARC_MAX_M := 9.5
@@ -62,16 +62,16 @@ const FOUL_ARC_MAX_M := 9.5
 const CLEAR_CHANCE_DIST_M := 8.0
 ## Grounded 1v1 clear-chance inside this distance with behind contact (Wave 4 harden).
 const CLEAR_CHANCE_GROUND_DIST_M := 7.0
-## Brief overlap before whistle (arcade bump feel; keep low).
-const CONTACT_HOLD_S := 0.04
+## Brief overlap before whistle — longer = heavier contact weight.
+const CONTACT_HOLD_S := 0.07
 ## Dot of defender direction vs carrier facing; ≤ this = behind/side (not front).
 const BEHIND_SIDE_DOT := 0.28
 ## Strict behind for push/pull exclusion (front defense must not false-positive).
 const BEHIND_PUSH_DOT := -0.15
 ## Head/neck contact uses carrier HeadRegion (Wave 1 anchor) — approx radius.
-const HEAD_CONTACT_M := 0.55
+const HEAD_CONTACT_M := 0.58
 ## Relative approach speed into the head that upgrades touch → hit (red).
-const HEAD_HIT_APPROACH_MPS := 2.6
+const HEAD_HIT_APPROACH_MPS := 2.45
 ## When true, seven_m fouls set last_foul_warrants_exclusion for MatchController.
 const EXCLUDE_ON_SEVEN_M := true
 ## Approx ready-window for a 7 m taker before sandbox turnover (Wave 4 / R3.11).

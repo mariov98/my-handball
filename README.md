@@ -58,7 +58,7 @@ If Godot asks to upgrade the project on a newer 4.x, accept and re-run.
 
 **Camera:** behind the team with (or last with) the ball. In the **center corridor** the frame is square with the goal (goal in the middle). When the ball drifts wide the rig adds only a **subtle yaw** about the ball — it does **not** recenter the ball on screen; the goal stays the visual anchor. **Wave 6:** nudge yaw/zoom/height during play (**[ ]** / **- =** / **PgUp/PgDn**, or right stick); **Home/0** resets. Wing finishes get a brief zoom + slow-mo (**4** toggles off). **Shoot cam:** while charging a shot (LMB/E/RT), the camera settles into an over-shoulder close-up behind the shooter's head looking at the attacked goal (tighter FOV), with a **goal-mouth crosshair** for aim. **Right stick** or **mouse move** while holding shoot nudges that crosshair on the goal (Mouse aim mode can also point at the mouth); release fires along that aim and does not fight the charge. Release / cancel restores the elevated 3/4 match cam (wing cinematic still applies on wing finishes; nudge stays blocked only while shoot/wing owns the frame).
 
-**Team control:** While **Home** has the ball, control follows the **carrier** automatically (pickup, catch, GK gather, restart). **Q** still cycles the Home on-court roster (skips bench / exclusions) for off-ball work. **R** jumps to the most useful on-court teammate (nearest to a free ball, open receiver when attacking, best defender when covering). Away possession never forces Away control.
+**Team control:** While **Home** has the ball, control follows the **carrier** automatically (pickup, catch, GK gather, restart). **Q** still cycles the Home on-court roster (skips bench / exclusions) for off-ball work. **R** jumps to the most useful on-court teammate (nearest to a free ball, open receiver when attacking, best defender when covering). Away possession never forces Away control. A small **ground ring** under the human athlete shows the **roster name** plus **P1** (Home) or **P2** (Away hotseat); CPU teammates have no pad label.
 
 **Shapes (Phase E + Wave 6):** **1** / D-pad↑ toggles Home **attack** Wide (3-3) ↔ Crash (2-4). **2** / D-pad↓ cycles Home **defense** **6-0 → 5-1 → 3-2-1 → Man**. Roles are real **LW / LB / CB / RB / RW / Pivot**. Away AI picks shapes from score/time (incl. 3-2-1 / Man lite). HUD shows `Shape Atk … · Def …`.
 
@@ -428,7 +428,7 @@ resources/        materials / physics (reserved)
 godot --path . -- --smoke
 ```
 
-Expect `SMOKE_OK` after Phase 1–5 + Phase A–G + Waves 0–6 + shoot-cam + core-loop feel + AI credibility checks (pressure outlets, contest windows, GK shot-line cover).
+Expect `SMOKE_OK` after Phase 1–5 + Phase A–G + Waves 0–6 + shoot-cam + core-loop feel + AI credibility checks (pressure outlets, contest windows, GK shot-line cover) + feel polish (accel/throw/catch/contact/flight/GK) + control indicator (name + P1/P2, hotseat).
 
 ## License
 
