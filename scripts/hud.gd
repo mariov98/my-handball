@@ -19,6 +19,7 @@ const COLOR_GOAL_AWAY := Color(1.0, 0.72, 0.35, 1.0)
 const COLOR_EXCLUSION := Color(1.0, 0.78, 0.35, 1.0)
 const COLOR_EXCLUSION_LOW := Color(1.0, 0.55, 0.3, 1.0)
 const COLOR_EXCLUSION_RED := Color(1.0, 0.38, 0.32, 1.0)
+const COLOR_WALL_CUE := Color(0.72, 0.9, 1.0, 0.92)
 ## Default 2′ exclusion length for pip fill (match-clock seconds).
 const EXCLUSION_PIP_MAX_S := 120.0
 
@@ -39,6 +40,7 @@ var shapes_label: Label
 var stamina_label: Label
 var sub_label: Label
 var exclusion_label: Label
+var wall_cue_label: Label
 var _goal_crosshair: Control
 
 var _steps_pulse: Tween
@@ -65,6 +67,7 @@ func _ready() -> void:
 	_ensure_stamina_label()
 	_ensure_sub_label()
 	_ensure_exclusion_label()
+	_ensure_wall_cue_label()
 	_ensure_goal_crosshair()
 
 
@@ -371,6 +374,35 @@ func get_exclusion_pip_text() -> String:
 	return exclusion_label.text
 
 
+## Light R3.1 pip while the ~3 m wall / hold-back is active (free throw / throw-in / goal throw).
+func set_wall_cue(active: bool, text: String = "3 m wall") -> void:
+	_ensure_wall_cue_label()
+	if wall_cue_label == null:
+		return
+	if not active:
+		wall_cue_label.visible = false
+		wall_cue_label.text = ""
+		return
+	wall_cue_label.visible = true
+	wall_cue_label.text = text if not text.is_empty() else "3 m wall"
+	wall_cue_label.add_theme_color_override("font_color", COLOR_WALL_CUE)
+
+
+func is_wall_cue_visible() -> bool:
+	return (
+		wall_cue_label != null
+		and is_instance_valid(wall_cue_label)
+		and wall_cue_label.visible
+		and not wall_cue_label.text.is_empty()
+	)
+
+
+func get_wall_cue_text() -> String:
+	if wall_cue_label == null or not is_instance_valid(wall_cue_label):
+		return ""
+	return wall_cue_label.text
+
+
 ## Punchy goal banner + full-screen flash. `scoring_team_id` tints Home/Away.
 func flash_goal(scoring_team_id: int = 0) -> void:
 	_ensure_flash_overlay()
@@ -638,6 +670,28 @@ func _ensure_exclusion_label() -> void:
 	exclusion_label.add_theme_constant_override("shadow_offset_y", 2)
 	exclusion_label.text = ""
 	$Root.add_child(exclusion_label)
+
+
+## Subtle 3 m wall pip — sits under exclusion so it does not crowd Steps/Hold.
+func _ensure_wall_cue_label() -> void:
+	if wall_cue_label and is_instance_valid(wall_cue_label):
+		return
+	wall_cue_label = get_node_or_null("Root/WallCueLabel") as Label
+	if wall_cue_label:
+		wall_cue_label.visible = false
+		return
+	wall_cue_label = Label.new()
+	wall_cue_label.name = "WallCueLabel"
+	wall_cue_label.visible = false
+	wall_cue_label.position = Vector2(16, 140)
+	wall_cue_label.size = Vector2(280, 28)
+	wall_cue_label.add_theme_font_size_override("font_size", 16)
+	wall_cue_label.add_theme_color_override("font_color", COLOR_WALL_CUE)
+	wall_cue_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.7))
+	wall_cue_label.add_theme_constant_override("shadow_offset_x", 1)
+	wall_cue_label.add_theme_constant_override("shadow_offset_y", 1)
+	wall_cue_label.text = ""
+	$Root.add_child(wall_cue_label)
 
 
 ## Compact goal-plane reticle — readable, not a cluttered HUD badge.

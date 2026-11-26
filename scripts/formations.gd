@@ -1068,6 +1068,21 @@ static func is_seven_meter_code(code: String) -> bool:
 	return code == "seven_m"
 
 
+## True when opponents must observe the ~3 m wall / hold-back (R3.1 cue).
+## Free-throw family + throw-in / goal-throw. Not 7 m (different clear-out).
+static func uses_three_meter_wall(code: String) -> bool:
+	return three_meter_wall_gap(code) > 0.0
+
+
+## Planar gap the wall cue should draw (0 = no 3 m wall for this restart).
+static func three_meter_wall_gap(code: String) -> float:
+	if is_free_throw_code(code):
+		return WALL_GAP_M
+	if code == "throw_in" or code == "goal_throw":
+		return RESTART_GAP_M
+	return 0.0
+
+
 ## Place one player for a restart. `taker` is the player who receives the ball.
 static func set_piece_slot(
 	player: Player,

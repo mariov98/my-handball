@@ -138,14 +138,14 @@ Audits Phase B–D rules up to the requirements checklist bar. Feel-accurate fir
 | Feature | How it feels in play | Approx / strict |
 |---------|----------------------|-----------------|
 | **Hold / step helpers** | Near **~2.55 s** hold or **last step**, soft auto-start dribble if legal. HUD `Hold · AUTO` (still readable). Pass / shoot / takeover (hold **V** then release) ends it. | **approx** soft assist |
-| **3 m wall** | Free-throw wall gap ≥ ~**3.2 m**; throw-in / goal-throw opponents held ≥ ~**3 m**. | **approx** |
+| **3 m wall** | Free-throw wall gap ≥ ~**3.2 m**; throw-in / goal-throw opponents held ≥ ~**3 m**. Light **HUD `3 m wall` + floor ring** while the constraint is active; clears after the throw. | **approx** |
 | **Head/neck touch → 2′** | Contact vs carrier **HeadRegion** during windup → **2 min** exclusion + FT (reason text). | **approx** (volume + height) |
 | **Head hit → red** | Faster approach / airborne fouler into head → **RED** DQ for the match (roster hole). | **approx** severity |
 | **Push from behind → 2′** | Strict behind heuristic (front defense stays clean) → **2 min** + FT. | **approx** |
 | **Clear chance → 7 m** | Airborne + behind/side ≤~8 m; grounded behind ≤~7 m; illegal crease defense during shot windup. | **heuristic** |
 | **FT / 9 m** | Deep fouls snap to the **9 m** line; wall still forms outside. | **approx** |
 | **7 m set piece** | Taker on mark; GK on 4 m; ~**5 s** ready limit → goal throw to defense if stalled. | **approx** ready timer |
-| **HUD** | Persistent **2′ exclusion pip** (mm:ss + drain bars, both teams) + `RED` rows; `7m Ns` stays on the rules line. Flash banner still fires on whistle. | — |
+| **HUD** | Persistent **2′ exclusion pip** (mm:ss + drain bars, both teams) + `RED` rows; `7m Ns` on the rules line; **`3 m wall`** pip + court ring on FT / throw-in / goal-throw. Flash banner still fires on whistle. | — |
 
 ### Still healthy after Wave 4
 
@@ -289,7 +289,7 @@ These are **handball-informed approximations** for a playable prototype — reco
 | **Restarts** | Throw-in / goal throw / free throw (traveling, passive, 6 m, foul) / **7 m** with short freeze + banner + set-piece placement. **Kickoff after goals** (and period starts) from Phase 1 is unchanged in timing. Deep FTs snap to **9 m**; throw-in / FT walls keep ~**3 m** gap. |
 | **Contact / foul ladder (Phase D + Wave 4)** | Windup contact near 6–9 m → FT; head/neck touch → 2′; head hit → red; push from behind → 2′; clear-chance heuristic → 7 m (+ exclusion). |
 
-HUD shows a large glanceable **Steps n/3** (color + pulse per plant; **Pivot L/R** while holding without dribbling), a **Hold** pip/timer beside it (`DRIBBLE` / `AUTO`), a **Passive (lite)** line, a persistent **2′ exclusion pip** (mm:ss + drain bars for both teams; `RED` rows for DQs), and 7 m ready clocks. Traveling / 3 s / double dribble / foul / 7 m use red free-throw banners.
+HUD shows a large glanceable **Steps n/3** (color + pulse per plant; **Pivot L/R** while holding without dribbling), a **Hold** pip/timer beside it (`DRIBBLE` / `AUTO`), a **Passive (lite)** line, a persistent **2′ exclusion pip** (mm:ss + drain bars for both teams; `RED` rows for DQs), a light **`3 m wall`** pip + floor ring on free-throw / throw-in / goal-throw, and 7 m ready clocks. Traveling / 3 s / double dribble / foul / 7 m use red free-throw banners.
 
 ## Phase 1 — mini match (still in)
 

@@ -83,6 +83,13 @@ var _block_trace: BlockTrace
 var _seven_m_live: bool = false
 var _seven_m_timer: float = 0.0
 var _seven_m_award_team: int = 0
+## R3.1: HUD + floor ring while ~3 m wall / hold-back applies (clears after throw).
+var _wall_cue_active: bool = false
+var _wall_cue_spot: Vector3 = Vector3.ZERO
+var _wall_cue_gap: float = 3.2
+var _wall_cue_award_team: int = 0
+var _wall_cue_ring: MeshInstance3D
+var _wall_cue_mat: StandardMaterial3D
 ## Core-loop soft-lock tracking (free ball / dead attack).
 var _loop_free_ball_t: float = 0.0
 var _loop_attack_team: int = -1
@@ -417,6 +424,7 @@ func _physics_process(delta: float) -> void:
 		hud.set_clock(clock_remaining)
 	_tick_exclusions(delta)
 	_tick_seven_m_ready(delta)
+	_tick_wall_cue()
 	_tick_core_loop_guards(delta)
 	_update_away_shapes()
 	_update_rules_hud()
@@ -427,6 +435,7 @@ func _physics_process(delta: float) -> void:
 	if rules.tick(delta, ball, _all_players()):
 		rules.set_windup(false)
 		_clear_seven_m_ready()
+		_clear_wall_cue()
 		return
 	if clock_remaining <= 0.0:
 		_on_period_expired()
@@ -1439,6 +1448,11 @@ func _run_rule_restart(code: String, _message: String, awarding_team_id: int, sp
 	rules.begin_lockout()
 	_set_players_frozen(true)
 	_clear_possession()
+	# Refresh 3 m wall cue for this restart (or clear if this code has no wall).
+	if Formations.uses_three_meter_wall(code):
+		_begin_wall_cue(spot, Formations.three_meter_wall_gap(code), awarding_team_id)
+	else:
+		_clear_wall_cue()
 
 	var use_gk := code == "goal_throw"
 	var taker: Player = null
@@ -1865,6 +1879,103 @@ func _clear_seven_m_ready() -> void:
 	_seven_m_timer = 0.0
 
 
+## R3.1: show HUD + floor ring while defenders must observe ~3 m (forming / until throw).
+func _begin_wall_cue(spot: Vector3, gap: float, awarding_team_id: int) -> void:
+	_wall_cue_active = true
+	_wall_cue_spot = Vector3(spot.x, 0.0, spot.z)
+	_wall_cue_gap = maxf(gap, 0.5)
+	_wall_cue_award_team = awarding_team_id
+	_ensure_wall_cue_ring()
+	_wall_cue_ring.visible = true
+	_wall_cue_ring.global_position = Vector3(_wall_cue_spot.x, 0.018, _wall_cue_spot.z)
+	_wall_cue_ring.global_rotation = Vector3.ZERO
+	_apply_wall_cue_ring_radius(_wall_cue_gap)
+	_refresh_wall_cue_hud()
+
+
+func _clear_wall_cue() -> void:
+	_wall_cue_active = false
+	_wall_cue_award_team = 0
+	if _wall_cue_ring != null and is_instance_valid(_wall_cue_ring):
+		_wall_cue_ring.visible = false
+	_refresh_wall_cue_hud()
+
+
+func is_wall_cue_active() -> bool:
+	return _wall_cue_active
+
+
+func get_wall_cue_spot() -> Vector3:
+	return _wall_cue_spot
+
+
+func get_wall_cue_gap() -> float:
+	return _wall_cue_gap
+
+
+func is_wall_cue_ring_visible() -> bool:
+	return (
+		_wall_cue_ring != null
+		and is_instance_valid(_wall_cue_ring)
+		and _wall_cue_ring.visible
+	)
+
+
+## Clear when the restart throw leaves the awarding team (or play leaves the set piece).
+func _tick_wall_cue() -> void:
+	if not _wall_cue_active:
+		return
+	if match_state != MatchState.LIVE and match_state != MatchState.RULE_RESTART:
+		_clear_wall_cue()
+		return
+	if match_state == MatchState.RULE_RESTART:
+		return
+	# LIVE: keep cue until the awarding side releases / loses the ball.
+	if ball == null or ball.carrier == null or ball.carrier.team_id != _wall_cue_award_team:
+		_clear_wall_cue()
+
+
+func _refresh_wall_cue_hud() -> void:
+	if hud == null or not hud.has_method("set_wall_cue"):
+		return
+	if _wall_cue_active:
+		hud.set_wall_cue(true, "3 m wall")
+	else:
+		hud.set_wall_cue(false)
+
+
+func _ensure_wall_cue_ring() -> void:
+	if _wall_cue_ring != null and is_instance_valid(_wall_cue_ring):
+		return
+	_wall_cue_ring = MeshInstance3D.new()
+	_wall_cue_ring.name = "ThreeMeterWallCue"
+	_wall_cue_mat = StandardMaterial3D.new()
+	_wall_cue_mat.albedo_color = Color(0.55, 0.82, 1.0, 0.42)
+	_wall_cue_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_wall_cue_mat.emission_enabled = true
+	_wall_cue_mat.emission = Color(0.45, 0.75, 1.0)
+	_wall_cue_mat.emission_energy_multiplier = 0.35
+	_wall_cue_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_wall_cue_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_wall_cue_ring.material_override = _wall_cue_mat
+	_wall_cue_ring.visible = false
+	_wall_cue_ring.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(_wall_cue_ring)
+	_apply_wall_cue_ring_radius(_wall_cue_gap)
+
+
+func _apply_wall_cue_ring_radius(gap: float) -> void:
+	if _wall_cue_ring == null or not is_instance_valid(_wall_cue_ring):
+		return
+	var torus := TorusMesh.new()
+	var half_w := 0.05
+	torus.inner_radius = maxf(0.2, gap - half_w)
+	torus.outer_radius = gap + half_w
+	torus.rings = 12
+	torus.ring_segments = 48
+	_wall_cue_ring.mesh = torus
+
+
 ## Wave 4 / R3.11: approx ready limit on 7 m — stall → goal throw to defense.
 func _tick_seven_m_ready(delta: float) -> void:
 	if not _seven_m_live or match_state != MatchState.LIVE:
@@ -1981,6 +2092,7 @@ func _on_goal_scored(scoring_team_id: int, goal_owner_team_id: int) -> void:
 		return
 	match_state = MatchState.GOAL_PAUSE
 	rules.begin_lockout()
+	_clear_wall_cue()
 	_set_players_frozen(true)
 	if scoring_team_id == 0:
 		score_home += 1
@@ -2007,6 +2119,7 @@ func _on_period_expired() -> void:
 		return
 	match_state = MatchState.PERIOD_BREAK
 	rules.begin_lockout()
+	_clear_wall_cue()
 	_set_players_frozen(true)
 	print("Period %d ended. Score Home %d — Away %d" % [current_period, score_home, score_away])
 	if current_period >= periods_total:
@@ -2029,6 +2142,7 @@ func _on_period_expired() -> void:
 func _run_kickoff(kickoff_team_id: int, reason: String = "Kickoff") -> void:
 	match_state = MatchState.PRE_KICKOFF
 	rules.begin_lockout()
+	_clear_wall_cue()
 	_set_players_frozen(true)
 	_reset_players_and_ball()
 	# Phase 4: compact kickoff shape (wings + backcourt) instead of spawn freeze.
