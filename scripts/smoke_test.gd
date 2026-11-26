@@ -5027,6 +5027,210 @@ func _ready() -> void:
 	home_gk_c.diving = false
 	home_gk_c._dive_timer = 0.0
 	print("Smoke AI credibility OK (pressure outlet, contest window, GK cover)")
+
+	# --- Pivot / plant readability (R1.6 / R1.7 / R2.8): pivot vs free foot while held ---
+	_smoke_prepare_live(match_node, ball)
+	match_node.rules.enabled = true
+	_smoke_clear_ball(ball)
+	player = match_node.controlled_player
+	if player == null or player.on_bench or player.is_goalkeeper:
+		player = match_node._first_outfield(match_node._home_players)
+		if player:
+			match_node._set_controlled(player)
+	if player == null:
+		push_error("Smoke pivot: missing outfield player")
+		get_tree().quit(1)
+		return
+	player.on_bench = false
+	player.excluded = false
+	player.dribbling = false
+	player.clear_throw_motion()
+	player.clear_fake_motion()
+	player.jump_shot_active = false
+	player._js_plant_t = 0.0
+	player.global_position = Vector3(0.0, 0.0, 0.0)
+	player.velocity = Vector3.ZERO
+	player._pose_standing_rest()
+	await get_tree().physics_frame
+	if not ball.try_pickup(player):
+		push_error("Smoke pivot: pickup failed")
+		get_tree().quit(1)
+		return
+	player.has_ball = true
+	match_node.rules.on_pickup(player)
+	match_node._sync_carrier_pivot(player)
+	player.begin_catch_settle()
+	match_node._update_rules_hud()
+	await get_tree().physics_frame
+	var catch_pivot := match_node.rules.get_pivot_foot()
+	print(
+		"Smoke pivot catch: rules=", catch_pivot,
+		" player=", player.get_pivot_foot(),
+		" settle=", player.is_catch_settling(),
+		" hud=", match_node.hud.steps_label.text if match_node.hud else ""
+	)
+	if catch_pivot != HandballRules.PIVOT_LEFT and catch_pivot != HandballRules.PIVOT_RIGHT:
+		push_error("Smoke pivot: catch should establish a pivot foot")
+		get_tree().quit(1)
+		return
+	if player.get_pivot_foot() != catch_pivot:
+		push_error("Smoke pivot: player pivot should match rules after catch")
+		get_tree().quit(1)
+		return
+	if not player.is_catch_settling():
+		push_error("Smoke pivot: catch settle should be active after begin_catch_settle")
+		get_tree().quit(1)
+		return
+	# Planted leg near floor pose; free leg lifted.
+	var pivot_leg: Node3D = player.get_node_or_null("LegR") as Node3D
+	var free_leg: Node3D = player.get_node_or_null("LegL") as Node3D
+	if catch_pivot == HandballRules.PIVOT_LEFT:
+		pivot_leg = player.get_node_or_null("LegL") as Node3D
+		free_leg = player.get_node_or_null("LegR") as Node3D
+	if pivot_leg == null or free_leg == null:
+		push_error("Smoke pivot: missing legs")
+		get_tree().quit(1)
+		return
+	if free_leg.rotation.x > pivot_leg.rotation.x - 0.2:
+		push_error(
+			"Smoke pivot: free foot should lift more than pivot (plant=%.3f free=%.3f)"
+			% [pivot_leg.rotation.x, free_leg.rotation.x]
+		)
+		get_tree().quit(1)
+		return
+	var shoe_p := player.find_child(
+		"ShoeL" if catch_pivot == HandballRules.PIVOT_LEFT else "ShoeR", true, false
+	) as MeshInstance3D
+	if shoe_p == null or shoe_p.material_override == null:
+		push_error("Smoke pivot: pivot shoe material missing")
+		get_tree().quit(1)
+		return
+	var shoe_col: Color = (shoe_p.material_override as StandardMaterial3D).albedo_color
+	if shoe_col.r < 0.5:
+		push_error("Smoke pivot: pivot shoe should highlight warm (got %s)" % str(shoe_col))
+		get_tree().quit(1)
+		return
+	var ring := player.find_child("PivotRing", true, false) as Node3D
+	if ring == null or not ring.visible:
+		push_error("Smoke pivot: PivotRing should be visible while held")
+		get_tree().quit(1)
+		return
+	if match_node.hud == null or not str(match_node.hud.steps_label.text).contains("Pivot"):
+		push_error("Smoke pivot: Steps HUD should show Pivot L/R while held")
+		get_tree().quit(1)
+		return
+
+	# Legal counted step flips free→pivot identity (same teleport gait as traveling smoke).
+	var before_step_pivot := catch_pivot
+	match_node.rules.end_lockout()
+	match_node.rules._oob_cooldown = 0.0
+	match_node.rules._reception_zero_pending = false
+	match_node.rules._have_carrier_sample = true
+	match_node.rules._carrier_last_xz = Vector3(0.0, 0.0, 0.0)
+	match_node.rules._step_accum = 0.0
+	match_node.rules._pivoting = false
+	match_node.rules._stop_timer = 0.0
+	match_node.rules._steps = 0
+	player.dribbling = false
+	player.global_position = Vector3(0.0, 0.0, 0.0)
+	player.velocity = Vector3(0.0, 0.0, HandballRules.MOVE_SPEED_MPS + 1.5)
+	# One stride beyond STEP_LENGTH_M so a counted plant fires.
+	player.global_position = Vector3(0.0, 0.0, HandballRules.STEP_LENGTH_M * 1.2)
+	var hit_step := match_node.rules.tick(0.016, ball, match_node._all_players())
+	# If the first tick only seeded gait, take a second stride.
+	if match_node.rules.get_steps() < 1:
+		match_node.rules._carrier_last_xz = Vector3(0.0, 0.0, player.global_position.z)
+		player.global_position.z += HandballRules.STEP_LENGTH_M * 1.2
+		player.velocity = Vector3(0.0, 0.0, HandballRules.MOVE_SPEED_MPS + 1.5)
+		hit_step = match_node.rules.tick(0.016, ball, match_node._all_players())
+	match_node._sync_carrier_pivot(player)
+	match_node._update_rules_hud()
+	var after_step := match_node.rules.get_pivot_foot()
+	print(
+		"Smoke pivot step: before=", before_step_pivot,
+		" after=", after_step,
+		" steps=", match_node.rules.get_steps(),
+		" zero=", match_node.rules._reception_zero_pending,
+		" pivot_state=", match_node.rules.is_pivoting(),
+		" hit=", hit_step
+	)
+	if after_step == before_step_pivot:
+		push_error("Smoke pivot: counted step should flip pivot to the free foot")
+		get_tree().quit(1)
+		return
+	if player.get_pivot_foot() != after_step:
+		push_error("Smoke pivot: player should sync flipped pivot after step")
+		get_tree().quit(1)
+		return
+	if match_node.rules.get_steps() < 1:
+		push_error("Smoke pivot: counted step should increment steps")
+		get_tree().quit(1)
+		return
+
+	# Stop / pivot keeps the same planted foot.
+	player.velocity = Vector3.ZERO
+	player.global_position.z += 0.001
+	for _pi in range(10):
+		match_node.rules.tick(0.05, ball, match_node._all_players())
+	if not match_node.rules.is_pivoting():
+		push_error("Smoke pivot: slow stop should enter pivoting state")
+		get_tree().quit(1)
+		return
+	if match_node.rules.get_pivot_foot() != after_step:
+		push_error("Smoke pivot: pivoting should keep the planted foot")
+		get_tree().quit(1)
+		return
+
+	# Dribble clears pivot identity / HUD cue.
+	if not match_node.rules.try_begin_dribble(player):
+		push_error("Smoke pivot: try_begin_dribble failed")
+		get_tree().quit(1)
+		return
+	player.dribbling = true
+	player.clear_pivot_foot()
+	match_node._update_rules_hud()
+	if match_node.rules.get_pivot_foot() != HandballRules.PIVOT_NONE:
+		push_error("Smoke pivot: dribble should clear rules pivot foot")
+		get_tree().quit(1)
+		return
+	if player.get_pivot_foot() != HandballRules.PIVOT_NONE:
+		push_error("Smoke pivot: dribble should clear player pivot foot")
+		get_tree().quit(1)
+		return
+	if match_node.hud and str(match_node.hud.steps_label.text).contains("Pivot"):
+		push_error("Smoke pivot: Steps HUD should hide Pivot while dribbling")
+		get_tree().quit(1)
+		return
+
+	# Gather re-plants a pivot (reception plant after dribble catch).
+	match_node.rules.end_dribble(player)
+	player.dribbling = false
+	match_node._sync_carrier_pivot(player)
+	match_node._update_rules_hud()
+	var gather_pivot := match_node.rules.get_pivot_foot()
+	print("Smoke pivot gather: pivot=", gather_pivot, " hud=", match_node.hud.steps_label.text if match_node.hud else "")
+	if gather_pivot != HandballRules.PIVOT_LEFT and gather_pivot != HandballRules.PIVOT_RIGHT:
+		push_error("Smoke pivot: dribble gather should re-establish pivot")
+		get_tree().quit(1)
+		return
+	if not str(match_node.hud.steps_label.text).contains("Pivot"):
+		push_error("Smoke pivot: gather should restore Pivot HUD cue")
+		get_tree().quit(1)
+		return
+
+	# Land plant pose weights the pivot foot.
+	player.set_pivot_foot(HandballRules.PIVOT_RIGHT)
+	var land_pose := ThrowMotion.pose_land(0.0, HandballRules.PIVOT_RIGHT)
+	if float(land_pose.get("leg_r_x", 0.0)) <= float(land_pose.get("leg_l_x", 0.0)):
+		push_error("Smoke pivot: land pose should weight the right pivot foot")
+		get_tree().quit(1)
+		return
+	print(
+		"Smoke pivot plant readability OK catch=", catch_pivot,
+		" step→", after_step,
+		" gather=", gather_pivot
+	)
+
 	print("SMOKE_OK")
 	get_tree().quit(0)
 

@@ -226,13 +226,24 @@ func set_pass_hint(visible_now: bool, pass_type: int = 0) -> void:
 
 
 ## Glanceable steps readout. `pulse` bumps scale when a new plant lands.
-func set_steps_status(steps: int, max_steps: int, warned: bool, visible_now: bool, pulse: bool = false) -> void:
+## Optional `pivot_label` ("L"/"R") teaches which foot is planted while holding.
+func set_steps_status(
+	steps: int,
+	max_steps: int,
+	warned: bool,
+	visible_now: bool,
+	pulse: bool = false,
+	pivot_label: String = ""
+) -> void:
 	if not visible_now:
 		steps_label.visible = false
 		return
 	var shown := mini(steps, max_steps)
 	steps_label.visible = true
-	steps_label.text = "Steps %d/%d" % [shown, max_steps]
+	if pivot_label == "L" or pivot_label == "R":
+		steps_label.text = "Steps %d/%d · Pivot %s" % [shown, max_steps, pivot_label]
+	else:
+		steps_label.text = "Steps %d/%d" % [shown, max_steps]
 	if warned or steps >= max_steps:
 		steps_label.add_theme_color_override("font_color", COLOR_STEPS_WARN)
 	elif steps > 0:

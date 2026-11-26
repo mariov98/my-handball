@@ -13,6 +13,8 @@ signal rule_warning(code: String, message: String)
 signal rule_violation(code: String, message: String, awarding_team_id: int, spot: Vector3)
 ## Fired when a counted floor step is taken (HUD pulse / glanceable counter).
 signal step_taken(steps: int)
+## Fired on every floor plant while holding (incl. reception-zero). For pivot teaching.
+signal foot_planted(steps: int, reception_zero: bool)
 
 const MAX_STEPS := 3
 ## Planar distance per counted foot-plant while carrying. Slightly longer gait so
@@ -22,6 +24,10 @@ const STEP_LENGTH_M := 1.8
 const MOVE_SPEED_MPS := 0.75
 ## Must stay slow this long before pivot locks (filters stick noise).
 const STOP_SETTLE_S := 0.1
+## Pivot foot identity for 3-step teaching (−1 none, 0 left, 1 right).
+const PIVOT_NONE := -1
+const PIVOT_LEFT := 0
+const PIVOT_RIGHT := 1
 ## Passive v2 (IHF-inspired hybrid): stall without progress → warn; after warn,
 ## whistle on Nth same-team receive without a shot attempt. N=5 mirrors IHF
 ## (max 4 passes, whistle on 5th receive). Progress only delays/resets the warn.
@@ -94,6 +100,8 @@ var _reception_zero_pending: bool = false
 var _pivoting: bool = false
 var _stop_timer: float = 0.0
 var _steps_warned: bool = false
+## Which foot is the planted pivot while holding without dribbling (R1.6 teaching).
+var _pivot_foot: int = PIVOT_NONE
 
 var _passive_timer: float = 0.0
 var _passive_warned: bool = false
@@ -129,6 +137,7 @@ func reset_possession_tracking() -> void:
 	_pivoting = false
 	_stop_timer = 0.0
 	_steps_warned = false
+	_pivot_foot = PIVOT_NONE
 	_clear_passive()
 	_possession_team_id = -1
 	_reset_hold_and_dribble()
@@ -190,9 +199,12 @@ func on_pickup(player: Player) -> void:
 	_hold_warned = false
 	_is_dribbling = false
 	_dribble_caught = false
+	# Catch / land plant: provisional pivot so the 3-step rule teaches itself (R1.6).
+	_pivot_foot = _catch_pivot_foot(player)
 
 	# GK possession is exempt — clears any pending passive on the attack.
 	if player.is_goalkeeper:
+		_pivot_foot = PIVOT_NONE
 		_clear_passive()
 		return
 
@@ -227,6 +239,7 @@ func on_release(player: Player) -> void:
 	_pivoting = false
 	_stop_timer = 0.0
 	_steps_warned = false
+	_pivot_foot = PIVOT_NONE
 	_possession_team_id = -1
 	# Pass / shot clear the 3 s clock and end any bounce stream.
 	_reset_hold_and_dribble()
@@ -247,6 +260,21 @@ func get_steps() -> int:
 
 func is_pivoting() -> bool:
 	return _pivoting
+
+
+## Pivot foot while holding without dribbling: PIVOT_NONE / LEFT / RIGHT.
+func get_pivot_foot() -> int:
+	return _pivot_foot
+
+
+func pivot_foot_label() -> String:
+	match _pivot_foot:
+		PIVOT_LEFT:
+			return "L"
+		PIVOT_RIGHT:
+			return "R"
+		_:
+			return ""
 
 
 func is_steps_warned() -> bool:
@@ -340,6 +368,7 @@ func try_begin_dribble(player: Player) -> bool:
 		)
 		return false
 	_is_dribbling = true
+	_pivot_foot = PIVOT_NONE
 	_hold_timer = 0.0
 	_hold_warned = false
 	last_dribble_was_assist = false
@@ -364,6 +393,8 @@ func end_dribble(player: Player) -> void:
 	_steps_warned = false
 	_hold_timer = 0.0
 	_hold_warned = false
+	# Gather plant — same as catch: provisional pivot until the next free-foot step.
+	_pivot_foot = _catch_pivot_foot(player)
 
 
 func _reset_hold_and_dribble() -> void:
@@ -386,6 +417,7 @@ func tick(delta: float, ball: Ball, players: Array[Player]) -> bool:
 		# Keep rules dribble flag aligned with player state (AI / restarts).
 		if carrier.dribbling and not _is_dribbling and not _dribble_caught:
 			_is_dribbling = true
+			_pivot_foot = PIVOT_NONE
 		elif not carrier.dribbling and _is_dribbling:
 			end_dribble(carrier)
 		# Contact during shoot/pass windup near the arc (Phase D) — before hold/steps.
@@ -406,6 +438,7 @@ func tick(delta: float, ball: Ball, players: Array[Player]) -> bool:
 		_pivoting = false
 		_stop_timer = 0.0
 		_steps_warned = false
+		_pivot_foot = PIVOT_NONE
 		_reset_hold_and_dribble()
 		_contact_timers.clear()
 
@@ -466,6 +499,7 @@ func _tick_steps(delta: float, carrier: Player) -> bool:
 		_stop_timer = 0.0
 		_pivoting = false
 		_step_accum = 0.0
+		_pivot_foot = PIVOT_NONE
 		return false
 
 	# Jump-shot: airborne carries do not plant steps (release before landing).
@@ -486,6 +520,9 @@ func _tick_steps(delta: float, carrier: Player) -> bool:
 			# steps stay (IHF: you don't get fresh steps from stopping).
 			_pivoting = true
 			_step_accum = 0.0
+			# Keep the planted pivot foot while pivoting (free foot may lift visually).
+			if _pivot_foot == PIVOT_NONE:
+				_pivot_foot = _catch_pivot_foot(carrier)
 		return false
 
 	_stop_timer = 0.0
@@ -499,8 +536,10 @@ func _tick_steps(delta: float, carrier: Player) -> bool:
 		# Reception zero: first plant after catch is free (catch / land pattern).
 		if _reception_zero_pending:
 			_reception_zero_pending = false
+			_register_plant(false)
 			continue
 		_steps += 1
+		_register_plant(true)
 		step_taken.emit(_steps)
 		if _steps == MAX_STEPS and not _steps_warned:
 			_steps_warned = true
@@ -517,6 +556,33 @@ func _tick_steps(delta: float, carrier: Player) -> bool:
 			)
 			return true
 	return false
+
+
+## Catch / gather provisional plant: prefer the more-forward shoe, else right.
+func _catch_pivot_foot(player: Player) -> int:
+	if player == null:
+		return PIVOT_RIGHT
+	if player.has_method("preferred_catch_pivot_foot"):
+		var pref: int = int(player.preferred_catch_pivot_foot())
+		if pref == PIVOT_LEFT or pref == PIVOT_RIGHT:
+			return pref
+	return PIVOT_RIGHT
+
+
+## Legal plant: reception zero confirms catch plant; counted steps flip free→pivot.
+func _register_plant(counted: bool) -> void:
+	var reception_zero := not counted
+	if counted:
+		# Free foot plants and becomes the new pivot; old pivot frees.
+		if _pivot_foot == PIVOT_LEFT:
+			_pivot_foot = PIVOT_RIGHT
+		elif _pivot_foot == PIVOT_RIGHT:
+			_pivot_foot = PIVOT_LEFT
+		else:
+			_pivot_foot = PIVOT_RIGHT
+	elif _pivot_foot == PIVOT_NONE:
+		_pivot_foot = PIVOT_RIGHT
+	foot_planted.emit(_steps, reception_zero)
 
 
 func _tick_passive(delta: float, carrier: Player) -> bool:
