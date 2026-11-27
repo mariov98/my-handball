@@ -25,17 +25,17 @@ enum Phase {
 	AIR = 8,
 }
 
-## Standing / moving pass — compressed windup → release → follow (ball may already be gone).
-const PASS_WINDUP_S := 0.11
-const PASS_RELEASE_S := 0.07
-const PASS_FOLLOW_S := 0.26
+## Standing / moving pass — windup → release → follow (weightier gather / follow-through).
+const PASS_WINDUP_S := 0.14
+const PASS_RELEASE_S := 0.08
+const PASS_FOLLOW_S := 0.32
 
 ## Grounded shot release after charge.
-const SHOT_RELEASE_S := 0.09
-const SHOT_FOLLOW_S := 0.32
+const SHOT_RELEASE_S := 0.11
+const SHOT_FOLLOW_S := 0.38
 
 ## Jump pass / jump shot land settle.
-const LAND_S := 0.22
+const LAND_S := 0.28
 
 ## Wing corridor: wide X near the attacking goal-area.
 const WING_X_MIN := 5.4

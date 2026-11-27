@@ -18,6 +18,10 @@ signal block_attempted(blocker: Player, ball: Ball, success: bool)
 ## ~9.6 m/s is a fast handball sprint; sprint multiplier pushes a short burst.
 const SPEED := 9.6
 const AIR_CONTROL := 0.58
+## Asymmetric ground response — heavier push-off, firmer plant stop (feel polish).
+const GROUND_ACCEL_RATE := 13.5
+const GROUND_DECEL_RATE := 24.0
+const AIR_ACCEL_RATE := 7.5
 ## Feet rise ~1.2 m (g = 18). Hand finishes near the 2 m crossbar on a jump shot.
 const JUMP_VELOCITY := 6.6
 const FACE_THRESHOLD := 0.12
@@ -32,7 +36,8 @@ const BODY_RADIUS := 0.32
 ## Standing head-top height, metres. Court is 20 m wide, so a player is ~9.5% of the width.
 const VISUAL_HEIGHT_M := 1.90
 ## Soft push when capsules nest (teleport residue / AI stack). Not a hard lock.
-const SEPARATION_PUSH := 16.0
+## Slightly softer than before so body checks read heavier before separating.
+const SEPARATION_PUSH := 13.5
 ## Physics layers: 1=court, 2=player (see project.godot layer_names).
 const COLLISION_LAYER_PLAYER := 2
 const COLLISION_MASK_COURT_AND_PLAYERS := 1 | 2
@@ -43,55 +48,55 @@ enum HairStyle { SHORT = 0, MID = 1, LONG = 2, BALD = 3 }
 # AI tuning — pressure on defense, beatable on the break.
 # Core-loop feel: open 9 m / crease shots; pass under pressure; avoid stall back-passes.
 # AI credibility: pressure outlets, readable contest windows, GK shot-line cover.
-const AI_CHASE_SPEED_SCALE := 0.88
-const AI_BLOCK_SPEED_SCALE := 0.92
-const AI_ATTACK_SPEED_SCALE := 0.84
-const AI_GK_SPEED_SCALE := 0.76
-const AI_GK_TRACK_SPEED_SCALE := 1.0
+const AI_CHASE_SPEED_SCALE := 0.90
+const AI_BLOCK_SPEED_SCALE := 0.94
+const AI_ATTACK_SPEED_SCALE := 0.86
+const AI_GK_SPEED_SCALE := 0.78
+const AI_GK_TRACK_SPEED_SCALE := 1.05
 const AI_SHOOT_RANGE := 10.5
 ## Near crease: take the shot unless a clean forward escape exists.
-const AI_CREASE_SHOT_RANGE := 8.2
-const AI_SHOOT_COOLDOWN := 1.15
-const AI_PASS_COOLDOWN := 0.55
+const AI_CREASE_SHOT_RANGE := 8.4
+const AI_SHOOT_COOLDOWN := 1.0
+const AI_PASS_COOLDOWN := 0.50
 const AI_BLOCK_DEPTH := 4.5
 ## Defender inside this range → prefer pass over forcing a shot.
-const AI_PRESSURE_RANGE := 2.9
+const AI_PRESSURE_RANGE := 3.15
 ## Carry distance that reads as "last step" before traveling (~3 plants).
 const AI_STEP_WARN_DIST := 2.5
 ## Wall-clock possession without a release → force pass/shot (dead-attack guard).
-const AI_POSSESSION_FORCE_S := 3.6
+const AI_POSSESSION_FORCE_S := 3.35
 ## Only circulate when this far from the attacked goal (was 8.5 — stalled 9 m looks).
-const AI_CIRCULATE_DIST := 12.0
+const AI_CIRCULATE_DIST := 11.5
 ## Readable contest window while marking / closing out (not a teleport steal).
-const AI_CONTEST_WINDOW_S := 0.62
-const AI_CONTEST_CLOSE_M := 4.2
+const AI_CONTEST_WINDOW_S := 0.68
+const AI_CONTEST_CLOSE_M := 4.4
 ## Contested free-ball age windows (shot vs pass) — tips only while block_ready.
 const CONTEST_SHOT_AGE_MS := 1300
 const CONTEST_PASS_AGE_MS := 900
 ## Lane openness below this under pressure → treat as contested hold (prefer other outlet).
-const AI_PRESSURE_LANE_MIN := 0.40
+const AI_PRESSURE_LANE_MIN := 0.42
 
 # Phase 3 GK dive
 const DIVE_DURATION := 0.55
-const DIVE_COOLDOWN := 0.95
-const DIVE_SPEED := 13.0
+const DIVE_COOLDOWN := 0.88
+const DIVE_SPEED := 13.4
 const DIVE_UP := 3.0
-const GK_LATERAL_BOOST := 1.18
-const AI_DIVE_REACT_DIST := 11.5
-const AI_DIVE_MIN_BALL_SPEED := 7.0
+const GK_LATERAL_BOOST := 1.22
+const AI_DIVE_REACT_DIST := 12.5
+const AI_DIVE_MIN_BALL_SPEED := 6.2
 ## Mild near-post shade — keep body on the shot line (credibility).
-const GK_NEAR_POST_BIAS := 0.22
-## Phase F: catch settle (brief move penalty) + GK outlet delay.
-const CATCH_SETTLE_S := 0.38
-const CATCH_SETTLE_SPEED := 0.52
-const GK_OUTLET_DELAY_S := 0.42
-const GK_OUTLET_COOLDOWN_S := 1.1
+const GK_NEAR_POST_BIAS := 0.20
+## Phase F catch settle (brief move penalty) + GK outlet delay — weightier gather.
+const CATCH_SETTLE_S := 0.48
+const CATCH_SETTLE_SPEED := 0.40
+const GK_OUTLET_DELAY_S := 0.52
+const GK_OUTLET_COOLDOWN_S := 1.15
 ## Wave 3: fake cooldown so spam doesn't soft-lock shoot/pass.
 const FAKE_COOLDOWN_S := 0.55
 ## Brief move soft while jabbing.
 const FAKE_JAB_SPEED := 0.72
 ## Phase F jump-shot plant slows approach so the takeoff reads.
-const JUMP_PLANT_SPEED := 0.28
+const JUMP_PLANT_SPEED := 0.24
 ## Phase G stamina — drain on sprint / jump / shot; recover off-ball / on bench.
 const STAMINA_MAX := 100.0
 const SPRINT_SPEED_MUL := 1.26
@@ -109,8 +114,12 @@ const STAMINA_ACCURACY_FLOOR := 0.62
 @export var is_goalkeeper: bool = false
 @export var player_index: int = 0
 @export var body_color: Color = Color(0.2, 0.45, 0.9)
+## Sandbox roster display name (indicator / HUD). Empty → role + jersey.
+@export var roster_name: String = ""
 
 var controlled: bool = false
+## 0 = CPU / none · 1 = P1 · 2 = P2 (human pad for control indicator).
+var human_pad: int = 0
 var ai_enabled: bool = false
 var has_ball: bool = false
 ## Phase B: continuous bounce stream while held (MatchController / rules drive this).
@@ -248,6 +257,13 @@ var _pivot_ring: MeshInstance3D
 var _pivot_ring_mat: StandardMaterial3D
 const PIVOT_SHOE := Color(0.95, 0.72, 0.22)
 const FREE_SHOE := Color(0.12, 0.12, 0.14)
+## Ground marker under human-controlled athletes (name + P1/P2).
+var _control_root: Node3D
+var _control_ring: MeshInstance3D
+var _control_ring_mat: StandardMaterial3D
+var _control_label: Label3D
+const CONTROL_RING_P1 := Color(0.22, 0.72, 0.95, 0.55)
+const CONTROL_RING_P2 := Color(0.95, 0.55, 0.22, 0.55)
 const PIVOT_RING_COLOR := Color(0.98, 0.78, 0.28, 0.55)
 
 @onready var ball_attach: Marker3D = $BallAttach
@@ -381,17 +397,25 @@ func _physics_process(delta: float) -> void:
 	target_speed *= _move_speed_mul()
 	if fake_recover_t > 0.0:
 		target_speed *= 0.55
-	# Snappy ground response; softer air control for jump-shot steering.
+	# Weighted ground response: slower push-off, firmer plant decelerate.
 	if not diving and _js_plant_t <= 0.0 and not on_bench and not excluded and fake_sold_t <= 0.0:
 		var desired := wish * target_speed
-		var rate := 18.0 if is_on_floor() else (18.0 * AIR_CONTROL)
+		var cur_planar := Vector3(velocity.x, 0.0, velocity.z)
+		var des_len := desired.length()
+		var cur_len := cur_planar.length()
+		var speeding_up := des_len > cur_len + 0.15
+		var rate: float
+		if is_on_floor():
+			rate = GROUND_ACCEL_RATE if speeding_up or des_len > 0.35 else GROUND_DECEL_RATE
+		else:
+			rate = AIR_ACCEL_RATE
 		var blend := 1.0 - exp(-rate * delta)
 		velocity.x = lerpf(velocity.x, desired.x, blend)
 		velocity.z = lerpf(velocity.z, desired.z, blend)
 	elif _js_plant_t > 0.0 and not diving:
 		# Plant: bleed planar speed while feet stay glued.
-		velocity.x = lerpf(velocity.x, 0.0, 1.0 - exp(-22.0 * delta))
-		velocity.z = lerpf(velocity.z, 0.0, 1.0 - exp(-22.0 * delta))
+		velocity.x = lerpf(velocity.x, 0.0, 1.0 - exp(-26.0 * delta))
+		velocity.z = lerpf(velocity.z, 0.0, 1.0 - exp(-26.0 * delta))
 
 	if (
 		controlled
@@ -453,6 +477,7 @@ func _physics_process(delta: float) -> void:
 	_apply_gk_pose(delta)
 	_apply_torso_yaw(delta)
 	_apply_bench_visual()
+	_update_control_indicator(delta)
 	_try_sticky_pass_catch()
 
 
@@ -1130,10 +1155,10 @@ func _ai_gk_wish() -> Vector3:
 	if has_ball and match_ball != null and match_ball.carrier == self:
 		return Vector3.ZERO
 
-	var ball_pos := match_ball.global_position
-	var home := start_position
+	var ball_pos: Vector3 = match_ball.global_position
+	var home: Vector3 = start_position
 	var toward_court := 1.0 if team_id == 0 else -1.0
-	var threat_pos := ball_pos
+	var threat_pos: Vector3 = ball_pos
 	if match_ball.carrier != null and match_ball.carrier.team_id != team_id:
 		threat_pos = match_ball.carrier.global_position
 	# Phase F angle-cut: stand on shooter→goal line with near-post bias.
@@ -1482,10 +1507,13 @@ func _ai_attack_with_ball(_delta: float) -> Vector3:
 				Vector3(goal.x + fake_jab_side * 1.4, 0.0, goal.z)
 			)) * AI_ATTACK_SPEED_SCALE
 	# Take open 9 m / crease looks before recycling. Never stall on back-passes.
-	var should_shoot := (
+	# Feel: slightly lower lane bar for backs in the shooting belt.
+	var belt_look: bool = dist >= 8.0 and dist <= AI_SHOOT_RANGE and shot_lane >= 0.45
+	var should_shoot: bool = (
 		open_shot
 		or nine_m
-		or (crease_look and (not under_pressure or shot_lane >= 0.4 or force_release))
+		or belt_look
+		or (crease_look and (not under_pressure or shot_lane >= 0.38 or force_release))
 		or (force_release and (pass_target == null or not forward_pass or open_shot or crease_look))
 	)
 	if match_ball != null and should_shoot and not fake_active:
@@ -2512,6 +2540,107 @@ func set_selection_highlight(active: bool) -> void:
 		_body_mat.emission_enabled = true
 		_body_mat.emission = body_color.darkened(0.2)
 		_body_mat.emission_energy_multiplier = 0.12 if is_goalkeeper else 0.05
+
+
+## Human pad for control indicator: 0=CPU (hidden), 1=P1, 2=P2.
+func set_human_pad(pad: int) -> void:
+	human_pad = clampi(pad, 0, 2)
+	_refresh_control_indicator()
+
+
+## Roster name if set; else role + jersey number (readable from 3/4 cam).
+func display_name() -> String:
+	var trimmed := roster_name.strip_edges()
+	if not trimmed.is_empty():
+		return trimmed
+	var role := "GK"
+	if not is_goalkeeper:
+		role = Formations.role_label(Formations.role_for(self))
+	return "%s #%d" % [role, player_index + 1]
+
+
+func is_human_controlled() -> bool:
+	return human_pad > 0
+
+
+func _ensure_control_indicator() -> void:
+	if _control_root != null and is_instance_valid(_control_root):
+		return
+	_control_root = Node3D.new()
+	_control_root.name = "ControlIndicator"
+	add_child(_control_root)
+
+	_control_ring = MeshInstance3D.new()
+	_control_ring.name = "ControlRing"
+	var torus := TorusMesh.new()
+	torus.inner_radius = 0.38
+	torus.outer_radius = 0.48
+	torus.rings = 12
+	torus.ring_segments = 24
+	_control_ring.mesh = torus
+	_control_ring_mat = StandardMaterial3D.new()
+	_control_ring_mat.albedo_color = CONTROL_RING_P1
+	_control_ring_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_control_ring_mat.emission_enabled = true
+	_control_ring_mat.emission = Color(0.35, 0.75, 0.95)
+	_control_ring_mat.emission_energy_multiplier = 0.55
+	_control_ring_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_control_ring_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_control_ring.material_override = _control_ring_mat
+	_control_ring.position = Vector3(0.0, 0.025, 0.0)
+	_control_ring.rotation_degrees = Vector3(90.0, 0.0, 0.0)
+	_control_root.add_child(_control_ring)
+
+	_control_label = Label3D.new()
+	_control_label.name = "ControlLabel"
+	_control_label.billboard = BaseMaterial3D.BILLBOARD_ENABLED
+	_control_label.font_size = 42
+	_control_label.outline_size = 8
+	_control_label.modulate = Color(0.95, 0.97, 1.0)
+	_control_label.outline_modulate = Color(0.05, 0.08, 0.12, 0.85)
+	_control_label.pixel_size = 0.0045
+	_control_label.position = Vector3(0.0, 0.28, 0.0)
+	_control_label.no_depth_test = true
+	_control_label.render_priority = 8
+	_control_root.add_child(_control_label)
+	_control_root.visible = false
+
+
+func _refresh_control_indicator() -> void:
+	_ensure_control_indicator()
+	var show_ind := (
+		human_pad > 0
+		and not on_bench
+		and not excluded
+		and not disqualified
+	)
+	_control_root.visible = show_ind
+	if not show_ind:
+		return
+	var pad_txt := "P1" if human_pad == 1 else "P2"
+	_control_label.text = "%s\n%s" % [display_name(), pad_txt]
+	var col := CONTROL_RING_P1 if human_pad == 1 else CONTROL_RING_P2
+	_control_ring_mat.albedo_color = col
+	_control_ring_mat.emission = Color(col.r, col.g, col.b)
+	_control_ring_mat.emission_energy_multiplier = 0.55
+
+
+func _update_control_indicator(_delta: float) -> void:
+	if human_pad <= 0:
+		if _control_root and _control_root.visible:
+			_control_root.visible = false
+		return
+	_ensure_control_indicator()
+	var show_ind := not on_bench and not excluded and not disqualified
+	_control_root.visible = show_ind
+	if not show_ind:
+		return
+	# Keep ring flat on the court under the feet (elevated 3/4 cam readable).
+	_control_root.global_position = Vector3(global_position.x, 0.02, global_position.z)
+	_control_root.global_rotation = Vector3.ZERO
+	# Soft pulse so the marker stays noticeable without HUD clutter.
+	var pulse := 0.92 + 0.08 * sin(Time.get_ticks_msec() * 0.006)
+	_control_ring.scale = Vector3(pulse, pulse, 1.0)
 
 
 func _apply_team_material() -> void:

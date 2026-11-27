@@ -7,7 +7,10 @@ signal picked_up(player: Player)
 signal released(player: Player)
 
 const FOLLOW_LERP := 40.0
-const SHOOT_UP_BIAS := 0.16
+const SHOOT_UP_BIAS := 0.14
+## Light air drag on free flight so shots/passes arc instead of laser beams.
+const FLIGHT_DRAG := 0.55
+const FLIGHT_SPIN_DAMP := 1.8
 ## Phase B procedural dribble bounce (approx continuous stream, no palm contact).
 const DRIBBLE_PERIOD_S := 0.36
 const DRIBBLE_BALL_RADIUS := 0.12
@@ -46,6 +49,7 @@ func _physics_process(delta: float) -> void:
 	if carrier == null:
 		_dribble_phase = 0.0
 		_dribble_was_low = false
+		_apply_flight_feel(delta)
 		_rescue_if_lost()
 		_try_bounce_floor_redirect()
 		_soft_pass_steer(delta)
@@ -61,6 +65,21 @@ func _physics_process(delta: float) -> void:
 	global_position = global_position.lerp(target, 1.0 - exp(-FOLLOW_LERP * delta))
 	linear_velocity = Vector3.ZERO
 	angular_velocity = Vector3.ZERO
+
+
+## Mild drag + spin damp so free balls read as handball flight, not lasers.
+func _apply_flight_feel(delta: float) -> void:
+	if freeze:
+		return
+	var speed := linear_velocity.length()
+	if speed < 0.4:
+		return
+	var drag := 1.0 - clampf(FLIGHT_DRAG * delta, 0.0, 0.18)
+	linear_velocity *= drag
+	# Keep a touch of loft so longer shots don't flatten into the floor early.
+	if linear_velocity.y < 0.0 and speed > 6.0:
+		linear_velocity.y *= 1.0 - 0.12 * delta
+	angular_velocity = angular_velocity.lerp(Vector3.ZERO, 1.0 - exp(-FLIGHT_SPIN_DAMP * delta))
 
 
 ## Playability: never leave the ball stuck under the floor or outside the hall.
@@ -289,6 +308,13 @@ func release_and_shoot(
 		linear_velocity = dir * clampf(impulse_strength, lo, hi)
 	else:
 		apply_central_impulse(dir * impulse_strength)
+	# Readable spin from the throwing hand (procedural flight feel).
+	var side := Vector3.UP.cross(dir)
+	if side.length_squared() < 0.01:
+		side = Vector3.RIGHT
+	else:
+		side = side.normalized()
+	angular_velocity = side * (18.0 if is_pass else 26.0) + dir * 4.0
 	if _trail and _trail.has_method("set_active"):
 		_trail.call("set_active", true)
 	if shooter:

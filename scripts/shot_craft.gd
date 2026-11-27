@@ -24,12 +24,12 @@ const JUMP_APEX_Y := 1.21
 enum JumpPhase { NONE = 0, APPROACH = 1, PLANTED = 2, AIRBORNE = 3, WINDOW = 4 }
 
 ## Brief grounded plant before takeoff — readable approach into the jump.
-const PLANT_HOLD_S := 0.10
+const PLANT_HOLD_S := 0.14
 ## Air time window where release is "live" (early → sweet → late).
 const WINDOW_OPEN_S := 0.16
-const WINDOW_CLOSE_S := 0.58
-const WINDOW_SWEET_OPEN_S := 0.28
-const WINDOW_SWEET_CLOSE_S := 0.46
+const WINDOW_CLOSE_S := 0.60
+const WINDOW_SWEET_OPEN_S := 0.30
+const WINDOW_SWEET_CLOSE_S := 0.48
 ## Planar approach speed that qualifies a jump-with-ball as jump-shot craft.
 const APPROACH_MIN_SPEED := 2.0
 ## Extra impulse when releasing inside the timed sweet window (on top of height sweet).
