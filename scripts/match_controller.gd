@@ -370,9 +370,11 @@ func _unhandled_input(event: InputEvent) -> void:
 			camera_rig.wing_cinematic_enabled = not camera_rig.wing_cinematic_enabled
 			if not camera_rig.wing_cinematic_enabled:
 				camera_rig.end_wing_cinematic(true)
+				if camera_rig.has_method("end_jump_shot_slowmo"):
+					camera_rig.end_jump_shot_slowmo(true)
 			if hud and hud.has_method("flash_rule"):
 				hud.flash_rule(
-					"Wing cam %s" % ("ON" if camera_rig.wing_cinematic_enabled else "OFF"),
+					"Spectacle cam %s" % ("ON" if camera_rig.wing_cinematic_enabled else "OFF"),
 					"shape"
 				)
 		get_viewport().set_input_as_handled()
@@ -1079,16 +1081,19 @@ func _try_shoot_charged(held_s: float) -> void:
 		"wing_shot": wing,
 	}
 	var from := controlled_player.global_position + Vector3(0, 1.2, 0)
+	var was_jump_shot := bool(meta.get("jump_shot", false)) or jump_q >= 0
 	if controlled_player.try_shoot(aim, impulse, ball, up, meta):
 		_spawn_shot_trace(from, aim, lob, jump_q)
 		# Nearby defending outfield raise hands for the contest window.
 		_nudge_defenders_to_block(controlled_player.team_id, from, aim)
-		# Shoot cam: wing finishes hand off to wing cinematic; else brief settle.
+		# Shoot cam: wing finishes hand off to wing cinematic; jump shot gets short slow-mo.
 		if wing and camera_rig:
 			_end_shoot_cam_presentation(0.0)
 			camera_rig.trigger_wing_cinematic()
 		else:
-			_end_shoot_cam_presentation(0.38)
+			_end_shoot_cam_presentation(0.55 if was_jump_shot else 0.42)
+			if was_jump_shot and camera_rig and camera_rig.has_method("trigger_jump_shot_slowmo"):
+				camera_rig.trigger_jump_shot_slowmo()
 	else:
 		_end_shoot_cam_presentation(0.0)
 	if hud and hud.has_method("set_shot_status"):
@@ -1295,8 +1300,10 @@ func _update_camera_attack_side() -> void:
 func _update_camera_nudge(delta: float) -> void:
 	if camera_rig == null or match_state == MatchState.MATCH_OVER:
 		return
-	# Shoot close-up owns the frame — don't fight it with nudge.
+	# Shoot / spectacle close-up owns the frame — don't fight it with nudge.
 	if camera_rig.is_shoot_cam_active():
+		return
+	if camera_rig.has_method("is_jump_shot_slowmo_active") and camera_rig.is_jump_shot_slowmo_active():
 		return
 	var yaw := Input.get_axis("camera_yaw_left", "camera_yaw_right")
 	var zoom := Input.get_axis("camera_zoom_in", "camera_zoom_out")
@@ -1317,13 +1324,24 @@ func _update_camera_nudge(delta: float) -> void:
 
 
 ## Shoot cam + goal crosshair while charging (windup / aim). Restores after release/cancel.
+## Jump-to-shoot: keep close-up + crosshair while airborne with the ball (charge or live aim).
 func _update_shoot_cam_and_crosshair() -> void:
+	if match_state != MatchState.LIVE or controlled_player == null:
+		if hud and hud.has_method("set_goal_crosshair"):
+			hud.set_goal_crosshair(Vector2.ZERO, false)
+		return
+	var has_ball := controlled_player.has_ball
+	var faking := controlled_player.is_faking()
+	var jump_aiming := (
+		has_ball
+		and not faking
+		and controlled_player.jump_shot_active
+		and (_charging or _shoot_goal_aim_active)
+	)
 	var aiming := (
-		_charging
-		and match_state == MatchState.LIVE
-		and controlled_player != null
-		and controlled_player.has_ball
-		and not controlled_player.is_faking()
+		has_ball
+		and not faking
+		and (_charging or jump_aiming)
 	)
 	if not aiming:
 		# Reticle is aim-only; shoot-cam settle may still hold the close-up briefly.
@@ -2460,6 +2478,10 @@ func _help_overlay_text() -> String:
 		MetaMode.kit_variant,
 		"ON" if MetaMode.hotseat_enabled else "OFF",
 	])
+	# Pass must be obvious — live bindings from InputMap (keyboard + pad).
+	var pass_keys := InputSettings.pass_binding_summary()
+	lines.append("★★ PASS = %s  (instant; cancels shoot charge; never fires a shot)" % pass_keys)
+	lines.append("   Bounce pass: hold B / D-pad Left + PASS · Lob pass: hold F / LT + PASS")
 	lines.append("M cycle mode · H hotseat · K kit pack · T start training drill")
 	lines.append("↑↓ select action · Enter rebind · R reset selected key")
 	lines.append("--- Remap list ---")
@@ -2467,7 +2489,11 @@ func _help_overlay_text() -> String:
 	for action in InputSettings.REMAP_ACTIONS:
 		var mark := ">" if i == _remap_action_i else " "
 		var wait := "  << press new key >>" if _remap_waiting and i == _remap_action_i else ""
-		lines.append("%s %s = %s%s" % [mark, action, InputSettings.action_label(action), wait])
+		var label := InputSettings.action_label(action)
+		if action == "pass_ball":
+			lines.append("%s PASS (pass_ball) = %s%s" % [mark, label, wait])
+		else:
+			lines.append("%s %s = %s%s" % [mark, action, label, wait])
 		i += 1
 	for tip in InputSettings.help_lines():
 		lines.append(tip)

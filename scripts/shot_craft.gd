@@ -3,7 +3,7 @@ class_name ShotCraft
 
 ## Phase 3 / F shot feel: charge power, lob loft, jump-shot craft (plant → air → window).
 
-const CHARGE_TIME_S := 0.58
+const CHARGE_TIME_S := 0.88
 const IMPULSE_MIN := 10.5
 const IMPULSE_MAX := 22.0
 const FLAT_UP_BIAS := 0.05
@@ -24,12 +24,12 @@ const JUMP_APEX_Y := 1.21
 enum JumpPhase { NONE = 0, APPROACH = 1, PLANTED = 2, AIRBORNE = 3, WINDOW = 4 }
 
 ## Brief grounded plant before takeoff — readable approach into the jump.
-const PLANT_HOLD_S := 0.14
+const PLANT_HOLD_S := 0.16
 ## Air time window where release is "live" (early → sweet → late).
-const WINDOW_OPEN_S := 0.16
-const WINDOW_CLOSE_S := 0.60
-const WINDOW_SWEET_OPEN_S := 0.30
-const WINDOW_SWEET_CLOSE_S := 0.48
+const WINDOW_OPEN_S := 0.18
+const WINDOW_CLOSE_S := 0.72
+const WINDOW_SWEET_OPEN_S := 0.34
+const WINDOW_SWEET_CLOSE_S := 0.54
 ## Planar approach speed that qualifies a jump-with-ball as jump-shot craft.
 const APPROACH_MIN_SPEED := 2.0
 ## Extra impulse when releasing inside the timed sweet window (on top of height sweet).

@@ -44,6 +44,11 @@ class_name CameraRig
 @export var wing_cinematic_zoom: float = 3.4
 @export var wing_cinematic_height: float = -1.2
 @export var wing_cinematic_time_scale: float = 0.48
+## Jump-shot release spectacle (same toggle as wing cam prefs).
+@export var jump_shot_slowmo_duration: float = 0.55
+@export var jump_shot_slowmo_time_scale: float = 0.52
+@export var jump_shot_slowmo_zoom: float = 1.6
+@export var jump_shot_slowmo_height: float = -0.55
 
 ## Shoot close-up (over-shoulder behind head → attacked goal).
 @export var shoot_cam_back: float = 1.38
@@ -71,6 +76,9 @@ var nudge_distance: float = 0.0
 ## Wing cinematic remaining (seconds of scaled time).
 var _wing_cine_t: float = 0.0
 var _wing_cine_active: bool = false
+## Jump-shot release slow-mo (shares wing_cinematic_enabled pref).
+var _jump_slow_t: float = 0.0
+var _jump_slow_active: bool = false
 
 ## Shoot-cam state: close-up while charging / brief settle after release.
 var _shoot_cam_active: bool = false
@@ -88,6 +96,7 @@ func setup(ball_node: Node3D, home_attacks_positive_z: bool = true) -> void:
 	attack_sign = _target_attack_sign
 	reset_nudge()
 	end_wing_cinematic(true)
+	end_jump_shot_slowmo(true)
 	end_shoot_cam(0.0)
 	_fov_target = match_cam_fov
 	if camera:
@@ -131,7 +140,7 @@ func ball_yaw(ball_pos: Vector3) -> float:
 ## R5.2: apply stick/key nudge without breaking the elevated ball-yaw base.
 ## yaw_axis: -1 left … +1 right; zoom_axis: -1 closer … +1 farther; height_axis: -1 lower … +1 higher.
 func apply_nudge_input(yaw_axis: float, zoom_axis: float, height_axis: float, delta: float) -> void:
-	if _wing_cine_active or _shoot_cam_active:
+	if _wing_cine_active or _jump_slow_active or _shoot_cam_active:
 		return
 	nudge_yaw = clampf(
 		nudge_yaw + yaw_axis * nudge_yaw_speed * delta,
@@ -173,10 +182,43 @@ func end_wing_cinematic(force_restore_time: bool = false) -> void:
 	_wing_cine_t = 0.0
 	if _wing_cine_active or force_restore_time:
 		_wing_cine_active = false
-		# Don't stomp an active goal slow-mo (MatchController owns that).
+		# Don't stomp an active goal / jump slow-mo (MatchController owns goal).
+		if _jump_slow_active and not force_restore_time:
+			return
 		if absf(Engine.time_scale - wing_cinematic_time_scale) < 0.05 or force_restore_time:
 			if Engine.time_scale < 0.95:
 				Engine.time_scale = 1.0
+
+
+## Brief slow-mo around jump-shot release (respects wing_cinematic_enabled).
+func trigger_jump_shot_slowmo() -> void:
+	if not wing_cinematic_enabled:
+		return
+	# Wing finish already owns spectacle — don't stack.
+	if _wing_cine_active:
+		return
+	_jump_slow_t = jump_shot_slowmo_duration
+	if not _jump_slow_active:
+		_jump_slow_active = true
+		Engine.time_scale = jump_shot_slowmo_time_scale
+
+
+func end_jump_shot_slowmo(force_restore_time: bool = false) -> void:
+	_jump_slow_t = 0.0
+	if _jump_slow_active or force_restore_time:
+		_jump_slow_active = false
+		if _wing_cine_active and not force_restore_time:
+			return
+		if (
+			absf(Engine.time_scale - jump_shot_slowmo_time_scale) < 0.08
+			or force_restore_time
+		):
+			if Engine.time_scale < 0.95:
+				Engine.time_scale = 1.0
+
+
+func is_jump_shot_slowmo_active() -> bool:
+	return _jump_slow_active
 
 
 ## Shoot close-up: over-shoulder behind head, looking at the goal / aim point.
@@ -205,7 +247,12 @@ func end_shoot_cam(settle_s: float = 0.0) -> void:
 	_shoot_cam_settle_t = 0.0
 	_shoot_subject = null
 	_fov_target = match_cam_fov
-	if camera and not _wing_cine_active and absf(camera.fov - match_cam_fov) > 0.05:
+	if (
+		camera
+		and not _wing_cine_active
+		and not _jump_slow_active
+		and absf(camera.fov - match_cam_fov) > 0.05
+	):
 		# Snap only when settle was skipped (cancel) so match cam is immediate.
 		camera.fov = match_cam_fov
 
@@ -236,6 +283,10 @@ func _physics_process(delta: float) -> void:
 		_wing_cine_t = maxf(0.0, _wing_cine_t - delta)
 		if _wing_cine_t <= 0.0:
 			end_wing_cinematic()
+	if _jump_slow_active:
+		_jump_slow_t = maxf(0.0, _jump_slow_t - delta)
+		if _jump_slow_t <= 0.0:
+			end_jump_shot_slowmo()
 
 	# Shoot-cam settle: hold close-up briefly after release, then restore 3/4.
 	if _shoot_cam_active and _shoot_cam_settle_t > 0.0:
@@ -327,6 +378,11 @@ func _desired_position(ball_pos: Vector3) -> Vector3:
 		var peak := remain * remain * (3.0 - 2.0 * remain) # smoothstep
 		height += wing_cinematic_height * peak
 		distance -= wing_cinematic_zoom * peak
+	elif _jump_slow_active:
+		var j_remain := clampf(_jump_slow_t / maxf(jump_shot_slowmo_duration, 0.01), 0.0, 1.0)
+		var j_peak := j_remain * j_remain * (3.0 - 2.0 * j_remain)
+		height += jump_shot_slowmo_height * j_peak
+		distance -= jump_shot_slowmo_zoom * j_peak
 	var lateral := side_bias * attack_sign * corridor_factor(ball_pos.x)
 	var offset := Vector3(lateral, height, -attack_sign * distance)
 	return pivot + offset.rotated(Vector3.UP, yaw)
@@ -343,6 +399,6 @@ func _look_target(ball_pos: Vector3) -> Vector3:
 	var near_lead_z := ball_pos.z + attack_sign * 2.2
 	var look_z := lerpf(near_lead_z, goal_z, look_goal_blend)
 	var look_y := 1.05 + nudge_height * 0.04
-	if _wing_cine_active:
+	if _wing_cine_active or _jump_slow_active:
 		look_y += 0.25
 	return Vector3(look_x, look_y, look_z)
