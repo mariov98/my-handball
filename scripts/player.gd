@@ -28,8 +28,10 @@ const FACE_THRESHOLD := 0.12
 const BOB_AMOUNT := 0.03
 const BOB_SPEED := 13.0
 const IDLE_BREATHE := 0.012
-const JOG_LEG_SWING := 0.52
-const JOG_ARM_SWING := 0.38
+const JOG_LEG_SWING := 0.62
+const JOG_ARM_SWING := 0.85
+const JOG_ELBOW_DEG := 38.0
+const JOG_KNEE_DEG := 42.0
 const PICKUP_COOLDOWN := 0.22
 ## Matches CapsuleShape3D radius in player.tscn — used for soft depenetration.
 const BODY_RADIUS := 0.32
@@ -89,8 +91,10 @@ const GK_NEAR_POST_BIAS := 0.20
 ## Phase F catch settle (brief move penalty) + GK outlet delay — weightier gather.
 const CATCH_SETTLE_S := 0.48
 const CATCH_SETTLE_SPEED := 0.40
-const GK_OUTLET_DELAY_S := 0.52
+const GK_OUTLET_DELAY_S := 0.42
 const GK_OUTLET_COOLDOWN_S := 1.15
+## Hard cap after save/catch — force a clear so the GK never spins forever.
+const GK_OUTLET_MAX_HOLD_S := 1.15
 ## Wave 3: fake cooldown so spam doesn't soft-lock shoot/pass.
 const FAKE_COOLDOWN_S := 0.55
 ## Brief move soft while jabbing.
@@ -218,11 +222,20 @@ var _block_timer: float = 0.0
 var _dive_dir: Vector3 = Vector3.ZERO
 var _arm_l: MeshInstance3D
 var _arm_r: MeshInstance3D
+var _forearm_l: MeshInstance3D
+var _forearm_r: MeshInstance3D
 var _hand_l: MeshInstance3D
 var _hand_r: MeshInstance3D
 var _leg_l: Node3D
 var _leg_r: Node3D
+var _shin_l: Node3D
+var _shin_r: Node3D
 var _upper_body: Node3D
+## Soft elbow / knee bend driven every frame (degrees).
+var _elbow_l_deg: float = 12.0
+var _elbow_r_deg: float = 12.0
+var _knee_l_deg: float = 8.0
+var _knee_r_deg: float = 8.0
 var _upper_base_y: float = 0.0
 var _head: MeshInstance3D
 var _hair: MeshInstance3D
@@ -246,6 +259,8 @@ var _js_was_airborne: bool = false
 var _outlet_pending: bool = false
 var _outlet_timer: float = 0.0
 var _outlet_cd: float = 0.0
+## Wall-clock since outlet armed (force clear even if wing pick fails).
+var _outlet_hold_t: float = 0.0
 ## Pivot / free foot teaching (R1.6 / R1.7) — synced from HandballRules while holding.
 const PIVOT_NONE := -1
 const PIVOT_LEFT := 0
@@ -318,8 +333,12 @@ func _physics_process(delta: float) -> void:
 		if _gk_pose_timer <= 0.0 and not diving and gk_stance in [
 			GkMotion.Stance.CATCH, GkMotion.Stance.DEFLECT, GkMotion.Stance.OUTLET
 		]:
-			gk_stance = GkMotion.Stance.SET if is_goalkeeper else GkMotion.Stance.IDLE
-			_gk_pose_cache = {}
+			# Keep outlet pose while a clear is still armed (avoid spin/idle freeze).
+			if gk_stance == GkMotion.Stance.OUTLET and _outlet_pending and has_ball:
+				_gk_pose_timer = 0.2
+			else:
+				gk_stance = GkMotion.Stance.SET if is_goalkeeper else GkMotion.Stance.IDLE
+				_gk_pose_cache = {}
 	if _catch_settle_t > 0.0:
 		_catch_settle_t = maxf(0.0, _catch_settle_t - delta)
 	if _kempa_lock_t > 0.0:
@@ -442,7 +461,13 @@ func _physics_process(delta: float) -> void:
 		_enforce_gk_four_meter()
 
 	var planar := Vector3(velocity.x, 0.0, velocity.z)
-	if planar.length() > FACE_THRESHOLD and not diving and _js_plant_t <= 0.0 and not fake_active:
+	# Holding the ball: never face the attached ball (creates infinite yaw / spin lock).
+	if is_goalkeeper and has_ball and not diving and not on_bench and not excluded:
+		var outlet_look := _gk_outlet_face_dir()
+		if outlet_look.length_squared() > 0.01:
+			var out_yaw := atan2(outlet_look.x, outlet_look.z)
+			rotation.y = lerp_angle(rotation.y, out_yaw, 1.0 - exp(-10.0 * delta))
+	elif planar.length() > FACE_THRESHOLD and not diving and _js_plant_t <= 0.0 and not fake_active:
 		var target_yaw := atan2(planar.x, planar.z)
 		rotation.y = lerp_angle(rotation.y, target_yaw, 1.0 - exp(-12.0 * delta))
 	elif (
@@ -450,6 +475,7 @@ func _physics_process(delta: float) -> void:
 		and not diving
 		and not on_bench
 		and not excluded
+		and not has_ball
 		and match_ball != null
 		and planar.length() <= FACE_THRESHOLD
 	):
@@ -504,6 +530,7 @@ func try_shoot(
 	has_ball = false
 	_outlet_pending = false
 	_outlet_timer = 0.0
+	_outlet_hold_t = 0.0
 	drain_stamina(STAMINA_DRAIN_SHOT)
 	# Preserve jump-shot craft meta for the release, then clear plant if still grounded.
 	if jump_shot_active and not shot_meta.has("jump_shot"):
@@ -741,6 +768,7 @@ func arm_outlet_pass() -> void:
 		return
 	_outlet_pending = true
 	_outlet_timer = GK_OUTLET_DELAY_S
+	_outlet_hold_t = 0.0
 	gk_stance = GkMotion.Stance.OUTLET
 	_gk_pose_timer = GkMotion.OUTLET_POSE_S
 	var yaw := 0.0
@@ -751,30 +779,56 @@ func arm_outlet_pass() -> void:
 	_apply_save_box_from_pose(_gk_pose_cache)
 
 
+## Court / wing facing while holding — never the attached ball (spin lock).
+func _gk_outlet_face_dir() -> Vector3:
+	var wing := _ai_outlet_wing()
+	if wing:
+		var to_wing := wing.global_position - global_position
+		to_wing.y = 0.0
+		if to_wing.length_squared() > 0.05:
+			return to_wing.normalized()
+	# Face into the court (away from own goal line).
+	return Vector3(0.0, 0.0, 1.0 if team_id == 0 else -1.0)
+
+
 func _tick_gk_outlet(delta: float) -> void:
 	if not is_goalkeeper or not _outlet_pending:
 		return
 	if not has_ball or match_ball == null or match_ball.carrier != self:
 		_outlet_pending = false
 		_outlet_timer = 0.0
+		_outlet_hold_t = 0.0
 		return
+	_outlet_hold_t += delta
+	# Refresh outlet pose so arms stay cocked while waiting.
+	var face := _gk_outlet_face_dir()
+	var yaw := ThrowMotion.torso_yaw_toward(face_direction(), face)
+	gk_stance = GkMotion.Stance.OUTLET
+	_gk_pose_cache = GkMotion.pose_outlet(yaw)
 	if controlled and not ai_enabled:
 		# Human GK keeps the ball — outlet is an AI assist after saves.
 		# Still show outlet-ready pose so distribution reads.
 		return
 	_outlet_timer = maxf(0.0, _outlet_timer - delta)
 	if _outlet_timer > 0.0 or _outlet_cd > 0.0 or _ai_pass_cd > 0.0:
-		return
-	var wing := _ai_outlet_wing()
-	if wing == null:
-		_outlet_pending = false
-		return
-	var hint := wing.global_position - global_position
-	hint.y = 0.0
-	if try_pass_to(wing, match_ball, -1.0, hint, PassCraft.PassType.LOB):
-		_outlet_pending = false
-		_outlet_cd = GK_OUTLET_COOLDOWN_S
-		_ai_pass_cd = AI_PASS_COOLDOWN
+		# Hard timeout still forces a clear even if cooldowns stall.
+		if _outlet_hold_t < GK_OUTLET_MAX_HOLD_S:
+			return
+	var target := _ai_outlet_wing()
+	if target == null:
+		target = _ai_outlet_any_teammate()
+	if target != null:
+		var hint := target.global_position - global_position
+		hint.y = 0.0
+		if try_pass_to(target, match_ball, -1.0, hint, PassCraft.PassType.LOB):
+			_outlet_pending = false
+			_outlet_hold_t = 0.0
+			_outlet_cd = GK_OUTLET_COOLDOWN_S
+			_ai_pass_cd = AI_PASS_COOLDOWN
+			return
+	# Last resort: clear throw toward midfield / attack half (no infinite hold).
+	if _outlet_hold_t >= GK_OUTLET_MAX_HOLD_S * 0.85:
+		_gk_force_clear_throw()
 
 
 func _ai_outlet_wing() -> Player:
@@ -787,6 +841,56 @@ func _ai_outlet_wing() -> Player:
 			roster.append(sibling)
 	var best := PassCraft.best_outlet_wing(self, roster, team_id)
 	return best as Player
+
+
+## Any on-court teammate when no wing is available for outlet.
+func _ai_outlet_any_teammate() -> Player:
+	var parent_n := get_parent()
+	if parent_n == null:
+		return null
+	var best: Player = null
+	var best_score := -INF
+	var attack_sign := 1.0 if team_id == 0 else -1.0
+	for sibling in parent_n.get_children():
+		if sibling == self or not (sibling is Player):
+			continue
+		var mate := sibling as Player
+		if mate.is_goalkeeper or mate.match_frozen or mate.excluded or mate.on_bench:
+			continue
+		var ahead := (mate.global_position.z - global_position.z) * attack_sign
+		var score := ahead + absf(mate.global_position.x) * 0.35
+		if score > best_score:
+			best_score = score
+			best = mate
+	return best
+
+
+## Clear the ball toward the attack half when no receiver is legal.
+func _gk_force_clear_throw() -> void:
+	if not has_ball or match_ball == null or match_ball.carrier != self:
+		_outlet_pending = false
+		_outlet_hold_t = 0.0
+		return
+	var attack_sign := 1.0 if team_id == 0 else -1.0
+	var aim := Vector3(randf_range(-2.5, 2.5), 0.35, attack_sign * 12.0)
+	aim = aim.normalized()
+	var meta := {
+		"pass": true,
+		"charge": 0.35,
+		"pass_type": PassCraft.PassType.LOB,
+		"gk_clear": true,
+		"ai": true,
+	}
+	if try_shoot(aim, PassCraft.LOB_IMPULSE_MAX * 0.92, match_ball, PassCraft.LOB_LOFT_MIN, meta):
+		_outlet_pending = false
+		_outlet_hold_t = 0.0
+		_outlet_cd = GK_OUTLET_COOLDOWN_S
+		_ai_pass_cd = AI_PASS_COOLDOWN
+	else:
+		# Soft fail — keep trying next ticks until max hold, then drop pending.
+		if _outlet_hold_t >= GK_OUTLET_MAX_HOLD_S:
+			_outlet_pending = false
+			_outlet_hold_t = 0.0
 
 
 ## Wave 3: usable fake — keeps ball, never fires a shot/pass.
@@ -1011,6 +1115,7 @@ func reset_to_start() -> void:
 	_outlet_pending = false
 	_outlet_timer = 0.0
 	_outlet_cd = 0.0
+	_outlet_hold_t = 0.0
 	clear_throw_motion()
 	clear_fake_motion()
 	_fake_cd = 0.0
@@ -2099,7 +2204,8 @@ func _tick_throw_motion(delta: float) -> void:
 func _apply_throw_pose(delta: float) -> void:
 	if on_bench or excluded or diving or _arm_r == null or fake_active:
 		return
-	var blend := 1.0 - exp(-16.0 * delta)
+	# Snappy blend so pass/shoot arm joints visibly drive every frame.
+	var blend := 1.0 - exp(-22.0 * delta)
 	if throw_motion_active and not _throw_pose_cache.is_empty():
 		_apply_pose_dict(_throw_pose_cache, blend)
 		return
@@ -2128,6 +2234,11 @@ func _apply_pose_dict(pose: Dictionary, blend: float) -> void:
 	if _hand_l and _hand_r:
 		_hand_l.position = _hand_l.position.lerp(pose["hand_l_pos"] as Vector3, blend)
 		_hand_r.position = _hand_r.position.lerp(pose["hand_r_pos"] as Vector3, blend)
+	_elbow_l_deg = lerpf(_elbow_l_deg, float(pose.get("elbow_l", _elbow_l_deg)), blend)
+	_elbow_r_deg = lerpf(_elbow_r_deg, float(pose.get("elbow_r", _elbow_r_deg)), blend)
+	_knee_l_deg = lerpf(_knee_l_deg, float(pose.get("knee_l", _knee_l_deg)), blend)
+	_knee_r_deg = lerpf(_knee_r_deg, float(pose.get("knee_r", _knee_r_deg)), blend)
+	_place_forearms_and_knees(blend)
 	_torso_yaw_offset = float(pose.get("torso_yaw", _torso_yaw_offset))
 	if _upper_body:
 		var pitch := float(pose.get("torso_pitch", 0.0))
@@ -2141,6 +2252,32 @@ func _apply_pose_dict(pose: Dictionary, blend: float) -> void:
 		_leg_l.rotation.z = lerpf(_leg_l.rotation.z, float(pose["leg_l_z"]), blend)
 	if _leg_r and pose.has("leg_r_z"):
 		_leg_r.rotation.z = lerpf(_leg_r.rotation.z, float(pose["leg_r_z"]), blend)
+
+
+## Place forearms between upper-arm and hand; bend knees on shin nodes.
+func _place_forearms_and_knees(blend: float = 1.0) -> void:
+	if _forearm_l and _arm_l and _hand_l:
+		var mid_l := _arm_l.position.lerp(_hand_l.position, 0.52)
+		_forearm_l.position = _forearm_l.position.lerp(mid_l, blend)
+		var elbow_axis_l := Vector3(0.0, 0.0, deg_to_rad(_elbow_l_deg))
+		_forearm_l.rotation = _forearm_l.rotation.lerp(
+			_arm_l.rotation + elbow_axis_l, blend
+		)
+	if _forearm_r and _arm_r and _hand_r:
+		var mid_r := _arm_r.position.lerp(_hand_r.position, 0.52)
+		_forearm_r.position = _forearm_r.position.lerp(mid_r, blend)
+		var elbow_axis_r := Vector3(0.0, 0.0, -deg_to_rad(_elbow_r_deg))
+		_forearm_r.rotation = _forearm_r.rotation.lerp(
+			_arm_r.rotation + elbow_axis_r, blend
+		)
+	if _shin_l == null and _leg_l:
+		_shin_l = _leg_l.get_node_or_null("ShinL") as Node3D
+	if _shin_r == null and _leg_r:
+		_shin_r = _leg_r.get_node_or_null("ShinR") as Node3D
+	if _shin_l:
+		_shin_l.rotation.x = lerpf(_shin_l.rotation.x, deg_to_rad(_knee_l_deg), blend)
+	if _shin_r:
+		_shin_r.rotation.x = lerpf(_shin_r.rotation.x, deg_to_rad(_knee_r_deg), blend)
 
 
 func is_throw_motion_busy() -> bool:
@@ -2217,10 +2354,14 @@ func _cache_body_refs() -> void:
 	_face_plate = _upper_body.get_node_or_null("FacePlate") as MeshInstance3D if _upper_body else null
 	_arm_l = _upper_body.get_node_or_null("ArmL") as MeshInstance3D if _upper_body else null
 	_arm_r = _upper_body.get_node_or_null("ArmR") as MeshInstance3D if _upper_body else null
+	_forearm_l = _upper_body.get_node_or_null("ForearmL") as MeshInstance3D if _upper_body else null
+	_forearm_r = _upper_body.get_node_or_null("ForearmR") as MeshInstance3D if _upper_body else null
 	_hand_l = _upper_body.get_node_or_null("HandL") as MeshInstance3D if _upper_body else null
 	_hand_r = _upper_body.get_node_or_null("HandR") as MeshInstance3D if _upper_body else null
 	_leg_l = get_node_or_null("LegL") as Node3D
 	_leg_r = get_node_or_null("LegR") as Node3D
+	_shin_l = _leg_l.get_node_or_null("ShinL") as Node3D if _leg_l else null
+	_shin_r = _leg_r.get_node_or_null("ShinR") as Node3D if _leg_r else null
 	_head_region = find_child("HeadRegion", true, false) as Area3D
 	if _mesh:
 		_mesh_base_y = _mesh.position.y
@@ -2301,7 +2442,9 @@ func _ensure_head_region() -> void:
 
 
 func _ensure_arms_and_hands() -> void:
-	var arm_size := Vector3(0.55, 0.14, 0.14) if is_goalkeeper else Vector3(0.40, 0.11, 0.11)
+	# Upper-arm boxes stay free-positioned for throw poses (smoke checks ArmR.pos/rot).
+	# Forearms sit between upper arm and hand so elbows read as articulations.
+	var arm_size := Vector3(0.34, 0.12, 0.12) if is_goalkeeper else Vector3(0.28, 0.10, 0.10)
 	_arm_l = _ensure_box_child(
 		_upper_body, "ArmL", arm_size,
 		Vector3(-0.48, 1.28, 0.02) if is_goalkeeper else Vector3(-0.40, 1.22, 0.02)
@@ -2309,6 +2452,15 @@ func _ensure_arms_and_hands() -> void:
 	_arm_r = _ensure_box_child(
 		_upper_body, "ArmR", arm_size,
 		Vector3(0.48, 1.28, 0.02) if is_goalkeeper else Vector3(0.40, 1.22, 0.02)
+	)
+	var forearm_size := Vector3(0.28, 0.09, 0.09) if is_goalkeeper else Vector3(0.24, 0.08, 0.08)
+	_forearm_l = _ensure_box_child(
+		_upper_body, "ForearmL", forearm_size,
+		Vector3(-0.60, 1.18, 0.05) if is_goalkeeper else Vector3(-0.50, 1.14, 0.05)
+	)
+	_forearm_r = _ensure_box_child(
+		_upper_body, "ForearmR", forearm_size,
+		Vector3(0.60, 1.18, 0.05) if is_goalkeeper else Vector3(0.50, 1.14, 0.05)
 	)
 	_hand_l = _ensure_box_child(
 		_upper_body, "HandL", Vector3(0.10, 0.08, 0.12),
@@ -2318,6 +2470,10 @@ func _ensure_arms_and_hands() -> void:
 		_upper_body, "HandR", Vector3(0.10, 0.08, 0.12),
 		Vector3(0.70, 1.18, 0.06) if is_goalkeeper else Vector3(0.58, 1.12, 0.08)
 	)
+	_arm_l.set_meta("body_region", "upper_arm")
+	_arm_r.set_meta("body_region", "upper_arm")
+	_forearm_l.set_meta("body_region", "forearm")
+	_forearm_r.set_meta("body_region", "forearm")
 	_hand_l.set_meta("body_region", "hand")
 	_hand_r.set_meta("body_region", "hand")
 	_hand_r.set_meta("ball_attach_hand", true)
@@ -2458,6 +2614,9 @@ func _update_gk_stance(wish: Vector3, speed_hint: float) -> void:
 	if has_ball:
 		if _outlet_pending:
 			gk_stance = GkMotion.Stance.OUTLET
+			if _gk_pose_cache.is_empty():
+				var yaw := ThrowMotion.torso_yaw_toward(face_direction(), _gk_outlet_face_dir())
+				_gk_pose_cache = GkMotion.pose_outlet(yaw)
 		else:
 			gk_stance = GkMotion.Stance.SET
 			_gk_pose_cache = GkMotion.pose_set()
@@ -2505,9 +2664,12 @@ func _pose_arms_rest() -> void:
 			_hand_r.position = Vector3(0.58, 1.12, 0.08)
 	_arm_l.rotation_degrees = Vector3.ZERO
 	_arm_r.rotation_degrees = Vector3.ZERO
+	_elbow_l_deg = 12.0
+	_elbow_r_deg = 12.0
+	_place_forearms_and_knees(1.0)
 
 
-func _update_arm_pose(_delta: float) -> void:
+func _update_arm_pose(delta: float) -> void:
 	if diving or _arm_l == null or on_bench or excluded:
 		return
 	# Wave 2/3 throw / fake / GK craft owns the arms while active.
@@ -2515,31 +2677,43 @@ func _update_arm_pose(_delta: float) -> void:
 		return
 	if is_goalkeeper and gk_stance != GkMotion.Stance.IDLE:
 		return
+	var blend := 1.0 - exp(-14.0 * delta)
 	if not is_goalkeeper and block_ready:
-		_arm_l.position = Vector3(-0.50, 1.48, 0.22)
-		_arm_r.position = Vector3(0.50, 1.48, 0.22)
-		_arm_l.rotation_degrees = Vector3(-35, 0, 0)
-		_arm_r.rotation_degrees = Vector3(-35, 0, 0)
+		_arm_l.position = _arm_l.position.lerp(Vector3(-0.50, 1.48, 0.22), blend)
+		_arm_r.position = _arm_r.position.lerp(Vector3(0.50, 1.48, 0.22), blend)
+		_arm_l.rotation_degrees = _arm_l.rotation_degrees.lerp(Vector3(-55, 0, 12), blend)
+		_arm_r.rotation_degrees = _arm_r.rotation_degrees.lerp(Vector3(-55, 0, -12), blend)
 		if _hand_l and _hand_r:
-			_hand_l.position = Vector3(-0.55, 1.62, 0.38)
-			_hand_r.position = Vector3(0.55, 1.62, 0.38)
-	elif not is_goalkeeper and not block_ready:
-		# Jog swing may own rotation; keep rest positions when idle path resets.
-		pass
+			_hand_l.position = _hand_l.position.lerp(Vector3(-0.55, 1.62, 0.38), blend)
+			_hand_r.position = _hand_r.position.lerp(Vector3(0.55, 1.62, 0.38), blend)
+		_elbow_l_deg = lerpf(_elbow_l_deg, 35.0, blend)
+		_elbow_r_deg = lerpf(_elbow_r_deg, 35.0, blend)
+		_place_forearms_and_knees(blend)
+	elif not is_goalkeeper and has_ball and not dribbling:
+		# Holding: soft ready hands so arms aren't locked at rest.
+		_arm_l.position = _arm_l.position.lerp(Vector3(-0.38, 1.28, 0.08), blend)
+		_arm_r.position = _arm_r.position.lerp(Vector3(0.42, 1.34, 0.06), blend)
+		_arm_l.rotation_degrees = _arm_l.rotation_degrees.lerp(Vector3(-18, 0, 8), blend)
+		_arm_r.rotation_degrees = _arm_r.rotation_degrees.lerp(Vector3(-28, 8, -10), blend)
+		if _hand_l and _hand_r:
+			_hand_l.position = _hand_l.position.lerp(Vector3(-0.48, 1.22, 0.16), blend)
+			_hand_r.position = _hand_r.position.lerp(Vector3(0.55, 1.28, 0.14), blend)
+		_elbow_l_deg = lerpf(_elbow_l_deg, 28.0, blend)
+		_elbow_r_deg = lerpf(_elbow_r_deg, 42.0, blend)
+		_place_forearms_and_knees(blend)
 
 
-## Rim highlight so the controlled athlete is obvious among teammates.
+## Soft kit rim so the controlled athlete is obvious without glowing like a robot.
 func set_selection_highlight(active: bool) -> void:
 	if _body_mat == null:
 		return
 	if active:
 		_body_mat.emission_enabled = true
-		_body_mat.emission = body_color.lightened(0.35)
-		_body_mat.emission_energy_multiplier = 0.85
+		_body_mat.emission = body_color.lightened(0.18)
+		_body_mat.emission_energy_multiplier = 0.28
 	else:
-		_body_mat.emission_enabled = true
-		_body_mat.emission = body_color.darkened(0.2)
-		_body_mat.emission_energy_multiplier = 0.12 if is_goalkeeper else 0.05
+		_body_mat.emission_enabled = false
+		_body_mat.emission_energy_multiplier = 0.0
 
 
 ## Human pad for control indicator: 0=CPU (hidden), 1=P1, 2=P2.
@@ -2647,30 +2821,27 @@ func _apply_team_material() -> void:
 	_cache_body_refs()
 	if _mesh == null:
 		return
+	# Kit torso — matte fabric, no robot glow.
 	_body_mat = StandardMaterial3D.new()
 	_body_mat.albedo_color = body_color
-	_body_mat.roughness = 0.48
-	_body_mat.metallic = 0.08
-	_body_mat.emission_enabled = true
-	_body_mat.emission = body_color.darkened(0.25)
-	_body_mat.emission_energy_multiplier = 0.12 if is_goalkeeper else 0.05
+	_body_mat.roughness = 0.62
+	_body_mat.metallic = 0.0
+	_body_mat.emission_enabled = false
 	_mesh.material_override = _body_mat
 
 	_skin_mat = StandardMaterial3D.new()
-	_skin_mat.albedo_color = Color(0.72, 0.52, 0.38)
-	_skin_mat.roughness = 0.7
-	if _head:
-		_head.material_override = _skin_mat
+	_skin_mat.albedo_color = Color(0.82, 0.62, 0.48)
+	_skin_mat.roughness = 0.74
+	_skin_mat.emission_enabled = false
+	for part in [_arm_l, _arm_r, _forearm_l, _forearm_r, _hand_l, _hand_r, _head]:
+		if part:
+			part.material_override = _skin_mat
 	if _face_plate:
 		var face_mat := StandardMaterial3D.new()
 		# Darker plate so face orientation reads from the 3/4 camera.
 		face_mat.albedo_color = Color(0.45, 0.28, 0.20)
 		face_mat.roughness = 0.65
 		_face_plate.material_override = face_mat
-	if _hand_l:
-		_hand_l.material_override = _skin_mat
-	if _hand_r:
-		_hand_r.material_override = _skin_mat
 
 	# Hair uses its own material — never kit color (R1.1).
 	_hair_mat = StandardMaterial3D.new()
@@ -2688,14 +2859,6 @@ func _apply_team_material() -> void:
 	elif _hair:
 		_hair.visible = false
 
-	var arm_mat := StandardMaterial3D.new()
-	arm_mat.albedo_color = body_color.lightened(0.12 if is_goalkeeper else 0.05)
-	arm_mat.roughness = 0.5
-	if _arm_l:
-		_arm_l.material_override = arm_mat
-	if _arm_r:
-		_arm_r.material_override = arm_mat
-
 	var stripe := _upper_body.get_node_or_null("ChestStripe") as MeshInstance3D if _upper_body else null
 	if stripe:
 		var stripe_mat := StandardMaterial3D.new()
@@ -2703,22 +2866,26 @@ func _apply_team_material() -> void:
 		stripe_mat.roughness = 0.55
 		stripe.material_override = stripe_mat
 
+	# Kit sleeves on shoulders; socks darker kit.
+	var sleeve_mat := StandardMaterial3D.new()
+	sleeve_mat.albedo_color = body_color.lightened(0.06)
+	sleeve_mat.roughness = 0.58
+	for shoulder_name in ["ShoulderL", "ShoulderR"]:
+		var sh := _upper_body.get_node_or_null(shoulder_name) as MeshInstance3D if _upper_body else null
+		if sh:
+			sh.material_override = sleeve_mat
 	var sock_mat := StandardMaterial3D.new()
 	sock_mat.albedo_color = body_color.darkened(0.35)
 	sock_mat.roughness = 0.7
-	for sock_name in ["SockL", "SockR", "ShoulderL", "ShoulderR", "ThighL", "ThighR"]:
+	for sock_name in ["SockL", "SockR"]:
 		var sock := find_child(sock_name, true, false) as MeshInstance3D
 		if sock:
 			sock.material_override = sock_mat
-	# Thighs use kit (shorts); socks darker — retint thighs to kit.
+	# Thighs = kit shorts.
 	for thigh_name in ["ThighL", "ThighR"]:
 		var thigh := find_child(thigh_name, true, false) as MeshInstance3D
 		if thigh and _body_mat:
 			thigh.material_override = _body_mat
-	for shoulder_name in ["ShoulderL", "ShoulderR"]:
-		var sh := _upper_body.get_node_or_null(shoulder_name) as MeshInstance3D if _upper_body else null
-		if sh:
-			sh.material_override = sock_mat
 
 	_shoe_mat_l = StandardMaterial3D.new()
 	_shoe_mat_l.albedo_color = FREE_SHOE
@@ -2828,15 +2995,14 @@ func _update_locomotion_anim(delta: float, speed: float) -> void:
 		return
 	if is_goalkeeper and gk_stance != GkMotion.Stance.IDLE:
 		return
-	# Holding without dribble: pivot plant pose owns legs (R1.6 teaching).
-	if has_ball and not dribbling and pivot_foot != PIVOT_NONE and not is_goalkeeper:
-		return
+	# Holding without dribble: pivot plant owns legs, but still swing free arm lightly.
+	var pivot_hold := has_ball and not dribbling and pivot_foot != PIVOT_NONE and not is_goalkeeper
 
 	var blend := 1.0 - exp(-12.0 * delta)
 	# Near-floor counts as grounded so headless / teleport frames still jog.
 	var grounded := is_on_floor() or (global_position.y < 0.2 and velocity.y <= 0.8)
-	if grounded and speed > 0.8:
-		# Slight jog — opposite arm/leg swing (R2.8 lite).
+	if grounded and speed > 0.8 and not pivot_hold:
+		# Readable jog — opposite arm/leg swing + elbow/knee bend (R2.8).
 		_bob_phase += delta * BOB_SPEED * clampf(speed / SPEED, 0.45, 1.25)
 		var swing := sin(_bob_phase)
 		if _upper_body:
@@ -2844,12 +3010,20 @@ func _update_locomotion_anim(delta: float, speed: float) -> void:
 		if _leg_l and _leg_r and not block_ready:
 			_leg_l.rotation.x = lerpf(_leg_l.rotation.x, swing * JOG_LEG_SWING, blend)
 			_leg_r.rotation.x = lerpf(_leg_r.rotation.x, -swing * JOG_LEG_SWING, blend)
+			_knee_l_deg = lerpf(_knee_l_deg, 12.0 + maxf(0.0, -swing) * JOG_KNEE_DEG, blend)
+			_knee_r_deg = lerpf(_knee_r_deg, 12.0 + maxf(0.0, swing) * JOG_KNEE_DEG, blend)
 		if _arm_l and _arm_r and not block_ready and not is_goalkeeper:
-			_arm_l.rotation.x = lerpf(_arm_l.rotation.x, -swing * JOG_ARM_SWING, blend)
-			_arm_r.rotation.x = lerpf(_arm_r.rotation.x, swing * JOG_ARM_SWING, blend)
+			# Drive rotation_degrees so it doesn't fight throw pose degrees API.
+			var l_deg := Vector3(rad_to_deg(-swing * JOG_ARM_SWING), 0.0, 8.0)
+			var r_deg := Vector3(rad_to_deg(swing * JOG_ARM_SWING), 0.0, -8.0)
+			_arm_l.rotation_degrees = _arm_l.rotation_degrees.lerp(l_deg, blend)
+			_arm_r.rotation_degrees = _arm_r.rotation_degrees.lerp(r_deg, blend)
+			_elbow_l_deg = lerpf(_elbow_l_deg, 18.0 + maxf(0.0, swing) * JOG_ELBOW_DEG, blend)
+			_elbow_r_deg = lerpf(_elbow_r_deg, 18.0 + maxf(0.0, -swing) * JOG_ELBOW_DEG, blend)
 			_pose_hands_from_arms()
-	elif grounded:
-		# Idle breathe — tiny vertical settle.
+			_place_forearms_and_knees(blend)
+	elif grounded and not pivot_hold:
+		# Idle breathe — soft settle, keep a slight elbow bend (not rigid sticks).
 		_idle_phase += delta * 2.4
 		var breathe := sin(_idle_phase) * IDLE_BREATHE
 		if _upper_body:
@@ -2857,11 +3031,22 @@ func _update_locomotion_anim(delta: float, speed: float) -> void:
 		if _leg_l and _leg_r:
 			_leg_l.rotation.x = lerpf(_leg_l.rotation.x, 0.0, blend)
 			_leg_r.rotation.x = lerpf(_leg_r.rotation.x, 0.0, blend)
-		if _arm_l and _arm_r and not block_ready and not diving:
-			_arm_l.rotation.x = lerpf(_arm_l.rotation.x, 0.0, blend)
-			_arm_r.rotation.x = lerpf(_arm_r.rotation.x, 0.0, blend)
-			if not is_goalkeeper:
-				_pose_arms_rest()
+			_knee_l_deg = lerpf(_knee_l_deg, 8.0, blend)
+			_knee_r_deg = lerpf(_knee_r_deg, 8.0, blend)
+		if _arm_l and _arm_r and not block_ready and not diving and not is_goalkeeper and not has_ball:
+			_arm_l.rotation_degrees = _arm_l.rotation_degrees.lerp(Vector3.ZERO, blend)
+			_arm_r.rotation_degrees = _arm_r.rotation_degrees.lerp(Vector3.ZERO, blend)
+			_elbow_l_deg = lerpf(_elbow_l_deg, 12.0, blend)
+			_elbow_r_deg = lerpf(_elbow_r_deg, 12.0, blend)
+			# Soft position settle without hard-snapping every frame.
+			_arm_l.position = _arm_l.position.lerp(Vector3(-0.40, 1.22, 0.02), blend)
+			_arm_r.position = _arm_r.position.lerp(Vector3(0.40, 1.22, 0.02), blend)
+			if _hand_l and _hand_r:
+				_hand_l.position = _hand_l.position.lerp(Vector3(-0.58, 1.12, 0.08), blend)
+				_hand_r.position = _hand_r.position.lerp(Vector3(0.58, 1.12, 0.08), blend)
+			_place_forearms_and_knees(blend)
+	elif grounded and pivot_hold and _shin_l:
+		_place_forearms_and_knees(blend)
 
 
 ## Pivot foot planted vs free foot lifted / swinging while holding (R1.6 / R1.7).
@@ -2999,6 +3184,11 @@ func _update_pivot_ring(_delta: float) -> void:
 func _pose_hands_from_arms() -> void:
 	if _hand_l == null or _hand_r == null or _arm_l == null or _arm_r == null:
 		return
-	# Hands track roughly past the forearm tips while jogging.
-	_hand_l.position = _arm_l.position + Vector3(-0.18, -0.08, 0.06)
-	_hand_r.position = _arm_r.position + Vector3(0.18, -0.08, 0.06)
+	# Hands track past the forearm tips while jogging (readable arm swing).
+	var l_off := Vector3(-0.22, -0.14, 0.10)
+	var r_off := Vector3(0.22, -0.14, 0.10)
+	# Swing offsets so hands follow the pitched upper arm.
+	l_off.z += sin(deg_to_rad(_arm_l.rotation_degrees.x)) * 0.12
+	r_off.z += sin(deg_to_rad(_arm_r.rotation_degrees.x)) * 0.12
+	_hand_l.position = _arm_l.position + l_off
+	_hand_r.position = _arm_r.position + r_off

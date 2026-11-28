@@ -26,16 +26,16 @@ enum Phase {
 }
 
 ## Standing / moving pass — windup → release → follow (weightier gather / follow-through).
-const PASS_WINDUP_S := 0.14
-const PASS_RELEASE_S := 0.08
-const PASS_FOLLOW_S := 0.32
+const PASS_WINDUP_S := 0.18
+const PASS_RELEASE_S := 0.10
+const PASS_FOLLOW_S := 0.36
 
-## Grounded shot release after charge.
-const SHOT_RELEASE_S := 0.11
-const SHOT_FOLLOW_S := 0.38
+## Grounded / jump shot release after charge — longer so charge + snap read clearly.
+const SHOT_RELEASE_S := 0.18
+const SHOT_FOLLOW_S := 0.46
 
 ## Jump pass / jump shot land settle.
-const LAND_S := 0.28
+const LAND_S := 0.32
 
 ## Wing corridor: wide X near the attacking goal-area.
 const WING_X_MIN := 5.4
@@ -157,6 +157,7 @@ static func wing_aim_assist(body: CharacterBody3D, aim: Vector3) -> Vector3:
 
 
 ## Rest arms (matches Player._pose_arms_rest outfield).
+## Elbow / knee degrees bend joints on the articulated chain (0 = straight).
 static func pose_rest() -> Dictionary:
 	return {
 		"arm_l_pos": Vector3(-0.40, 1.22, 0.02),
@@ -165,6 +166,12 @@ static func pose_rest() -> Dictionary:
 		"arm_r_rot": Vector3(0, 0, 0),
 		"hand_l_pos": Vector3(-0.58, 1.12, 0.08),
 		"hand_r_pos": Vector3(0.58, 1.12, 0.08),
+		"elbow_l": 12.0,
+		"elbow_r": 12.0,
+		"knee_l": 8.0,
+		"knee_r": 8.0,
+		"ankle_l": 0.0,
+		"ankle_r": 0.0,
 		"torso_yaw": 0.0,
 		"torso_pitch": 0.0,
 		"leg_l_x": 0.0,
@@ -177,6 +184,10 @@ static func pose_pass_windup(pass_type: int, torso_yaw: float) -> Dictionary:
 	var p := pose_rest()
 	p["torso_yaw"] = torso_yaw
 	p["torso_pitch"] = -0.06
+	p["elbow_r"] = 55.0
+	p["elbow_l"] = 28.0
+	p["knee_l"] = 18.0
+	p["knee_r"] = 22.0
 	# Cock throwing arm behind the ear; left hand guides.
 	match pass_type:
 		_PASS_LOB:
@@ -186,6 +197,7 @@ static func pose_pass_windup(pass_type: int, torso_yaw: float) -> Dictionary:
 			p["arm_l_pos"] = Vector3(-0.42, 1.35, 0.18)
 			p["arm_l_rot"] = Vector3(-40, -10, 15)
 			p["hand_l_pos"] = Vector3(-0.48, 1.48, 0.32)
+			p["elbow_r"] = 70.0
 		_PASS_BOUNCE:
 			p["arm_r_pos"] = Vector3(0.48, 1.28, -0.18)
 			p["arm_r_rot"] = Vector3(-55, 20, -20)
@@ -194,6 +206,7 @@ static func pose_pass_windup(pass_type: int, torso_yaw: float) -> Dictionary:
 			p["arm_l_rot"] = Vector3(-25, 0, 10)
 			p["hand_l_pos"] = Vector3(-0.45, 1.05, 0.22)
 			p["torso_pitch"] = 0.08
+			p["elbow_r"] = 45.0
 		_:
 			# Flat
 			p["arm_r_pos"] = Vector3(0.50, 1.42, -0.20)
@@ -209,6 +222,10 @@ static func pose_pass_release(pass_type: int, torso_yaw: float) -> Dictionary:
 	var p := pose_rest()
 	p["torso_yaw"] = torso_yaw * 0.85
 	p["torso_pitch"] = -0.02
+	p["elbow_r"] = 18.0
+	p["elbow_l"] = 22.0
+	p["knee_l"] = 14.0
+	p["knee_r"] = 16.0
 	match pass_type:
 		_PASS_LOB:
 			p["arm_r_pos"] = Vector3(0.38, 1.62, 0.28)
@@ -256,12 +273,17 @@ static func pose_shot_charge(charge: float, lob: bool, torso_yaw: float, wing: b
 	var p := pose_rest()
 	p["torso_yaw"] = torso_yaw
 	p["torso_pitch"] = lerpf(0.0, -0.10, t)
+	p["elbow_r"] = lerpf(28.0, 78.0, t)
+	p["elbow_l"] = lerpf(16.0, 42.0, t)
+	p["knee_l"] = lerpf(10.0, 28.0, t)
+	p["knee_r"] = lerpf(12.0, 32.0, t)
 	var cock_y := lerpf(1.32, 1.58, t)
 	var cock_z := lerpf(-0.08, -0.28, t)
 	if lob:
 		cock_y = lerpf(1.40, 1.72, t)
 		cock_z = lerpf(-0.12, -0.34, t)
 		p["arm_r_rot"] = Vector3(lerpf(-40, -105, t), lerpf(10, 28, t), lerpf(-12, -40, t))
+		p["elbow_r"] = lerpf(35.0, 88.0, t)
 	else:
 		p["arm_r_rot"] = Vector3(lerpf(-30, -88, t), lerpf(8, 24, t), lerpf(-10, -32, t))
 	p["arm_r_pos"] = Vector3(lerpf(0.42, 0.55, t), cock_y, cock_z)
@@ -285,6 +307,10 @@ static func pose_shot_charge(charge: float, lob: bool, torso_yaw: float, wing: b
 static func pose_shot_release(lob: bool, torso_yaw: float, wing: bool, jump: bool) -> Dictionary:
 	var p := pose_rest()
 	p["torso_yaw"] = torso_yaw * 0.9
+	p["elbow_r"] = 12.0
+	p["elbow_l"] = 28.0
+	p["knee_l"] = 35.0 if jump else 16.0
+	p["knee_r"] = 42.0 if jump else 18.0
 	if lob:
 		p["arm_r_pos"] = Vector3(0.32, 1.72, 0.35)
 		p["arm_r_rot"] = Vector3(-125, -8, -5)
@@ -375,6 +401,10 @@ static func pose_jump_air(torso_yaw: float, window: bool, for_pass: bool) -> Dic
 	p["upper_y_off"] = 0.0
 	p["leg_l_x"] = -0.65
 	p["leg_r_x"] = 0.45
+	p["elbow_r"] = 72.0 if window else 58.0
+	p["elbow_l"] = 36.0
+	p["knee_l"] = 55.0
+	p["knee_r"] = 48.0
 	if for_pass:
 		p["arm_r_pos"] = Vector3(0.50, 1.50, -0.18)
 		p["arm_r_rot"] = Vector3(-70, 20, -25)

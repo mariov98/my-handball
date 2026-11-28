@@ -5635,6 +5635,221 @@ func _ready() -> void:
 		return
 	print("Smoke feel + control indicator OK")
 
+	# --- Playtest polish: arms / shoot feel / GK outlet / pass help / humans ---
+	_smoke_prepare_live(match_node, ball)
+	_smoke_clear_ball(ball)
+	var pt_player: Player = null
+	for p in match_node._home_players:
+		if not p.is_goalkeeper and not p.on_bench and not p.excluded:
+			pt_player = p
+			break
+	if pt_player == null:
+		push_error("Smoke playtest: missing Home outfielder")
+		get_tree().quit(1)
+		return
+	match_node._set_controlled(pt_player)
+	# Longer charge / release so shoot isn't arcade-snap.
+	if ShotCraft.CHARGE_TIME_S < 0.8:
+		push_error("Smoke playtest: CHARGE_TIME_S should be lengthened (got %.2f)" % ShotCraft.CHARGE_TIME_S)
+		get_tree().quit(1)
+		return
+	if ThrowMotion.SHOT_RELEASE_S < 0.15 or ThrowMotion.SHOT_FOLLOW_S < 0.42:
+		push_error("Smoke playtest: shot release/follow should be longer")
+		get_tree().quit(1)
+		return
+	# Articulated forearms exist; jog drives arm rotation_degrees.
+	var forearm_r := pt_player.find_child("ForearmR", true, false) as MeshInstance3D
+	var forearm_l := pt_player.find_child("ForearmL", true, false) as MeshInstance3D
+	if forearm_r == null or forearm_l == null:
+		push_error("Smoke playtest: ForearmL/R articulations missing")
+		get_tree().quit(1)
+		return
+	pt_player.velocity = Vector3(0.0, 0.0, 5.5)
+	pt_player._update_locomotion_anim(0.05, 6.0)
+	pt_player._update_locomotion_anim(0.05, 6.0)
+	var arm_r := pt_player.find_child("ArmR", true, false) as MeshInstance3D
+	if arm_r == null or absf(arm_r.rotation_degrees.x) < 2.0:
+		# Force a known swing phase.
+		pt_player._bob_phase = PI * 0.5
+		pt_player._update_locomotion_anim(0.08, 7.0)
+	if arm_r == null or absf(arm_r.rotation_degrees.x) < 2.0:
+		push_error("Smoke playtest: jog should drive ArmR rotation (got %.2f)" % (arm_r.rotation_degrees.x if arm_r else 0.0))
+		get_tree().quit(1)
+		return
+	# Pass / shoot charge visibly cocks the arm every frame.
+	pt_player.velocity = Vector3.ZERO
+	pt_player.has_ball = true
+	ball.try_pickup(pt_player)
+	pt_player.set_shot_charge_motion(0.85, false, Vector3(0, 0.1, 1))
+	pt_player._apply_throw_pose(0.05)
+	pt_player._apply_throw_pose(0.05)
+	if absf(arm_r.rotation_degrees.x) < 20.0:
+		push_error("Smoke playtest: charge pose should cock ArmR (got %.2f)" % arm_r.rotation_degrees.x)
+		get_tree().quit(1)
+		return
+	if absf(pt_player._elbow_r_deg) < 30.0:
+		push_error("Smoke playtest: charge should bend elbow (got %.1f)" % pt_player._elbow_r_deg)
+		get_tree().quit(1)
+		return
+	# Jump-shot aim-in-air: shoot cam + crosshair while airborne jump craft.
+	pt_player.jump_shot_active = true
+	pt_player.jump_shot_phase = ShotCraft.JumpPhase.WINDOW
+	pt_player.jump_shot_air_s = 0.4
+	pt_player.global_position.y = 0.85
+	match_node._charging = true
+	match_node._charge_held_s = ShotCraft.CHARGE_TIME_S * 0.7
+	match_node._shoot_goal_aim_active = true
+	match_node._seed_shoot_goal_aim()
+	match_node._update_shoot_cam_and_crosshair()
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	if cam == null or not cam.is_shoot_cam_active():
+		push_error("Smoke playtest: shoot cam should stay up during airborne jump aim")
+		get_tree().quit(1)
+		return
+	# Jump-shot slow-mo respects wing_cinematic_enabled pref.
+	cam.wing_cinematic_enabled = true
+	cam.trigger_jump_shot_slowmo()
+	if not cam.is_jump_shot_slowmo_active():
+		push_error("Smoke playtest: jump-shot slow-mo should arm when spectacle prefs on")
+		get_tree().quit(1)
+		return
+	cam.end_jump_shot_slowmo(true)
+	cam.wing_cinematic_enabled = false
+	cam.trigger_jump_shot_slowmo()
+	if cam.is_jump_shot_slowmo_active():
+		push_error("Smoke playtest: jump-shot slow-mo must respect spectacle toggle off")
+		get_tree().quit(1)
+		return
+	cam.wing_cinematic_enabled = true
+	match_node._charging = false
+	match_node._end_shoot_cam_presentation(0.0)
+	pt_player.jump_shot_active = false
+	pt_player.jump_shot_phase = ShotCraft.JumpPhase.NONE
+	pt_player.global_position.y = 0.0
+	# Away GK: after catch, no spin lock + forced outlet within timeout.
+	_smoke_clear_ball(ball)
+	var pt_away_gk: Player = null
+	for p in match_node._away_players:
+		if p.is_goalkeeper and not p.on_bench:
+			pt_away_gk = p
+			break
+	if pt_away_gk == null:
+		push_error("Smoke playtest: missing Away GK")
+		get_tree().quit(1)
+		return
+	pt_away_gk.ai_enabled = true
+	pt_away_gk.controlled = false
+	pt_away_gk.match_frozen = false
+	pt_away_gk.global_position = pt_away_gk.start_position
+	pt_away_gk.rotation.y = PI
+	# Unfreeze Away wings so outlet targeting can pick them.
+	for p in match_node._away_players:
+		if not p.is_goalkeeper and not p.on_bench and not p.excluded:
+			p.match_frozen = false
+			p.ai_enabled = true
+	var yaw0 := pt_away_gk.rotation.y
+	ball.last_shot_meta = {"shooter": pt_player}
+	ball.global_position = pt_away_gk.global_position + Vector3(0.0, 1.0, 0.2)
+	if not ball.try_pickup(pt_away_gk):
+		push_error("Smoke playtest: Away GK pickup failed")
+		get_tree().quit(1)
+		return
+	pt_away_gk.has_ball = true
+	pt_away_gk.arm_outlet_pass()
+	# Hold outlet timer so we can assert no spin lock before the pass fires.
+	pt_away_gk._outlet_timer = 9.0
+	pt_away_gk._outlet_hold_t = 0.0
+	# Simulate idle frames while holding — yaw must not spin wildly.
+	for _si in range(16):
+		pt_away_gk.velocity = Vector3.ZERO
+		# Face tick only (ball attached) — mirror the hold branch without AI wish noise.
+		var outlet_face := pt_away_gk._gk_outlet_face_dir()
+		var out_yaw := atan2(outlet_face.x, outlet_face.z)
+		pt_away_gk.rotation.y = lerp_angle(pt_away_gk.rotation.y, out_yaw, 1.0 - exp(-10.0 * 0.05))
+	var yaw_delta := absf(angle_difference(yaw0, pt_away_gk.rotation.y))
+	if yaw_delta > 2.0:
+		push_error("Smoke playtest: Away GK spun too far while holding (Δ=%.2f)" % yaw_delta)
+		get_tree().quit(1)
+		return
+	# Looking at attached ball must NOT be the face target (spin-lock regression).
+	var ball_look := ball.global_position - pt_away_gk.global_position
+	ball_look.y = 0.0
+	var face_now := pt_away_gk._gk_outlet_face_dir()
+	if ball_look.length_squared() > 0.01 and face_now.normalized().dot(ball_look.normalized()) > 0.98:
+		# Only fail if face is essentially the ball offset (classic spin lock).
+		if absf(ball.global_position.x - pt_away_gk.global_position.x) > 0.05:
+			push_error("Smoke playtest: GK face should not track attached ball")
+			get_tree().quit(1)
+			return
+	# Force outlet within max hold.
+	pt_away_gk._outlet_timer = 0.0
+	pt_away_gk._outlet_cd = 0.0
+	pt_away_gk._ai_pass_cd = 0.0
+	pt_away_gk._outlet_hold_t = Player.GK_OUTLET_MAX_HOLD_S
+	pt_away_gk._tick_gk_outlet(0.05)
+	if ball.carrier == pt_away_gk and pt_away_gk._outlet_pending:
+		# One more force clear attempt.
+		pt_away_gk._gk_force_clear_throw()
+	if ball.carrier == pt_away_gk:
+		push_error("Smoke playtest: Away GK must outlet/clear after save timeout")
+		get_tree().quit(1)
+		return
+	# Pass binding discoverable in help + HUD.
+	if not InputMap.has_action("pass_ball") or InputMap.action_get_events("pass_ball").is_empty():
+		push_error("Smoke playtest: pass_ball must stay bound")
+		get_tree().quit(1)
+		return
+	var pass_sum := InputSettings.pass_binding_summary()
+	if pass_sum.is_empty() or not (pass_sum.contains("G") or pass_sum.contains("RMB") or pass_sum.contains("RB")):
+		push_error("Smoke playtest: pass binding summary missing (%s)" % pass_sum)
+		get_tree().quit(1)
+		return
+	var help := "\n".join(InputSettings.help_lines())
+	if not help.contains("PASS"):
+		push_error("Smoke playtest: Esc/F1 help must surface PASS")
+		get_tree().quit(1)
+		return
+	match_node._open_help_menu()
+	await get_tree().process_frame
+	var overlay := match_node._help_overlay_text()
+	if not overlay.contains("PASS"):
+		push_error("Smoke playtest: help overlay must call out PASS")
+		get_tree().quit(1)
+		return
+	match_node._close_help_menu()
+	var pt_hud := match_node.hud
+	if pt_hud and pt_hud.has_method("set_pass_hint"):
+		pt_hud.set_pass_hint(true, PassCraft.PassType.FLAT)
+		if pt_hud.shot_label == null or not pt_hud.shot_label.text.begins_with("PASS"):
+			push_error("Smoke playtest: HUD pass hint missing")
+			get_tree().quit(1)
+			return
+		pt_hud.set_pass_hint(false)
+	if pt_hud and pt_hud.help_label and not pt_hud.help_label.text.contains("PASS"):
+		push_error("Smoke playtest: persistent HUD strip should mention PASS")
+		get_tree().quit(1)
+		return
+	# Skin limbs (not glowing kit capsules) + no emission on uncontrolled kit.
+	if pt_player._body_mat and pt_player._body_mat.emission_enabled and pt_player._body_mat.emission_energy_multiplier > 0.35:
+		push_error("Smoke playtest: uncontrolled kit should not glow like a robot")
+		get_tree().quit(1)
+		return
+	if pt_player._skin_mat == null:
+		push_error("Smoke playtest: skin material missing on limbs")
+		get_tree().quit(1)
+		return
+	print(
+		"Smoke playtest polish OK charge=",
+		ShotCraft.CHARGE_TIME_S,
+		" forearm=",
+		forearm_r != null,
+		" pass=",
+		pass_sum,
+		" gk_clear=",
+		ball.carrier == null
+	)
+
 	print("SMOKE_OK")
 	get_tree().quit(0)
 

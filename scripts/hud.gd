@@ -63,7 +63,7 @@ func _ready() -> void:
 	if power_bar:
 		power_bar.visible = false
 		power_bar.value = 0.0
-	help_label.text = "Esc/F1 help+remap · WASD · Shift sprint · Space jump · V dribble · LMB/E shoot · RMB/G PASS · ,/. sub (GK ok) · Q cycle"
+	help_label.text = "PASS: RMB/G/RB · Esc/F1 help · WASD · Shift sprint · Space jump · V dribble · LMB/E/RT shoot · ,/. sub · Q cycle"
 	_ensure_flash_overlay()
 	_ensure_hold_label()
 	_ensure_shapes_label()
@@ -252,7 +252,8 @@ func set_pass_hint(visible_now: bool, pass_type: int = 0) -> void:
 			return
 	shot_label.visible = true
 	var type_name := PassCraft.pass_type_name(pass_type)
-	shot_label.text = "PASS · %s · RMB/G/RB" % type_name
+	var bind := InputSettings.pass_binding_summary()
+	shot_label.text = "PASS · %s · %s" % [type_name, bind]
 	match pass_type:
 		PassCraft.PassType.BOUNCE:
 			shot_label.add_theme_color_override("font_color", Color(0.95, 0.82, 0.55, 1.0))

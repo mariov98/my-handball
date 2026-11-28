@@ -79,12 +79,46 @@ static func action_has_key(action: String, code: Key) -> bool:
 	return false
 
 
+## Human-readable PASS bindings (keyboard + mouse + pad) for HUD / help.
+static func pass_binding_summary() -> String:
+	if not InputMap.has_action("pass_ball"):
+		return "RMB / G / RB"
+	var bits: PackedStringArray = []
+	var seen: Dictionary = {}
+	for ev in InputMap.action_get_events("pass_ball"):
+		var label := ""
+		if ev is InputEventKey:
+			var k := ev as InputEventKey
+			var code := k.physical_keycode if k.physical_keycode != KEY_NONE else k.keycode
+			label = OS.get_keycode_string(code)
+		elif ev is InputEventMouseButton:
+			var mb := ev as InputEventMouseButton
+			match mb.button_index:
+				MOUSE_BUTTON_RIGHT:
+					label = "RMB"
+				MOUSE_BUTTON_LEFT:
+					label = "LMB"
+				_:
+					label = "Mouse%d" % mb.button_index
+		elif ev is InputEventJoypadButton:
+			var jb := ev as InputEventJoypadButton
+			# JoyButton 10 = RB on Xbox-style pads in Godot's common mapping.
+			label = "RB" if jb.button_index == JOY_BUTTON_RIGHT_SHOULDER else "PadBtn%d" % jb.button_index
+		if not label.is_empty() and not seen.has(label):
+			seen[label] = true
+			bits.append(label)
+	if bits.is_empty():
+		return "RMB / G / RB"
+	return " / ".join(bits)
+
+
 static func help_lines() -> PackedStringArray:
 	var lines: PackedStringArray = []
 	lines.append("Esc / F1 — help & remap · Enter rebind · R reset selected · Esc close")
-	lines.append("Move WASD · Sprint Shift · Jump Space · Dribble V · Shoot LMB/E · Pass RMB/G")
-	lines.append("Lob F · Bounce B · Dive/Fake C/X · Pass fake Z · Jab N · Cycle Q · Best R")
-	lines.append("Shapes 1/2 · Sub ,/. on whistle · Wing cam 4 · Camera [ ] - = PgUp/PgDn Home")
+	lines.append("★★ PASS = %s  (instant; cancels shoot; never fires a shot)" % pass_binding_summary())
+	lines.append("Move WASD · Sprint Shift · Jump Space · Dribble V · Shoot LMB/E/RT")
+	lines.append("Pass bounce B · Pass lob F · Dive/Fake C/X · Pass fake Z · Jab N · Cycle Q · Best R")
+	lines.append("Shapes 1/2 · Sub ,/. on whistle · Spectacle cam 4 · Camera [ ] - = PgUp/PgDn Home")
 	lines.append("Mode: Esc menu → Season / Training / Hotseat · GK sub when controlling GK")
 	return lines
 
